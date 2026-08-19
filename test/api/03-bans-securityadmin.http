@@ -1,0 +1,16 @@
+# ========================================
+# ===== BANS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+
+### 获取当前登录封禁记录
+GET {{addr}}/api/admin/security/bans
+Authorization: Bearer {{accessToken}}
+
+### 手动解除某条登录封禁记录
+DELETE {{addr}}/api/admin/security/bans/127.0.0.1
+Authorization: Bearer {{accessToken}}
+
+### 清除所有登录封禁记录
+DELETE {{addr}}/api/admin/security/bans
+Authorization: Bearer {{accessToken}}

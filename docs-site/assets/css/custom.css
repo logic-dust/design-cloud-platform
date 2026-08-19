@@ -1,0 +1,10 @@
+/* Hide the bottom-left theme toggle in sidebar (redundant with navbar top-right) */
+.hextra-sidebar-container > div:last-child:has(.hextra-theme-toggle) {
+  display: none;
+}
+
+/* 让长标题（如 API 端点路径）在窄视口下换行，避免横向溢出 */
+.content :where(h1, h2, h3, h4, h5, h6) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}

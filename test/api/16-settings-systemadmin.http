@@ -1,0 +1,273 @@
+# ========================================
+# ===== SYSTEM-SETTINGS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录（需要 System Admin 权限） -----
+
+### 按领域获取平台配置
+GET {{addr}}/api/admin/system/settings/platform
+Authorization: Bearer {{accessToken}}
+
+### 按领域获取认证配置
+GET {{addr}}/api/admin/system/settings/auth
+Authorization: Bearer {{accessToken}}
+
+### 按领域获取连接配置
+GET {{addr}}/api/admin/system/settings/connection
+Authorization: Bearer {{accessToken}}
+
+### 按领域获取 Tunnel 配置
+GET {{addr}}/api/admin/system/settings/tunnel
+Authorization: Bearer {{accessToken}}
+
+### 按领域获取文件配置
+GET {{addr}}/api/admin/system/settings/file
+Authorization: Bearer {{accessToken}}
+
+### 按领域获取 Dashboard 配置
+GET {{addr}}/api/admin/system/settings/dashboard
+Authorization: Bearer {{accessToken}}
+
+### 按领域获取共享存储配置
+GET {{addr}}/api/admin/system/settings/storage
+Authorization: Bearer {{accessToken}}
+
+### 按领域获取 Scheduler 配置
+GET {{addr}}/api/admin/system/settings/scheduler
+Authorization: Bearer {{accessToken}}
+
+### 按领域获取 License 配置
+GET {{addr}}/api/admin/system/settings/license
+Authorization: Bearer {{accessToken}}
+
+### 按领域获取 Agent 运行时配置
+GET {{addr}}/api/admin/system/settings/agent
+Authorization: Bearer {{accessToken}}
+
+### 按领域获取 Alert 配置
+GET {{addr}}/api/admin/system/settings/alert
+Authorization: Bearer {{accessToken}}
+
+### 按领域获取桌面配置
+GET {{addr}}/api/admin/system/settings/desktop
+Authorization: Bearer {{accessToken}}
+
+### 按领域获取 Cert 配置
+GET {{addr}}/api/admin/system/settings/cert
+Authorization: Bearer {{accessToken}}
+
+### 全量更新平台配置
+PUT {{addr}}/api/admin/system/settings/platform
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "Design Cloud Platform",
+  "description": "Design and manage HPC clusters in the cloud",
+  "website": {
+    "indexEnabled": true,
+    "dashboardEnabled": true
+  },
+  "disabledModules": [],
+  "supportUrl": ""
+}
+
+### 全量更新连接配置
+PUT {{addr}}/api/admin/system/settings/connection
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "maxConnectionsPerUser": 5
+}
+
+### 全量更新认证配置
+PUT {{addr}}/api/admin/system/settings/auth
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "sessionTTL": 86400,
+  "sessionCleanupInterval": 86400,
+  "maxLoginSessionsPerUser": 10,
+  "maxUserLoginAttempts": 5,
+  "userBanDuration": 300,
+  "maxIPLoginAttempts": 50,
+  "ipBanDuration": 86400,
+  "userSyncInterval": 3600,
+  "ldapWebAdminUrl": ""
+}
+
+### 全量更新 Tunnel 配置
+PUT {{addr}}/api/admin/system/settings/tunnel
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "enabled": true,
+  "vncEnabled": true,
+  "rdpEnabled": true,
+  "sshEnabled": true,
+  "maxTunnels": 0,
+  "maxTunnelsPerUser": 5,
+  "otpTTL": 3600
+}
+
+### 全量更新文件配置
+PUT {{addr}}/api/admin/system/settings/file
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "enabled": true,
+  "downloadEnabled": true,
+  "uploadEnabled": true,
+  "requiresApproval": false,
+  "downloadApprovalTTL": 86400,
+  "uploadMaxSizeBytes": 8589934592,
+  "locations": []
+}
+
+### 配置 shared-data 文件位置
+# ----- 运行前请确保 /tmp/design-cloud-shared 存在，且目标用户可读。 -----
+PUT {{addr}}/api/admin/system/settings/file
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "enabled": true,
+  "downloadEnabled": true,
+  "uploadEnabled": true,
+  "requiresApproval": false,
+  "downloadApprovalTTL": 86400,
+  "uploadMaxSizeBytes": 8589934592,
+  "locations": [
+    {
+      "enabled": true,
+      "name": "shared-data",
+      "root": "/tmp/design-cloud-shared"
+    }
+  ]
+}
+
+### 全量更新 Agent 复合配置（包含 Launcher、VNC 与 Monitor）
+PUT {{addr}}/api/admin/system/settings/agent
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "launcherPath": "/opt/design-cloud/dc-launcher",
+  "vnc": {
+    "binDir": "/opt/TurboVNC/bin",
+    "scanEnabled": true,
+    "scanInterval": 1800,
+    "serverArgs": []
+  },
+  "monitor": {
+    "resourceReportEnabled": true,
+    "resourceReportInterval": 60,
+    "diskMounts": [
+      {
+        "enabled": true,
+        "name": "Root",
+        "path": "/",
+        "os": "linux"
+      }
+    ],
+    "nvidiaSmiPath": "/usr/bin/nvidia-smi"
+  }
+}
+
+### 按领域获取存储配置
+GET {{addr}}/api/admin/system/settings/storage
+Authorization: Bearer {{accessToken}}
+
+### 全量更新存储配置
+PUT {{addr}}/api/admin/system/settings/storage
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "storages": [
+    {
+      "enabled": true,
+      "id": "share",
+      "name": "Cluster NFS",
+      "description": "Shared project storage",
+      "type": "nfs",
+      "mountPoint": "/share",
+      "probeNodes": [
+        "cent7"
+      ]
+    }
+  ],
+  "probeInterval": 3600
+}
+
+### 全量更新 Desktop 配置
+PUT {{addr}}/api/admin/system/settings/desktop
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "releasesEnabled": true,
+  "windowsEnabled": true,
+  "linuxEnabled": true,
+  "macosEnabled": true,
+  "maxAssets": 5
+}
+
+### 获取配置 Domain 列表
+GET {{addr}}/api/admin/system/settings/domains
+Authorization: Bearer {{accessToken}}
+
+### 获取指定配置域的 JSON Schema
+GET {{addr}}/api/admin/system/settings/auth/schema
+Authorization: Bearer {{accessToken}}
+
+### 获取 Connection 配置域的 JSON Schema
+GET {{addr}}/api/admin/system/settings/connection/schema
+Authorization: Bearer {{accessToken}}
+
+### 获取 Agent 配置域的 JSON Schema
+GET {{addr}}/api/admin/system/settings/agent/schema
+Authorization: Bearer {{accessToken}}
+
+### 获取 Storage 配置域的 JSON Schema
+GET {{addr}}/api/admin/system/settings/storage/schema
+Authorization: Bearer {{accessToken}}
+
+### 获取 Platform 配置域的 JSON Schema
+GET {{addr}}/api/admin/system/settings/platform/schema
+Authorization: Bearer {{accessToken}}
+
+### 获取 License 配置域的 JSON Schema
+GET {{addr}}/api/admin/system/settings/license/schema
+Authorization: Bearer {{accessToken}}
+
+### 全量更新 License 配置
+PUT {{addr}}/api/admin/system/settings/license
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "statusCacheTTL": 60,
+  "featuresCacheTTL": 60,
+  "lmutilPath": "/opt/flexnet/bin/lmutil"
+}
+
+### 负向用例：更新 License 配置越界（statusCacheTTL < 30，断言 422）
+PUT {{addr}}/api/admin/system/settings/license
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "statusCacheTTL": 10,
+  "featuresCacheTTL": 60,
+  "lmutilPath": "/opt/flexnet/bin/lmutil"
+}
+
+> {%
+client.test("StatusCacheTTL below min returns 422", function() {
+  client.assert(response.status === 422, "Response status is 422 Unprocessable Entity");
+});
+%}

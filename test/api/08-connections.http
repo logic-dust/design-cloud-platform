@@ -1,0 +1,193 @@
+# ========================================
+# ===== CONNECTIONS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+
+
+
+### 获取当前用户连接列表
+GET {{addr}}/api/connections
+Authorization: Bearer {{accessToken}}
+
+> {%
+
+
+
+if (response.status !== 200) {
+  throw new Error(`Expected 200 for user connection list, got ${response.status}`);
+}
+const connections = response.body?.data;
+if (!Array.isArray(connections)) {
+  throw new Error("Expected connection list response data to be an array");
+}
+client.log(`Verified: user connection list contains ${connections.length} current-user connections`);
+
+
+
+%}
+
+### 获取VNC OTP密码
+POST {{addr}}/api/connections/1/vnc-otp
+Authorization: Bearer {{accessToken}}
+
+> {%
+
+
+
+  if (response.status !== 400) {
+    throw new Error(`Expected 400 for manual VNC OTP request, got ${response.status}`);
+  }
+  client.log('Verified: manual VNC connection cannot generate TurboVNC OTP');
+
+
+
+%}
+
+
+### 创建手工连接VNC
+POST {{addr}}/api/connections
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "alias": "manual-vnc",
+  "protocol": "VNC",
+  "host": "{{host}}",
+  "port": 5901
+}
+
+> {%
+
+
+const payload = response.body;
+if (payload?.data?.id) {
+  client.global.set("testVNCConnectionId", String(payload.data.id));
+  client.global.set("testConnectionId", String(payload.data.id));
+  client.global.set("testVNCConnectionPayload", JSON.stringify(payload.data));
+  client.log(`Stored testVNCConnectionId=${payload.data.id}`);
+  client.log(`Stored testConnectionId=${payload.data.id}`);
+}
+
+
+%}
+
+### 创建手工连接SSH
+POST {{addr}}/api/connections
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "alias": "manual-ssh",
+  "protocol": "SSH",
+  "host": "{{host}}",
+  "port": 22
+}
+
+> {%
+
+
+const payload = response.body;
+if (payload?.data?.id) {
+  client.global.set("testBatchConnectionId", String(payload.data.id));
+  client.log(`Stored testBatchConnectionId=${payload.data.id}`);
+}
+
+
+%}
+
+
+### 创建手工连接RDP
+POST {{addr}}/api/connections
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "alias": "manual-rdp",
+  "protocol": "RDP",
+  "host": "{{host}}",
+  "port": 3389
+}
+
+> {%
+
+
+const payload = response.body;
+if (payload?.data?.id) {
+  client.global.set("testAdminConnectionId", String(payload.data.id));
+  client.log(`Stored testAdminConnectionId=${payload.data.id}`);
+}
+
+
+%}
+
+### 创建手工连接SSH
+POST {{addr}}/api/connections
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "alias": "manual-ssh-admin-batch",
+  "protocol": "SSH",
+  "host": "{{host}}",
+  "port": 22
+}
+
+> {%
+
+
+const payload = response.body;
+if (payload?.data?.id) {
+  client.global.set("testAdminBatchConnectionId", String(payload.data.id));
+  client.log(`Stored testAdminBatchConnectionId=${payload.data.id}`);
+}
+
+
+%}
+
+### 获取连接详情
+GET {{addr}}/api/connections/{{testConnectionId}}
+Authorization: Bearer {{accessToken}}
+
+### 刷新当前用户连接状态
+POST {{addr}}/api/connections/refresh
+Authorization: Bearer {{accessToken}}
+
+### 删除单个连接
+DELETE {{addr}}/api/connections/{{testVNCConnectionId}}
+Authorization: Bearer {{accessToken}}
+
+
+### 批量删除连接
+POST {{addr}}/api/connections/batch-delete
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "ids": [
+    "{{testBatchConnectionId}}"
+  ]
+}
+
+### 用户删除 Fixed 连接应被拒绝 (403)
+# 需先执行 08-system-connections.http 由管理员创建 Fixed 连接并记录 testFixedConnectionId
+DELETE {{addr}}/api/connections/{{testFixedConnectionId}}
+Authorization: Bearer {{accessToken}}
+
+> {%
+  if (response.status !== 403) {
+    throw new Error(`Expected 403 for user deleting fixed connection, got ${response.status}`);
+  }
+  client.log('Verified: user cannot delete fixed connection');
+%}
+
+### 用户启动 Fixed VNC 连接 (需要环境有真实 vncserver)
+POST {{addr}}/api/connections/{{testFixedConnectionId}}/start
+Authorization: Bearer {{accessToken}}
+
+### 用户停止 Fixed VNC 连接 (需要环境有真实 vncserver)
+POST {{addr}}/api/connections/{{testFixedConnectionId}}/stop
+Authorization: Bearer {{accessToken}}
+
+### 用户重启 Fixed VNC 连接 (需要环境有真实 vncserver)
+POST {{addr}}/api/connections/{{testFixedConnectionId}}/restart
+Authorization: Bearer {{accessToken}}

@@ -1,0 +1,222 @@
+{
+  "version": "2.0.0",
+  "options": {
+    "env": {
+      "CGO_ENABLED": "0"
+    }
+  },
+  "tasks": [
+    {
+      "label": "go: test all",
+      "type": "shell",
+      "command": "go",
+      "args": [
+        "test",
+        "-v",
+        "./..."
+      ],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "problemMatcher": [
+        "$go"
+      ]
+    },
+    {
+      "label": "run: engine",
+      "detail": "make 编译 engine-dev 后本地运行（-config config.dev.toml）",
+      "type": "shell",
+      "command": "make",
+      "args": [
+        "run"
+      ],
+      "group": {
+        "kind": "none"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "remote-debug",
+      "detail": "编译 engine → 上传到远程 → dlv运行engine",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        ".vscode/remote-debug.sh"
+      ],
+      "group": {
+        "kind": "build"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "echo": true,
+        "focus": false
+      },
+      "isBackground": false,
+      "problemMatcher": []
+    },
+    {
+      "label": "create-tunnel",
+      "detail": "建立 SSH 隧道到远程调试器（快速重连）",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        ".vscode/create-tunnel.sh"
+      ],
+      "group": {
+        "kind": "build"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "echo": true,
+        "focus": false
+      },
+      "isBackground": false,
+      "problemMatcher": []
+    },
+    {
+      "label": "remote-run",
+      "detail": "编译 engine → 上传到远程 → 直接运行（不带 dlv）",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        ".vscode/remote-run.sh"
+      ],
+      "group": {
+        "kind": "build"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "echo": true,
+        "focus": false
+      },
+      "isBackground": false,
+      "problemMatcher": []
+    },
+    {
+      "label": "remote-build-debug",
+      "detail": "rsync代码到远程 → 远程编译launcher+engine → 安装配置 → dlv运行engine",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        ".vscode/remote-build-debug.sh"
+      ],
+      "group": {
+        "kind": "build"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "echo": true,
+        "focus": false
+      },
+      "isBackground": false,
+      "problemMatcher": []
+    },
+    {
+      "label": "cleanup: remote-debug",
+      "detail": "清理远程环境（停止 dlv/engine 进程和 SSH 隧道）",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        ".vscode/cleanup-remote.sh"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "echo": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "cleanup: local tunnels",
+      "detail": "仅清理本地 SSH 隧道",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        ".vscode/cleanup-tunnel.sh"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "deploy-launcher",
+      "detail": "构建 dc-launcher RPM → 上传到仓库 → 更新 yum 并重新安装",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        ".vscode/deploy-launcher.sh"
+      ],
+      "group": {
+        "kind": "build"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "echo": true,
+        "focus": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "check: remote debug status",
+      "detail": "检查远程调试器状态（dlv 进程、端口监听）",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        ".vscode/check-status.sh"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "echo": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "install-windows-agent",
+      "detail": "在远程 Windows 上下载 Windows 版 agent（通过 SSH 在 win1.dev.vm 上执行）",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-c",
+        "source .vscode/env.sh && ssh $WIN_REMOTE_USER@$WIN_REMOTE_HOST \"Invoke-WebRequest -Uri 'http://$REMOTE_HOST:$PORTAL_PORT/dce/design-cloud-engine.exe' -OutFile 'C:/design-cloud/design-cloud-engine.exe'\""
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "echo": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "remote-run-windows",
+      "detail": "在远程 Windows 上下载并运行 agent",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        ".vscode/remote-run-windows.sh"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "echo": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}

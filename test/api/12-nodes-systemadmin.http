@@ -1,0 +1,315 @@
+# ========================================
+# ===== NODES Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录；OTP 注册请求除外 -----
+
+
+
+### 获取节点运行状态
+GET {{addr}}/api/admin/system/nodes/{{testNode}}/status
+Authorization: Bearer {{accessToken}}
+
+### 获取所有节点 (Admin only)
+GET {{addr}}/api/admin/system/nodes
+Authorization: Bearer {{accessToken}}
+
+### 刷新节点状态 (Admin only)
+POST {{addr}}/api/admin/system/nodes/refresh
+Authorization: Bearer {{accessToken}}
+
+### 创建节点记录 (Admin only)
+POST {{addr}}/api/admin/system/nodes
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "nodeId": "{{testNode}}",
+  "isServer": false,
+  "status": "offline",
+  "clientHost": "{{testNode}}",
+  "labels": {
+    "group": "default"
+  },
+  "allowConnections": true,
+  "maxConnections": 0
+}
+
+### 获取节点管理详情 (Admin only)
+GET {{addr}}/api/admin/system/nodes/{{testNode}}
+Authorization: Bearer {{accessToken}}
+
+### 生成节点 token
+POST {{addr}}/api/admin/system/nodes/{{testNode}}/tokens
+Authorization: Bearer {{accessToken}}
+
+> {%
+
+
+
+const payload = response.body;
+if (payload?.data?.token) {
+  client.global.set("testNodeToken", String(payload.data.token));
+  client.log(`Stored testNodeToken for ${payload.data.nodeID}`);
+}
+
+
+
+%}
+
+### OTP 节点注册（无需登录）
+POST {{addr}}/api/nodes/{{testNode}}/registration
+Content-Type: application/json
+
+{
+  "token": "{{testNodeToken}}"
+}
+
+### 推荐主路径：Server 统一签发节点证书并同步节点记录
+POST {{addr}}/api/admin/system/nodes/certificates
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "nodeId": "{{testNode}}",
+  "hosts": [
+    "{{testNode}}",
+    "127.0.0.1"
+  ],
+  "validDays": 365
+}
+
+### 运维修复/外部证书回填接口
+PUT {{addr}}/api/admin/system/nodes/{{testNode}}/certificate
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "certFingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "certSubject": "CN={{testNode}}",
+  "certExpiresAt": "2027-03-25T00:00:00Z"
+}
+
+### 更新节点信息 (Admin only)
+PUT {{addr}}/api/admin/system/nodes/{{testNode}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "status": "online",
+  "labels": {
+    "env": "test",
+    "group": "default"
+  },
+  "allowConnections": true,
+  "maxConnections": 10
+}
+
+### 更新节点告警覆盖 (Admin only)
+PUT {{addr}}/api/admin/system/nodes/{{testNode}}/settings
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "alert": {
+    "enabled": true,
+    "memory": {
+      "usedPercent": 80,
+      "minFree": 0
+    },
+    "cpu": {
+      "enabled": true,
+      "usedPercent": 70
+    }
+  }
+}
+
+### 获取节点 Agent 配置 (Admin only)
+GET {{addr}}/api/admin/system/nodes/{{testNode}}/config
+Authorization: Bearer {{accessToken}}
+
+### 获取节点 Settings (Admin only)
+GET {{addr}}/api/admin/system/nodes/{{testNode}}/settings
+Authorization: Bearer {{accessToken}}
+
+> {%
+client.test("Get node settings returns 200", function() {
+  client.assert(response.status === 200, "Response status is 200");
+  client.assert(response.body.data.effective !== undefined, "Effective settings returned");
+  client.assert(response.body.data.effective.agent !== undefined, "Effective agent settings returned");
+});
+%}
+
+### 获取节点 Settings JSON Schema (Admin only)
+GET {{addr}}/api/admin/system/nodes/{{testNode}}/settings/schema
+Authorization: Bearer {{accessToken}}
+
+> {%
+client.test("Get node settings schema returns 200", function() {
+  client.assert(response.status === 200, "Response status is 200");
+  client.assert(response.body.data.properties !== undefined, "Schema properties returned");
+});
+%}
+
+### 更新节点 Settings 覆盖 (Admin only)
+PUT {{addr}}/api/admin/system/nodes/{{testNode}}/settings
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "agent": {
+    "vnc": {
+      "scanInterval": 120
+    },
+    "monitor": {
+      "resourceReportEnabled": false
+    }
+  }
+}
+
+> {%
+client.test("Update node settings returns 200", function() {
+  client.assert(response.status === 200, "Response status is 200");
+  client.assert(response.body.data.override.agent.vnc.scanInterval === 120, "Override scanInterval is 120");
+  client.assert(response.body.data.effective.agent.vnc.scanInterval === 120, "Effective scanInterval is 120");
+});
+%}
+
+### 清除节点 Settings 覆盖（回退全局默认）(Admin only)
+PUT {{addr}}/api/admin/system/nodes/{{testNode}}/settings
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "agent": null
+}
+
+> {%
+client.test("Clear node settings returns 200", function() {
+  client.assert(response.status === 200, "Response status is 200");
+  client.assert(response.body.data.override === null, "Override is cleared to null");
+});
+%}
+
+### 负向测试：提交深层未知字段拦截 (422)
+PUT {{addr}}/api/admin/system/nodes/{{testNode}}/settings
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "agent": {
+    "vnc": {
+      "flaovr": "tigervnc"
+    }
+  }
+}
+
+> {%
+client.test("Unknown field returns 422", function() {
+  client.assert(response.status === 422, "Response status is 422 Unprocessable Entity");
+});
+%}
+
+### 批量更新节点配置 - 预演 (dryRun=true) (Admin only)
+POST {{addr}}/api/admin/system/nodes/settings/batch
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "selector": {
+    "nodeIds": ["{{testNode}}"]
+  },
+  "patch": {
+    "agent": {
+      "monitor": {
+        "resourceReportInterval": 45,
+        "diskMounts": [
+          { "name": "data", "path": "/data", "enabled": true, "os": "linux" }
+        ]
+      }
+    }
+  },
+  "dryRun": true
+}
+
+> {%
+client.test("Batch dry-run returns 200 without writing DB", function() {
+  client.assert(response.status === 200, "Response status is 200");
+  client.assert(response.body.data.dryRun === true, "dryRun is true");
+  client.assert(response.body.data.matched >= 0, "matched is reported");
+});
+%}
+
+### 批量更新节点配置 - 正式执行 (Admin only)
+POST {{addr}}/api/admin/system/nodes/settings/batch
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "selector": {
+    "nodeIds": ["{{testNode}}"]
+  },
+  "patch": {
+    "agent": {
+      "monitor": {
+        "resourceReportInterval": 45,
+        "diskMounts": [
+          { "name": "data", "path": "/data", "enabled": true, "os": "linux" }
+        ]
+      }
+    }
+  },
+  "dryRun": false
+}
+
+> {%
+client.test("Batch update returns 200", function() {
+  client.assert(response.status === 200, "Response status is 200");
+  client.assert(response.body.data.dryRun === false, "dryRun is false");
+});
+%}
+
+### 负向测试：批量更新选择器为空拦截 (422)
+POST {{addr}}/api/admin/system/nodes/settings/batch
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "selector": {},
+  "patch": {
+    "agent": {
+      "vnc": { "scanInterval": 120 }
+    }
+  }
+}
+
+> {%
+client.test("Empty selector returns 422", function() {
+  client.assert(response.status === 422, "Response status is 422 Unprocessable Entity");
+});
+%}
+
+### 负向测试：批量更新包含非白名单域 storage 拦截 (422)
+POST {{addr}}/api/admin/system/nodes/settings/batch
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "selector": {
+    "nodeIds": ["{{testNode}}"]
+  },
+  "patch": {
+    "storage": {
+      "probeInterval": 30
+    }
+  }
+}
+
+> {%
+client.test("Storage domain in patch returns 422", function() {
+  client.assert(response.status === 422, "Response status is 422 Unprocessable Entity");
+});
+%}
+
+### 吊销节点证书 (Admin only)
+DELETE {{addr}}/api/admin/system/nodes/{{testNode}}/certificate
+Authorization: Bearer {{accessToken}}

@@ -1,0 +1,64 @@
+# ========================================
+# ===== SECURITY ACCESS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+
+# ========================================
+# ===== 角色管理 (Roles) =====
+# ========================================
+
+### 获取角色目录 (Security admin)
+GET {{addr}}/api/admin/security/roles
+Authorization: Bearer {{accessToken}}
+
+### 获取角色成员列表 (Security admin, 分页)
+GET {{addr}}/api/admin/security/roles/superadmin/members?limit=50&offset=0
+Authorization: Bearer {{accessToken}}
+
+# ========================================
+# ===== 管理域 (Scopes) =====
+# ========================================
+
+### 获取管理域 schema 定义 (Security admin)
+GET {{addr}}/api/admin/security/scopes/schemas
+Authorization: Bearer {{accessToken}}
+
+### 获取管理域列表 (Security admin)
+GET {{addr}}/api/admin/security/scopes
+Authorization: Bearer {{accessToken}}
+
+### 设置用户管理域 (Security admin)
+# ----- scopes: "node:read", "node:write", "user:read", "user:write", "storage:read", "storage:write", "tickets:read", "tickets:write", "setting:read", "setting:write", "audit" -----
+PUT {{addr}}/api/admin/security/scopes/{{username}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "scopes": [
+    "node:write"
+  ]
+}
+
+### 清空用户管理域 (Security admin)
+PUT {{addr}}/api/admin/security/scopes/{{username}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "scopes": []
+}
+
+# ========================================
+# ===== 用户角色设置 =====
+# ========================================
+
+### 设置用户角色 (Security admin)
+# ----- 单管理员模式: "normal" | "superadmin" (或别名 "admin") -----
+# ----- 三管理员模式: "normal" | "auditadmin" | "systemadmin" | "securityadmin" -----
+PUT {{addr}}/api/admin/security/users/{{username}}/role
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "role": "normal"
+}

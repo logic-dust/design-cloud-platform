@@ -1,0 +1,64 @@
+# ========================================
+# ===== AUTHENTICATION Http =====
+# ========================================
+# ----- ⭐ 必须首先执行本文件中的"登录 - 创建 session" -----
+# ----- 登录成功后会把 accessToken 写入全局变量，供其它 .http 文件复用 -----
+
+### 登录 - 创建 session
+POST {{addr}}/api/sessions
+Content-Type: application/json
+
+{
+  "username": "{{username}}",
+  "password": "{{password}}"
+}
+
+> {%
+
+
+
+const payload = response.body;
+if (!payload?.data?.token) {
+  throw new Error("token missing in login response");
+}
+client.global.set("accessToken", payload.data.token);
+client.global.set("hasAdminAccess", String(!!payload.data.ui?.adminConsole?.enabled));
+client.log("Stored session token");
+
+
+
+%}
+
+### 获取当前会话信息（含可用的文件 Location 上下文）
+GET {{addr}}/api/sessions/current
+Authorization: Bearer {{accessToken}}
+
+### 续期当前 session（更新过期时间，token 不变）
+POST {{addr}}/api/sessions/current/renew
+Authorization: Bearer {{accessToken}}
+
+### 获取当前用户的会话列表
+GET {{addr}}/api/sessions
+Authorization: Bearer {{accessToken}}
+
+
+### 登出当前设备
+DELETE {{addr}}/api/sessions/current
+Authorization: Bearer {{accessToken}}
+
+### 删除指定 session
+DELETE {{addr}}/api/sessions/1
+Authorization: Bearer {{accessToken}}
+
+### 批量删除会话（踢出指定设备）
+POST {{addr}}/api/sessions/batch-delete
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "ids": ["1", "2"]
+}
+
+### 登出所有设备
+DELETE {{addr}}/api/sessions
+Authorization: Bearer {{accessToken}}

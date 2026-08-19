@@ -1,0 +1,36 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+max_line_length = 120
+ij_formatter_enabled = true
+
+[*.go]
+indent_style = tab
+indent_size = 4
+tab_width = 4
+ij_go_run_go_fmt_on_reformat = true
+ij_go_add_leading_space_to_comments = false
+ij_go_GROUP_CURRENT_PROJECT_IMPORTS = true
+ij_go_import_sorting = gofmt
+ij_go_move_all_imports_in_one_declaration = true
+ij_go_move_all_stdlib_imports_in_one_group = true
+ij_go_remove_redundant_import_aliases = true
+
+[*.sh]
+indent_style = space
+indent_size = 2
+tab_width = 2
+ij_shell_switch_cases_indented = true
+ij_shell_use_unix_line_separator = true
+
+[*.{yml,yaml,json,toml,http}]
+indent_style = space
+indent_size = 2
+tab_width = 2
+
+[*.md]
+trim_trailing_whitespace = false

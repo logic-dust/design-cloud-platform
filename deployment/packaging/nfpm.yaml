@@ -1,0 +1,113 @@
+name: "design-cloud-engine"
+arch: "${PKG_ARCH}"
+platform: "linux"
+version: "${VERSION}"
+release: "1"
+section: "default"
+priority: "extra"
+maintainer: "Design Cloud Team <team@example.com>"
+description: |
+  Design Cloud Engine — HPC desktop management engine and privilege launcher.
+  Engine and dc-launcher are version-locked in this single package.
+vendor: "Design Cloud"
+homepage: "https://github.com/levinit/design-cloud-engine"
+license: "Proprietary"
+
+# Replaces old launcher-only package (nFPM maps this to RPM Obsoletes).
+replaces:
+  - design-cloud-launcher
+provides:
+  - design-cloud-launcher
+
+contents:
+  - dst: "/opt/design-cloud"
+    type: dir
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  - src: "${ENGINE_ABS_PATH}"
+    dst: "/opt/design-cloud/design-cloud-engine"
+    file_info:
+      mode: 0755
+      owner: "${PKG_USER}"
+      group: "${PKG_GROUP}"
+
+  - src: "${LAUNCHER_ABS_PATH}"
+    dst: "/opt/design-cloud/dc-launcher"
+    file_info:
+      mode: 0700
+      owner: "${PKG_USER}"
+      group: "${PKG_GROUP}"
+
+  - dst: "/etc/design-cloud"
+    type: dir
+    file_info:
+      mode: 0750
+      owner: "${PKG_USER}"
+      group: "${PKG_GROUP}"
+
+  - src: "${CONFIG_ABS_PATH}"
+    dst: "/etc/design-cloud/config.toml"
+    type: config|noreplace
+    file_info:
+      mode: 0600
+      owner: "${PKG_USER}"
+      group: "${PKG_GROUP}"
+
+  - dst: "/var/lib/design-cloud"
+    type: dir
+    file_info:
+      mode: 0700
+      owner: "${PKG_USER}"
+      group: "${PKG_GROUP}"
+
+  - dst: "/var/log/design-cloud"
+    type: dir
+    file_info:
+      mode: 0750
+      owner: "${PKG_USER}"
+      group: "${PKG_GROUP}"
+
+  - src: "${UNIT_ABS_PATH}"
+    dst: "/usr/lib/systemd/system/design-cloud-engine.service"
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: "${TMPFILES_ABS_PATH}"
+    dst: "/usr/lib/tmpfiles.d/design-cloud-engine.conf"
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: "${CONFIGLESS_EXAMPLE_ABS_PATH}"
+    dst: "/usr/share/doc/design-cloud-engine/systemd/configless.conf.example"
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+scripts:
+  preinstall: "${PRE_INSTALL_SCRIPT}"
+  postinstall: "${POST_INSTALL_SCRIPT}"
+
+# RPM-only scriptlets live under the rpm section (RPMScripts: pretrans/posttrans/verify).
+# Putting posttrans under the generic scripts block fails the nFPM schema:
+# "field posttrans not found in type nfpm.Scripts".
+rpm:
+  scripts:
+    posttrans: "${POST_TRANS_SCRIPT}"
+
+overrides:
+  rpm:
+    depends:
+      - libcap
+      - shadow-utils
+  deb:
+    depends:
+      - libcap2-bin
+      - passwd

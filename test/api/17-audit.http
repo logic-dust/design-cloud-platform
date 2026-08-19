@@ -1,0 +1,33 @@
+# ========================================
+# ===== AUDIT Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+
+
+### 读取审计日志尾部 (Audit admin / single-admin)
+GET {{addr}}/api/admin/audit/logs/audit?tail=200&page=1
+Authorization: Bearer {{accessToken}}
+
+### 读取安全日志尾部 (Audit admin / single-admin)
+GET {{addr}}/api/admin/audit/logs/security?tail=200&page=1
+Authorization: Bearer {{accessToken}}
+
+### 审计日志流（tail-follow，从文件末尾开始，长连接）
+GET {{addr}}/api/admin/audit/logs/audit?stream=true
+Authorization: Bearer {{accessToken}}
+
+### 安全日志流（tail-follow）
+GET {{addr}}/api/admin/audit/logs/security?stream=true
+Authorization: Bearer {{accessToken}}
+
+### 分页查询执行记录 (Audit admin / single-admin)
+GET {{addr}}/api/admin/audit/executions?limit=20&offset=0
+Authorization: Bearer {{accessToken}}
+
+### 按过滤条件查询执行记录 (Audit admin / single-admin)
+GET {{addr}}/api/admin/audit/executions?status=3&limit=20&offset=0
+Authorization: Bearer {{accessToken}}
+
+### 按 executionId 查询单条执行记录 (Audit admin / single-admin)
+GET {{addr}}/api/admin/audit/executions/{{testExecutionId}}
+Authorization: Bearer {{accessToken}}

@@ -1,0 +1,319 @@
+/* ============================================================
+   设计云平台 (Design Cloud Platform) — 共享设计系统 (Theme System)
+   包含: 色彩 Token、毛玻璃、Header/Nav 组件、Panel 头部、按钮与基础重置
+   ============================================================ */
+
+/* 内网约束：禁止任何外部 CDN 资源，一律使用系统字体栈。
+   Linux 终端/HPC 场景中文字体回退到 Noto Sans CJK SC / WenQuanYi。 */
+
+/* ---------- 深色主题 (Dark: Space Cloud Cyber Precision) ---------- */
+:root,
+html[data-theme="dark"] {
+  --font-main: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+
+  /* 背景色层级 */
+  --bg-base: #020617;
+  --bg-canvas: #060c1d;
+  --bg-surface: rgba(15, 23, 42, 0.65);
+  --bg-surface-hover: rgba(30, 41, 59, 0.75);
+  --bg-chip: rgba(56, 189, 248, 0.12);
+
+  /* 边框与光泽 */
+  --border-subtle: rgba(56, 189, 248, 0.25);
+  --border-glow: rgba(56, 189, 248, 0.55);
+  --border-strong: rgba(99, 102, 241, 0.65);
+  --glass-border: 1px solid rgba(56, 189, 248, 0.18);
+  --corner-color: rgba(56, 189, 248, 1);
+
+  /* 品牌与状态色彩 */
+  --primary-cyan: #38bdf8;
+  --primary-blue: #6366f1;
+  --primary-violet: #a855f7;
+  --accent-emerald: #34d399;
+  --accent-amber: #fbbf24;
+  --accent-rose: #f43f5e;
+
+  /* 文本色彩 */
+  --text-main: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --text-muted: #64748b;
+  --text-dim: #94a3b8;
+
+  /* 渐变定义 */
+  --grad-brand: linear-gradient(135deg, #38bdf8 0%, #6366f1 50%, #a855f7 100%);
+  --grad-title: linear-gradient(180deg, #ffffff 20%, #e2e8f0 60%, #38bdf8 100%);
+  --grad-panel: linear-gradient(135deg, rgba(15, 23, 42, 0.75) 0%, rgba(2, 6, 23, 0.85) 100%);
+  --grad-glow-1: radial-gradient(1200px 600px at 10% -5%, rgba(56, 189, 248, 0.22), transparent 60%);
+  --grad-glow-2: radial-gradient(900px 500px at 85% 105%, rgba(168, 85, 247, 0.20), transparent 60%);
+  --grid-line: rgba(56, 189, 248, 0.05);
+
+  /* 阴影与光效 */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 10px 30px -5px rgba(0, 0, 0, 0.6);
+  --shadow-glow: 0 0 25px rgba(56, 189, 248, 0.35);
+  --logo-glow: drop-shadow(0 0 12px rgba(56, 189, 248, 0.8));
+
+  /* 圆角 */
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-pill: 9999px;
+
+  /* 弹性间距 Token */
+  --space-2xs: 0.25rem;
+  --space-xs: 0.375rem;
+  --space-sm: 0.5rem;
+  --space-md: 0.625rem;
+  --space-lg: 0.75rem;
+  --space-xl: 1rem;
+}
+
+/* ---------- 明亮主题 (Light: Modern Enterprise Crisp) ---------- */
+html[data-theme="light"] {
+  --bg-base: #f0f4f8;
+  --bg-canvas: #e6edf3;
+  --bg-surface: rgba(255, 255, 255, 0.65);
+  --bg-surface-hover: rgba(255, 255, 255, 0.9);
+  --bg-chip: rgba(99, 102, 241, 0.08);
+
+  --border-subtle: rgba(99, 102, 241, 0.18);
+  --border-glow: rgba(99, 102, 241, 0.45);
+  --border-strong: rgba(99, 102, 241, 0.65);
+  --glass-border: 1px solid rgba(255, 255, 255, 0.8);
+  --corner-color: transparent;
+
+  --primary-cyan: #0284c7;
+  --primary-blue: #4f46e5;
+  --primary-violet: #7c3aed;
+  --accent-emerald: #059669;
+  --accent-amber: #d97706;
+  --accent-rose: #e11d48;
+
+  --text-main: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --text-dim: #94a3b8;
+
+  --grad-brand: linear-gradient(135deg, #0284c7 0%, #4f46e5 50%, #7c3aed 100%);
+  --grad-title: linear-gradient(180deg, #0f172a 20%, #1e293b 60%, #4f46e5 100%);
+  --grad-panel: linear-gradient(135deg, rgba(255, 255, 255, 0.8) 0%, rgba(248, 250, 252, 0.6) 100%);
+  --grad-glow-1: radial-gradient(1200px 600px at 15% -10%, rgba(56, 189, 248, 0.25), transparent 60%);
+  --grad-glow-2: radial-gradient(900px 500px at 85% 110%, rgba(124, 58, 237, 0.15), transparent 60%);
+  --grid-line: rgba(99, 102, 241, 0.06);
+
+  --shadow-sm: 0 2px 4px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 12px 32px -4px rgba(15, 23, 42, 0.08);
+  --shadow-glow: 0 4px 14px rgba(79, 70, 229, 0.2);
+  --logo-glow: drop-shadow(0 4px 12px rgba(79, 70, 229, 0.3));
+}
+
+/* ---------- 基础 Reset ---------- */
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 15px;
+  -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-main);
+  color: var(--text-main);
+  background-color: var(--bg-base);
+  background-image: var(--grad-glow-1), var(--grad-glow-2);
+  background-attachment: fixed;
+  transition: background-color 0.3s ease, color 0.3s ease;
+  line-height: 1.5;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* 科技背景网格点缀 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 44px 44px;
+  z-index: 0;
+}
+
+/* 表格/数值统一使用等宽数字 */
+table,
+.text-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 通用玻璃材质面板 (Glass Card) ---------- */
+.glass-panel {
+  background: var(--grad-panel);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: var(--glass-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  position: relative;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.glass-panel:hover {
+  border-color: var(--border-glow);
+}
+
+/* 主题四角精细科技微纹装饰 (仅深色主题显示) */
+.glass-panel::before,
+.glass-panel::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  pointer-events: none;
+  transition: border-color 0.3s;
+}
+
+.glass-panel::before {
+  left: -1px;
+  top: -1px;
+  border-left: 2px solid var(--corner-color);
+  border-top: 2px solid var(--corner-color);
+  border-radius: var(--radius-md) 0 0 0;
+}
+
+.glass-panel::after {
+  right: -1px;
+  bottom: -1px;
+  border-right: 2px solid var(--corner-color);
+  border-bottom: 2px solid var(--corner-color);
+  border-radius: 0 0 var(--radius-md) 0;
+}
+
+/* ---------- 面板 Head / Title ---------- */
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: var(--text-main);
+  margin-bottom: 8px;
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel-title::before {
+  content: "";
+  width: 4px;
+  height: 13px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--primary-cyan), var(--primary-blue));
+  box-shadow: 0 0 6px var(--primary-cyan);
+}
+
+.panel-tag {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* ---------- 交互按钮与切换组件 ---------- */
+.theme-toggle-btn {
+  cursor: pointer;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  width: 36px;
+  height: 36px;
+  background: var(--bg-chip);
+  color: var(--text-main);
+  font-size: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+}
+
+.theme-toggle-btn:hover {
+  border-color: var(--border-glow);
+  transform: rotate(15deg) scale(1.05);
+  box-shadow: var(--shadow-glow);
+}
+
+.btn-action {
+  cursor: pointer;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-chip);
+  color: var(--text-secondary);
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  text-decoration: none;
+}
+
+.btn-action:hover {
+  color: var(--primary-cyan);
+  border-color: var(--border-glow);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+/* ---------- 共享 Header / Nav Logo & Brand ---------- */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--text-main);
+}
+
+.brand .logo,
+.logo {
+  width: 36px;
+  height: 36px;
+  filter: var(--logo-glow);
+  transition: filter 0.3s ease;
+}
+
+/* ---------- 全局滚动条样式 ---------- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.45);
+}

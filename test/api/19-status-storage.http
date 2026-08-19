@@ -1,0 +1,21 @@
+# ========================================
+# ===== STATUS & STORAGE Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+
+
+### 获取系统状态
+GET {{addr}}/api/admin/system/status
+Authorization: Bearer {{accessToken}}
+
+### 获取存储最新快照（auto-scale 格式，含 name/type）
+GET {{addr}}/api/admin/system/storage
+Authorization: Bearer {{accessToken}}
+
+### 刷新存储状态 (Admin only)
+POST {{addr}}/api/admin/system/storage/refresh
+Authorization: Bearer {{accessToken}}
+
+### 获取存储历史（auto-scale 格式）
+GET {{addr}}/api/admin/system/storage/share/history?days=1
+Authorization: Bearer {{accessToken}}

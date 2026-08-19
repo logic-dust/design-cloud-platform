@@ -1,0 +1,27 @@
+# ========================================
+# ===== LICENSES Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+# ----- 需要先执行 13-licenses-systemadmin.http 中的"创建许可证服务"获取 testLicenseId -----
+
+
+### 获取许可证服务列表
+GET {{addr}}/api/licenses
+Authorization: Bearer {{accessToken}}
+
+### 获取许可证服务详情
+GET {{addr}}/api/licenses/{{testLicenseId}}
+Authorization: Bearer {{accessToken}}
+
+### 获取许可证功能列表
+GET {{addr}}/api/licenses/{{testLicenseId}}/features
+Authorization: Bearer {{accessToken}}
+
+### 获取许可证运行状态
+GET {{addr}}/api/licenses/{{testLicenseId}}/status
+Authorization: Bearer {{accessToken}}
+
+# ----------------------------------------------------------------------
+# ----- 提示：许可证管理操作（更新、删除、enabled 缺省/下线）请参见 13-licenses-systemadmin.http -----
+# ----- 用户侧对 enabled=false 的 404 断言也在该文件（下线后请求 GET /api/licenses/:id） -----
+# ----------------------------------------------------------------------

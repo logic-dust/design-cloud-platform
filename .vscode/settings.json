@@ -1,0 +1,38 @@
+{
+  "go.lintOnSave": "package",
+  "go.lintTool": "golangci-lint",
+  "go.useLanguageServer": true,
+  "go.languageServerFlags": [
+    "-logfile=/tmp/gopls.log"
+  ],
+  "[go]": {
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+  "go.delveConfig": {
+    "apiVersion": 2,
+    "showLog": true
+  },
+  "debug.openDebug": "neverOpen",
+  "debug.inlineValues": "on",
+  "editor.wordWrap": "on",
+  "editor.rulers": [
+    80,
+    120
+  ],
+  "files.exclude": {
+    "**/.git": false,
+    "**/node_modules": true,
+    "**/build": false
+  },
+  "remoteDebug": {
+    "host": "cent7.dev.vm",
+    "port": 2345
+  },
+  "makefile.configureOnOpen": false,
+  "files.associations": {
+    "**/assets/json/*.json": "plaintext"
+  }
+}

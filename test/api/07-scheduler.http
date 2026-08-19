@@ -1,0 +1,64 @@
+# ========================================
+# ===== SCHEDULER Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+# ----- 如需联动启动应用并写入 testJobId，可先执行 06-apps.http 中的“启动应用” -----
+
+### 获取计算主机列表与在线状态汇总
+GET {{addr}}/api/scheduler/hosts
+Authorization: Bearer {{accessToken}}
+
+### 获取当前用户任务列表
+GET {{addr}}/api/scheduler/jobs
+Authorization: Bearer {{accessToken}}
+
+> {%
+
+
+
+const payload = response.body;
+const jobs = payload?.data?.jobs || payload?.data?.Jobs || [];
+if (jobs.length > 0) {
+  const job = jobs[0];
+  const jobID = job.JOBID || job.job_id || job.jobId || job.id;
+  if (jobID) {
+    client.global.set("testJobId", String(jobID));
+    client.log(`Stored testJobId=${jobID}`);
+  }
+}
+
+
+
+%}
+
+### 获取指定用户任务列表
+GET {{addr}}/api/scheduler/jobs?user=all
+Authorization: Bearer {{accessToken}}
+
+### 获取指定用户任务列表
+GET {{addr}}/api/scheduler/jobs?user={{username}}
+Authorization: Bearer {{accessToken}}
+
+### 获取任务详情
+GET {{addr}}/api/scheduler/jobs/{{testJobId}}
+Authorization: Bearer {{accessToken}}
+
+### 更新任务状态 (Kill - 动词收尾)
+POST {{addr}}/api/scheduler/jobs/{{testJobId}}/kill
+Authorization: Bearer {{accessToken}}
+
+### 批量更新任务状态
+POST {{addr}}/api/scheduler/jobs/batch-control
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "jobIds": [
+    "{{testJobId}}"
+  ],
+  "operation": "kill"
+}
+
+# ----------------------------------------------------------------------
+# ----- 提示：管理员作业操作（查看所有作业、指定用户控制等）请参见 07-scheduler-systemadmin.http -----
+# ----------------------------------------------------------------------

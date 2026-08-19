@@ -1,0 +1,32 @@
+# ========================================
+# ===== ADMIN-FILES Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录（需要 Security Admin 权限） -----
+# ----- 需要先执行 10-files.http 中的下载审批流程获取 testFileDownloadRequestId -----
+
+### 管理员列出下载审批申请 (Security admin)
+GET {{addr}}/api/admin/security/files/download-requests?status=pending
+Authorization: Bearer {{accessToken}}
+
+### 管理员查看下载审批申请详情 (Security admin)
+GET {{addr}}/api/admin/security/files/download-requests/{{testFileDownloadRequestId}}
+Authorization: Bearer {{accessToken}}
+
+### 管理员同意下载审批申请 (Security admin)
+POST {{addr}}/api/admin/security/files/download-requests/{{testFileDownloadRequestId}}/review
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "decision": "approve"
+}
+
+### 管理员拒绝下载审批申请 (Security admin, alternative flow)
+POST {{addr}}/api/admin/security/files/download-requests/{{testFileDownloadRequestId}}/review
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "decision": "reject",
+  "reason": "not allowed for this test"
+}

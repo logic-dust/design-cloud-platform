@@ -1,0 +1,24 @@
+{{- $u := urls.Parse .Destination -}}
+{{- $href := .Destination -}}
+{{- if and (not $u.IsAbs) (ne $u.Path "") -}}
+{{- $path := $u.Path -}}
+{{- if strings.HasSuffix $path ".md" -}}
+{{- $path = strings.TrimSuffix ".md" $path -}}
+{{- end -}}
+{{- with $.Page.GetPage $path -}}
+{{- $href = .RelPermalink -}}
+{{- with $u.Fragment -}}
+{{- $href = printf "%s#%s" $href . -}}
+{{- end -}}
+{{- else -}}
+{{- /* Fallback: strip .md and lowercase */ -}}
+{{- if strings.HasSuffix $href ".md" -}}
+{{- $href = strings.TrimSuffix ".md" $href | lower -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $u.IsAbs -}}
+<a href="{{ $href | safeURL }}" rel="noopener" target="_blank" title="{{ .Title }}">{{ .Text | safeHTML }}</a>
+{{- else -}}
+<a href="{{ $href | safeURL }}" title="{{ .Title }}">{{ .Text | safeHTML }}</a>
+{{- end -}}

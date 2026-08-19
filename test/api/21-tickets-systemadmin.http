@@ -1,0 +1,93 @@
+# ========================================
+# ===== SYSTEM-TICKETS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录（需要 System Admin 权限） -----
+
+# ========================================
+# ===== 项目管理 =====
+# ========================================
+
+### 创建项目（写入 testProjectId）
+POST {{addr}}/api/admin/system/tickets/projects
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "Design Cloud",
+  "description": "Design Cloud 主项目"
+}
+
+> {%
+
+
+
+const payload = response.body;
+if (payload?.data?.id) {
+  client.global.set("testProjectId", String(payload.data.id));
+  client.log(`Stored testProjectId=${payload.data.id}`);
+}
+
+
+
+%}
+
+### 获取项目列表（含归档）
+GET {{addr}}/api/admin/system/tickets/projects?includeArchived=true
+Authorization: Bearer {{accessToken}}
+
+### 更新项目
+PUT {{addr}}/api/admin/system/tickets/projects/{{testProjectId}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "Design Cloud Updated",
+  "description": "更新后的描述"
+}
+
+### 归档项目
+PATCH {{addr}}/api/admin/system/tickets/projects/{{testProjectId}}/archive
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "archived": true
+}
+
+# ========================================
+# ===== 工单管理（管理员） =====
+# ========================================
+
+### 获取所有工单（含已删除）
+GET {{addr}}/api/admin/system/tickets?includeDeleted=true&limit=100
+Authorization: Bearer {{accessToken}}
+
+### 批量软删除工单
+POST {{addr}}/api/admin/system/tickets/batch-delete
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "ids": ["{{testTicketId}}"]
+}
+
+### 批量硬删除工单
+POST {{addr}}/api/admin/system/tickets/batch-delete-permanent
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "ids": ["{{testTicketId}}"]
+}
+
+### 软删除任意工单
+DELETE {{addr}}/api/admin/system/tickets/{{testTicketId}}
+Authorization: Bearer {{accessToken}}
+
+### 硬删除工单
+DELETE {{addr}}/api/admin/system/tickets/{{testTicketId}}/permanent
+Authorization: Bearer {{accessToken}}
+
+### 删除项目（需要先确保项目下无活跃工单）
+DELETE {{addr}}/api/admin/system/tickets/projects/{{testProjectId}}
+Authorization: Bearer {{accessToken}}

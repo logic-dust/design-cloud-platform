@@ -1,0 +1,25 @@
+# Configless agent overlay example.
+#
+# Use when compute nodes must NOT ship /etc/design-cloud/config.toml
+# (avoids spreading DB/LDAP fields). Same package, same unit name.
+#
+#   1. runuser -u design-cloud -- /opt/design-cloud/design-cloud-engine node register \
+#        --portal-url https://portal.example:443 --token <OTP> \
+#        --data-dir /var/lib/design-cloud
+#   2. install this file as:
+#        /etc/systemd/system/design-cloud-engine.service.d/configless.conf
+#   3. systemctl daemon-reload
+#   4. systemctl enable --now design-cloud-engine
+#
+# Replace mgt01,mgt02 with your cluster server hostnames.
+
+[Service]
+# Clear the packaged --config ExecStart / ExecStartPre
+ExecStartPre=
+ExecStart=
+ExecStart=/opt/design-cloud/design-cloud-engine \
+  --servers mgt01,mgt02 \
+  --port 52255 \
+  --data-dir /var/lib/design-cloud \
+  --log-dir /var/log/design-cloud \
+  --log-level INFO

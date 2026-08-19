@@ -1,0 +1,82 @@
+# 架构级别的强约束配置表 (Harness Architecture Guardrails)
+# 声明项目中绝对不可跨越的依赖红线。Verifier 将会以此作为核对标准。
+#
+# 规则解读：package 下的任何 .go 文件不得 import forbidden_imports 列出的包（含子包）。
+# 此规则由 .agents/verifiers/verify-arch.py 自动校验。
+
+rules:
+  - package: "internal/config"
+    forbidden_imports:
+      - "internal/db"
+      - "internal/agent"
+      - "internal/server"
+      - "internal/execution"
+      - "internal/launcher"
+    reason: "配置包是最基础的原语，不应该引入业务或实现对象导致循环依赖。"
+
+  - package: "internal/model"
+    forbidden_imports:
+      - "internal/server"
+      - "internal/agent"
+      - "internal/execution"
+      - "internal/launcher"
+    reason: "数据模型层仅定义 GORM 结构体，不应反向依赖业务层、通信层或执行层。"
+
+  - package: "internal/db"
+    forbidden_imports:
+      - "internal/server"
+      - "internal/agent"
+      - "internal/execution"
+      - "internal/launcher"
+    reason: "数据库持久层是底层结构，禁止反向依赖业务层(Service)、展现层(Server)、执行层或启动器。注意：import 合规不等于职责合规；语义边界需同时满足 rules/db-boundary-rules.md。"
+
+  - package: "internal/execution"
+    forbidden_imports:
+      - "internal/server"
+      - "internal/db"
+      - "internal/agent"
+    reason: "执行协议层定义跨层 Payload 与 Operation，不应引入具体实现侧（Server/Agent/DB/Service）。"
+
+
+  - package: "internal/agent"
+    forbidden_imports:
+      - "internal/server"
+      - "internal/db"
+    reason: "Agent 执行器层应该尽量轻量，通过 Service 层交互，不得直连 DB 或引用 HTTP Web 层逻辑。"
+
+  - package: "internal/launcher"
+    forbidden_imports:
+      - "internal/server"
+      - "internal/db"
+      - "internal/agent"
+    reason: "Launcher 是独立特权进程，只依赖 execution 协议层和 config，禁止引入 Engine 内部组件。"
+
+  - package: "internal"
+    forbidden_imports:
+      - "testing"
+    reason: "生产代码（非 *_test.go）绝对禁止引入 testing 库，强制测试逻辑与核心业务硬隔离。"
+
+  - package: "internal/server/service"
+    forbidden_imports:
+      - "internal/server/control"
+      - "internal/server/portal"
+    reason: "业务层不得反向依赖控制面或展现层，触发采集契约应经 internal/contract。"
+
+  - package: "internal/server/portal"
+    forbidden_imports:
+      - "internal/server/control"
+    reason: "Portal 仅经 service 间接触发采集，不得直连控制面。"
+
+  - package: "internal/server/control"
+    forbidden_imports:
+      - "internal/server/service"
+      - "internal/server/portal"
+    reason: "控制面不得反向依赖业务层/展现层，保持可被 Agent 独立复用。"
+
+  - package: "internal/contract"
+    forbidden_imports:
+      - "internal/server"
+      - "internal/db"
+      - "internal/agent"
+      - "internal/launcher"
+    reason: "契约包是跨层中立的抽象协议层，绝对禁止反向依赖任何具体实现层（Server/Service/DB/Agent/Launcher）。"

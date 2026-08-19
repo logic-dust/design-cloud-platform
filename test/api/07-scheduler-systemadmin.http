@@ -1,0 +1,54 @@
+# ========================================
+# ===== SYSTEM-SCHEDULER Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录（需要 System Admin 权限） -----
+# ----- 需先执行 07-scheduler.http 获取 testJobId -----
+
+### 管理员获取任务列表（支持过滤）
+GET {{addr}}/api/admin/system/scheduler/jobs?user={{username}}&queue=normal&node={{testNode}}
+Authorization: Bearer {{accessToken}}
+
+### 管理员获取任务详情
+GET {{addr}}/api/admin/system/scheduler/jobs/{{testJobId}}
+Authorization: Bearer {{accessToken}}
+
+### 管理员更改任务状态 (可指定用户, Kill)
+POST {{addr}}/api/admin/system/scheduler/jobs/{{testJobId}}/kill
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "user": "{{username}}"
+}
+
+### 管理员批量控制任务 (Admin only)
+POST {{addr}}/api/admin/system/scheduler/jobs/batch-control
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "jobIds": [
+    "{{testJobId}}"
+  ],
+  "operation": "kill"
+}
+
+### 管理员修改作业名称 (PATCH, Admin only)
+PATCH {{addr}}/api/admin/system/scheduler/jobs/{{testJobId}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "renamed-job-admin",
+  "user": "{{username}}"
+}
+
+### 管理员切换作业队列 (switch, Admin only)
+POST {{addr}}/api/admin/system/scheduler/jobs/{{testJobId}}/switch
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "targetQueue": "high_priority",
+  "user": "{{username}}"
+}

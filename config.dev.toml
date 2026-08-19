@@ -1,0 +1,90 @@
+# Design Cloud Engine 配置文件（开发环境 / 无包同树）
+# TOML 格式参考：https://toml.io
+#
+# 路径约定（与打包 FHS 不同）：本文件与二进制同树时用相对路径，拼到 BaseDir=本文件所在目录。
+# data_dir 显式置空 → 集群证书也回退 BaseDir；勿省略该键，否则会继承 getDefault 的 /var/lib/design-cloud。
+
+data_dir = ''                 # 空 = 回退 BaseDir（源码树同树）；生产打包模板为 /var/lib/design-cloud
+
+# ── 日志 ──────────────────────────────────────────────────────────────────────
+[log]
+dir = 'logs'                  # 相对 BaseDir；生产常用 /var/log/design-cloud 或 unit --log-dir
+app_level = 'DEBUG'       # 应用日志级别：DEBUG / INFO / WARN / ERROR
+access_level = 'DEBUG'    # HTTP 访问日志级别
+max_age = 30              # 日志文件保留天数
+max_size = 100            # 单个日志文件最大体积（MB）
+max_backups = 10          # 保留的历史日志文件数量
+
+# ── Portal HTTP 服务 ───────────────────────────────────────────────────────────
+[portal]
+host = ''                 # 监听地址，空字符串表示监听所有网卡
+port = '1234'
+tls = false               # 是否启用 HTTPS
+cert = ''                 # TLS 证书文件路径
+key = ''                  # TLS 私钥文件路径
+# 超时时间（开发模式在 run_dev.go 中强制置 0，此处仅作文档参考）
+# read_header_timeout = 8
+# read_timeout = 60
+# idle_timeout = 60
+rate_limit = 200           # 公共 API IP 级限流（req/s）
+rate_burst = 600           # 公共 API IP 级突发上限
+transfer_rate_limit = 10   # 文件传输与 WebSocket 启动控制限流（req/s）
+transfer_rate_burst = 30   # 文件传输与 WebSocket 启动控制突发上限
+
+# ── 集群节点拓扑与 gRPC 通信 ───────────────────────────────────────────────────
+[cluster]
+port = 52255
+
+heartbeat_interval = 30       # 心跳发送间隔（秒），开发环境调短便于调试
+connect_timeout = 30           # 连接超时（秒）
+node_heartbeat_timeout = 180  # 节点超过此时间未收到心跳则标记为离线（秒）
+node_check_interval = 120     # 扫描失联节点的周期（秒）
+tls_server_name = ''          # gRPC TLS SNI，为空则不校验服务端名称
+
+# 集群 Server 列表：支持主机名或列表表达式（如 "cent7", "ctrl[01-02]"）
+servers = [
+  "cent7",
+  # "arch",
+]
+
+
+# ── 数据库 ─────────────────────────────────────────────────────────────────────
+[database]
+type = 'postgres'
+host = 'cent7.dev.vm'
+port = '5432'
+user = 'dc'
+password = ''                 # 优先从 password_file 读取，此处留空即可
+password_file = 'dbpwd'       # 相对 BaseDir；生产打包模板为 /etc/design-cloud/dbpwd
+name = 'dc'
+ssl_mode = 'disable'          # PostgreSQL SSL 模式：disable / require / verify-full
+max_idle_conns = 10           # 连接池最大空闲连接数
+max_open_conns = 25           # 连接池最大打开连接数
+conn_max_lifetime = 0        # 连接最大复用时间，0=不限制（秒）
+
+# ── 用户认证 ───────────────────────────────────────────────────────────────────
+[user]
+auth_mode = 'ldap'            # 认证模式：ldap / local
+
+[user.ldap]
+server = 'ldaps://cent7.dev.vm:636'          # LDAP 服务器地址，ldaps:// 开头自动启用 TLS；密码修改操作必须走 TLS（IPA 强制）
+user_base_dn = 'cn=users,cn=accounts,dc=dev,dc=vm'
+#注意这里是将ldapbind放在sysaccounts的，如果是使用IPA默认的创建方式，一般用户是在cn=users,cn=accounts
+bind_dn = 'uid=ldapbind,cn=sysaccounts,cn=etc,dc=dev,dc=vm'
+bind_password = ''            # 优先从 bind_password_file 读取
+bind_password_file = 'ldapbindpwd'  # 相对 BaseDir；生产打包模板为 /etc/design-cloud/ldapbindpwd
+id_attribute = 'uid'          # 用户唯一标识属性
+user_filter = '(objectClass=posixAccount)'  # 用户搜索过滤器
+group_base_dn = 'cn=groups,cn=accounts,dc=dev,dc=vm'
+group_filter = '(objectClass=posixGroup)'   # 组搜索过滤器
+password_modify = true        # 是否支持通过 RFC 3062 修改 LDAP 密码
+tls_ca_path = ''              # 自定义 CA 证书路径，为空则使用系统信任链
+
+# ── 作业调度器 ─────────────────────────────────────────────────────────────────
+[scheduler]
+type = 'lsf'                  # 调度器类型：lsf / slurm / openlava
+env_script = '/share/apps/lsf/conf/profile.lsf'  # 调度器环境初始化脚本
+
+# ── 管理员模式 ─────────────────────────────────────────────────────────────────
+[admin]
+enable_three_roles = false    # 是否启用三员管理模式。true：启用审计/系统/安全管理员且超级管理员不可登录；false：单一超级管理员模式（默认）

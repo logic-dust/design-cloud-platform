@@ -1,0 +1,7 @@
+# tmpfiles.d — recreate runtime/state dirs (tmpfs /run; durable /var /etc)
+# Type Path Mode UID GID Age Argument
+# UID/GID placeholders filled by build-packages.sh (__PKG_USER__/__PKG_GROUP__)
+d /run/design-cloud 0700 __PKG_USER__ __PKG_GROUP__ - -
+d /var/log/design-cloud 0750 __PKG_USER__ __PKG_GROUP__ - -
+d /var/lib/design-cloud 0700 __PKG_USER__ __PKG_GROUP__ - -
+d /etc/design-cloud 0750 __PKG_USER__ __PKG_GROUP__ - -

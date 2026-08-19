@@ -1,0 +1,156 @@
+################################
+# IDEs & Editors
+################################
+
+# JetBrains IDEs (IntelliJ, GoLand, etc.)
+.idea/
+!.idea/dictionaries/*
+!.idea/dataSources.xml
+!.idea/remote-targets.xml
+
+# JetBrains 新版把 Run/Debug 配置放在 .run/：共享的 *.xml 保留，
+# 其余（shelf/ 快照、本地覆盖）忽略
+# （旧位置 .idea/runConfigurations/ 已无人使用，不再放行）
+.run/*
+!.run/*.xml
+
+# VSCode
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/env.sh
+!.vscode/*.md
+!.vscode/*.sh
+
+# Other editors
+.kiro
+.codex
+.antigravitycli/
+.workbuddy/
+
+
+################################
+# Build & Artifacts
+################################
+
+# Compiled binaries
+/engine
+/launcher
+/dce-dev
+/build/
+
+# Test & Coverage artifacts
+*.test
+*.coverprofile
+coverage.out
+/coverage/
+
+# Benchmarks
+/benchmark/
+/benchmarks/
+
+
+################################
+# Environment & Configuration
+################################
+
+# Environment variables (never commit)
+.env
+.env.*
+
+# Certificates & sensitive files
+/certs/
+# deployment/gen-tls-files.sh 的默认输出目录 conf/certs/portal（含**私钥** *.key）
+/conf/certs/
+# 兜底：任何位置生成的证书/私钥（当前仓库无此类跟踪文件，误提交请用 git add -f）
+*.key
+*.pem
+*.p12
+*.jks
+
+# HTTP client environment files
+http-client.env.json
+test/api/http-client.env.json
+
+# Credentials (development only)
+/dbpwd
+/ldapbindpwd
+
+# 本地运行时状态：config.dev.toml 的 data_dir 留空→回退源码树 BaseDir，
+# release 资产默认落在 data/releases/desktop；内含 sqlite 库与集群证书，不入库
+/data/
+*.db
+*.sqlite
+*.sqlite3
+
+
+################################
+# Dependencies & Cache
+################################
+
+# Go vendor directory
+vendor/
+
+# Go build cache
+.gocache
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+
+################################
+# Development & Testing
+################################
+
+# Test binaries & results
+/test/bin/
+/test-results/
+/.agents/test-results/
+
+# IDE's local configurations
+.hermes/
+
+
+################################
+# Logs & Output
+################################
+
+# Log files
+*.log
+/logs/
+
+# Temporary files
+/tmp/
+
+
+################################
+# OS-specific Files
+################################
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*.swo
+
+# Windows
+Thumbs.db
+*.exe
+
+
+################################
+# Documentation Site
+################################
+
+# Hugo docs site resources (if needed to ignore)
+# docs-site/resources/
+.hugo_build.lock
+
+# 仓库根目录的 Hugo 产物：docs-site 的构建输出已由 docs-site/.gitignore 忽略，
+# 这条防止"从仓库根运行 hugo"把产物落到根 public/ 并被误提交。
+/public/

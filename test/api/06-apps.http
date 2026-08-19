@@ -1,0 +1,37 @@
+# ========================================
+# ===== APPS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+# ----- 需要先执行 06-apps-systemadmin.http 中的"创建应用"获取 testAppId -----
+
+
+### 获取当前用户应用列表
+GET {{addr}}/api/apps
+Authorization: Bearer {{accessToken}}
+
+### 获取应用详情
+GET {{addr}}/api/apps/{{testAppId}}
+Authorization: Bearer {{accessToken}}
+
+### 启动应用
+POST {{addr}}/api/apps/{{testAppId}}/launch
+Authorization: Bearer {{accessToken}}
+
+> {%
+
+
+
+const payload = response.body;
+const statusUrl = response.headers.valueOf("Location");
+if (payload?.data?.id) {
+  client.global.set("testJobId", String(payload.data.id));
+  client.log(`Stored testJobId=${payload.data.id}`);
+} else if (statusUrl) {
+  const jobID = statusUrl.split("/").pop();
+  client.global.set("testJobId", String(jobID));
+  client.log(`Stored testJobId=${jobID}`);
+}
+
+
+
+%}

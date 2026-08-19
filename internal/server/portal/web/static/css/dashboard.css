@@ -1,0 +1,837 @@
+/* ============================================================
+   设计云平台 (Design Cloud Platform) — 运行态势感知大屏 CSS
+   包含: 屏幕网格、顶栏、指标卡片、作业调度、存储图表与数据表格
+   ============================================================ */
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ---------- 屏幕自适应容器 ---------- */
+.screen {
+  position: relative;
+  z-index: 1;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0 20px 14px;
+  max-width: 1920px;
+  margin: 0 auto;
+  overflow: hidden;
+}
+
+/* ---------- Header 顶栏 ---------- */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 4px 8px;
+  position: relative;
+}
+
+header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--primary-cyan), var(--primary-blue), transparent);
+  opacity: 0.6;
+}
+
+.title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.title h1 {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  background: var(--grad-title);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  white-space: nowrap;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.title h1 .sub-title {
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  color: var(--primary-cyan);
+  opacity: 0.9;
+}
+
+.title h1 .sys-clock {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.data-updated {
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.5px;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* ---------- 共享连接状态 Badge (Connection Status) ---------- */
+.conn-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-chip);
+  font-size: 12px;
+  transition: all 0.3s;
+}
+
+.conn-status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-emerald);
+  box-shadow: 0 0 6px var(--accent-emerald);
+  animation: pulse-ring 2s infinite ease-in-out;
+}
+
+.conn-status.offline {
+  border-color: rgba(244, 63, 94, 0.4);
+  background: rgba(244, 63, 94, 0.1);
+  color: var(--accent-rose);
+}
+
+.conn-status.offline .dot {
+  background: var(--accent-rose);
+  box-shadow: 0 0 6px var(--accent-rose);
+}
+
+@keyframes pulse-ring {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.85);
+  }
+}
+
+/* ---------- Main 布局 ---------- */
+main {
+  flex: 1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+  padding-top: 6px;
+}
+
+/* ================= Top Metric Cards Section ================= */
+.top-cards-section {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr 1.5fr;
+  gap: var(--space-md);
+  align-items: stretch;
+  transition: all 0.3s;
+}
+
+.top-cards-section.no-gpu {
+  grid-template-columns: 1fr 1.5fr;
+}
+
+.top-cards-section.no-gpu .col-gpu-spec {
+  display: none;
+}
+
+.col-major {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+  justify-content: space-between;
+}
+
+.col-config-spec {
+  display: flex;
+}
+
+.col-config-spec .node-overview-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-lg) var(--space-xl);
+}
+
+.middle-row-1 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-md);
+  flex: 1;
+}
+
+.middle-row-1 .metric-card {
+  height: 100%;
+}
+
+.middle-row-1 .metric-card .val-num {
+  font-size: 17px;
+}
+
+.middle-row-1 .metric-card .val-denom {
+  font-size: 12.5px;
+}
+
+.middle-row-1 .metric-card .val-unit {
+  font-size: 11px;
+}
+
+/* 统一小卡基本规范 (Metric Card Layout) */
+.metric-card {
+  padding: var(--space-lg) var(--space-xl);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+  border-radius: var(--radius-md);
+  min-height: 86px;
+}
+
+.metric-card .card-info {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  flex: 1;
+  min-width: 0;
+}
+
+.metric-card .card-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
+  margin-bottom: 2px;
+}
+
+.metric-card .card-label::before {
+  content: "";
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--primary-cyan), var(--primary-blue));
+  flex: none;
+}
+
+.metric-card.amber-theme .card-label::before {
+  background: linear-gradient(180deg, var(--accent-amber), var(--primary-blue));
+}
+
+.metric-card.violet-theme .card-label::before {
+  background: linear-gradient(180deg, var(--primary-violet), var(--primary-blue));
+}
+
+.metric-card .card-label-sub {
+  font-weight: 400;
+  font-size: 11px;
+  margin-left: 4px;
+  color: var(--text-muted);
+}
+
+.metric-card .card-value {
+  font-size: 26px;
+  font-weight: 800;
+  font-family: var(--font-mono);
+  color: var(--text-main);
+  line-height: 1.15;
+  white-space: nowrap;
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  justify-content: flex-start;
+}
+
+.metric-card .val-denom {
+  font-size: 22px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--primary-blue);
+  opacity: 0.9;
+}
+
+.metric-card .val-unit {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-left: 2px;
+}
+
+.metric-card .val-unit.pct {
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.metric-card .val-unit.pct.cyan {
+  color: var(--primary-cyan);
+}
+
+.metric-card .val-unit.pct.amber {
+  color: var(--accent-amber);
+}
+
+.metric-card .card-extra {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.metric-card .card-ring {
+  width: 48px;
+  height: 48px;
+  flex: none;
+  align-self: flex-start;
+}
+
+/* 集群配置总览大卡 */
+.node-overview-card {
+  grid-column: 1 / span 3;
+  grid-row: 1 / span 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+/* GPU 异构高算专区 */
+.col-gpu-spec {
+  display: flex;
+}
+
+.gpu-grid-wrapper {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-md);
+  height: 100%;
+}
+
+.gpu-static-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-lg) var(--space-xl);
+}
+
+.gpu-dyn-cards-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  height: 100%;
+}
+
+.gpu-dyn-cards-col .metric-card {
+  flex: 1;
+  height: 100%;
+}
+
+.gpu-dyn-cards-col .metric-card .val-num {
+  font-size: 17px;
+}
+
+.gpu-dyn-cards-col .metric-card .val-denom {
+  font-size: 12.5px;
+}
+
+.gpu-dyn-cards-col .metric-card .val-unit {
+  font-size: 11px;
+}
+
+.spec-col-side,
+.gpu-col-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  flex: 1;
+}
+
+.spec-main-body,
+.gpu-main-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.spec-num-box,
+.gpu-main-body .gpu-num-box {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.spec-divider-h,
+.gpu-spec-divider-h {
+  height: 1px;
+  border-top: 1px dashed var(--border-subtle);
+  margin: 6px 0;
+}
+
+.spec-sub-specs,
+.gpu-sub-specs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  justify-content: flex-end;
+  flex: 1;
+}
+
+.sub-specs-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  margin-bottom: 2px;
+}
+
+.spec-sub-item,
+.gpu-sub-spec-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  padding: 1px 0;
+}
+
+.spec-sub-item .spec-label,
+.gpu-sub-spec-item .spec-label {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.spec-sub-item .spec-val-box,
+.gpu-sub-spec-item .spec-val-box {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.spec-sub-item .spec-val-box .val-num,
+.gpu-sub-spec-item .spec-val-box .val-num {
+  font-size: 17px;
+  font-weight: 800;
+  font-family: var(--font-mono);
+}
+
+.spec-sub-item .spec-val-box .val-denom,
+.gpu-sub-spec-item .spec-val-box .val-denom {
+  font-size: 13.5px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--primary-blue);
+}
+
+.spec-sub-item .spec-val-box .val-unit,
+.gpu-sub-spec-item .spec-val-box .val-unit {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-left: 2px;
+}
+
+/* 系统负载进度条 Grid 布局 */
+.load-bars-wrap {
+  display: grid;
+  grid-template-columns: max-content max-content 1fr max-content;
+  align-items: center;
+  gap: 8px 10px;
+  margin-top: 6px;
+  width: 100%;
+}
+
+.load-bar-row {
+  display: contents;
+}
+
+.load-bar-lbl {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.load-bar-row .val-num {
+  font-size: 12px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  margin-right: 2px;
+}
+
+.load-bar-track {
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: rgba(148, 163, 184, 0.12);
+  overflow: hidden;
+  width: 100%;
+}
+
+.load-bar-track i {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  transition: width 0.5s ease, background-color 0.3s ease;
+}
+
+.load-bar-pct {
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  text-align: right;
+}
+
+.load-normal {
+  color: var(--accent-emerald) !important;
+}
+
+.load-busy {
+  color: var(--accent-amber) !important;
+}
+
+.load-overload {
+  color: var(--accent-rose) !important;
+}
+
+.load-normal-bg {
+  background: linear-gradient(90deg, #10b981, #059669);
+}
+
+.load-busy-bg {
+  background: linear-gradient(90deg, #f59e0b, #d97706);
+}
+
+.load-overload-bg {
+  background: linear-gradient(90deg, #f43f5e, #e11d48);
+}
+
+.sched-ring-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sched-ring {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+
+.sem-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+}
+
+.val-num {
+  font-size: 22px;
+  font-weight: 800;
+  font-family: var(--font-mono);
+}
+
+.val-num.cyan {
+  color: var(--primary-cyan);
+  text-shadow: 0 0 10px rgba(56, 189, 248, 0.25);
+}
+
+.val-num.violet {
+  color: var(--primary-violet);
+  text-shadow: 0 0 10px rgba(168, 85, 247, 0.25);
+}
+
+.val-num.amber {
+  color: var(--accent-amber);
+  text-shadow: 0 0 10px rgba(251, 191, 36, 0.25);
+}
+
+/* ================= Row 2: 作业调度中心 & 存储监控 (Dual Center) ================= */
+.dual-row {
+  display: grid;
+  grid-template-columns: 1.1fr 1.3fr;
+  gap: 10px;
+  min-height: 0;
+}
+
+.dual-row .glass-panel {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.job-section-top {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.job-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+
+.job-card {
+  text-align: center;
+  padding: 8px 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-chip);
+}
+
+.job-card b {
+  display: block;
+  font-size: 20px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  line-height: 1.2;
+}
+
+.job-card span {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.job-card.run b { color: var(--primary-cyan); }
+.job-card.pend b { color: var(--accent-amber); }
+.job-card.susp b { color: #a855f7; }
+.job-card.done b { color: var(--accent-emerald); }
+.job-card.fail b { color: var(--accent-rose); }
+
+.job-bar {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  display: flex;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.job-bar i {
+  height: 100%;
+  transition: width 0.5s ease;
+}
+
+.job-bar i.run { background: var(--primary-cyan); }
+.job-bar i.pend { background: var(--accent-amber); }
+.job-bar i.susp { background: #a855f7; }
+.job-bar i.done { background: var(--accent-emerald); }
+.job-bar i.fail { background: var(--accent-rose); }
+
+/* 存储 Donut Section */
+.storage-donut-section {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 10px 20px;
+  background: var(--bg-chip);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  flex: none;
+}
+
+.donut-svg-wrap {
+  width: 76px;
+  height: 76px;
+  position: relative;
+  flex: none;
+}
+
+.donut-svg-wrap svg {
+  width: 100%;
+  height: 100%;
+}
+
+.storage-cap-summary {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 1;
+}
+
+.storage-cap-summary .cap-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.storage-cap-summary .cap-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.storage-cap-summary .cap-value {
+  font-size: 22px;
+  font-weight: 800;
+  font-family: var(--font-mono);
+  line-height: 1.1;
+}
+
+.storage-cap-summary .cap-divider {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--border-glow);
+}
+
+/* ---------- 共享存储/资源 Table 样式 ---------- */
+.table-wrapper {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+thead th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 6px 8px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border-subtle);
+  position: sticky;
+  top: 0;
+  background: var(--bg-canvas);
+  z-index: 2;
+}
+
+tbody td {
+  padding: 6px 8px;
+  color: var(--text-main);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  transition: background 0.2s;
+}
+
+tbody tr:hover {
+  background: rgba(56, 189, 248, 0.04);
+}
+
+.badge-type {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid;
+}
+
+.badge-type.nfs {
+  color: var(--primary-cyan);
+  border-color: rgba(56, 189, 248, 0.4);
+  background: rgba(56, 189, 248, 0.1);
+}
+
+.badge-type.lustre {
+  color: var(--primary-blue);
+  border-color: rgba(99, 102, 241, 0.4);
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.badge-type.ceph {
+  color: var(--accent-amber);
+  border-color: rgba(251, 191, 36, 0.4);
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.badge-type.gpfs {
+  color: var(--primary-violet);
+  border-color: rgba(168, 85, 247, 0.4);
+  background: rgba(168, 85, 247, 0.1);
+}
+
+.table-bar-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.table-bar {
+  width: 90px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.15);
+  overflow: hidden;
+}
+
+.table-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent-emerald), #059669);
+  transition: width 0.5s ease, background 0.3s;
+}
+
+.table-bar.warn i {
+  background: linear-gradient(90deg, var(--accent-amber), #d97706);
+}
+
+.table-bar.danger i {
+  background: linear-gradient(90deg, var(--accent-rose), #e11d48);
+}
+
+.q-name-badge {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-main);
+  background: var(--bg-chip);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  display: inline-block;
+}
+
+/* 文本与状态高亮辅助类 */
+.text-bold { font-weight: 600; }
+.text-emerald { color: var(--accent-emerald); }
+.text-cyan { color: var(--primary-cyan); }
+.text-amber { color: var(--accent-amber); }
+.text-rose { color: var(--accent-rose); }

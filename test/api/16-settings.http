@@ -1,0 +1,9 @@
+# ========================================
+# ===== SETTINGS Http =====
+# ========================================
+# ----- 登录用户获取平台配置 -----
+
+
+### 获取平台配置（需要登录 Token）
+GET {{addr}}/api/settings/platform
+Authorization: Bearer {{accessToken}}

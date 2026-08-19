@@ -1,0 +1,7 @@
+#!/bin/bash
+#ref: https://turbovnc.org/Documentation/ApplicationIsolation
+unalias -a
+openbox-session &
+PID=$!
+${DCE_App_Cmd}
+kill ${PID}

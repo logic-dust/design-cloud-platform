@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteTargetsManager">
+    <targets>
+      <target name="dc-hpcadmin-cent7.dev.vm" type="ssh/sftp" uuid="d7a6924f-436a-4ec4-96d8-084a1cb6b8c8">
+        <config>
+          <option name="projectRootOnTarget" value="/share/apps/design-cloud" />
+          <option name="serverName" value="hpcadmin@192.168.6.11:60022 password" />
+          <option name="useRsync" value="true" />
+        </config>
+        <ContributedStateBase type="GoLanguageRuntime">
+          <config>
+            <option name="compiledExecutablesVolume">
+              <VolumeState>
+                <option name="remotePath" value="/share/apps/design-cloud" />
+              </VolumeState>
+            </option>
+            <option name="goPath" value="/share/home/hpcadmin/go" />
+            <option name="goRoot" value="/share/apps/langs/go/bin/go" />
+            <option name="goVersion" value="go1.26.2 linux/amd64" />
+            <option name="projectSourcesVolume">
+              <VolumeState>
+                <option name="remotePath" value="/tmp/dce" />
+              </VolumeState>
+            </option>
+          </config>
+        </ContributedStateBase>
+        <ContributedStateBase type="GoLanguageRuntime">
+          <config />
+        </ContributedStateBase>
+      </target>
+      <target name="WSL - Arch" type="wsl" uuid="78a2c675-b3e0-4256-ab82-dee071d3e14a">
+        <config>
+          <option name="distributionMsId" value="Arch" />
+          <option name="projectRootOnTarget" value="{exitCode=0, timeout=false, cancelled=false, stdout=/tmp/tmp.81rUxJubk8&#13;&#10;, stderr=}/design-cloud-engine" />
+        </config>
+        <ContributedStateBase type="GoLanguageRuntime">
+          <config>
+            <option name="goPath" value="$PROJECT_DIR$/../../../levin/dev/env/go" />
+            <option name="goRoot" value="$PROJECT_DIR$/../../../levin/dev/env/mise/installs/go/latest" />
+          </config>
+        </ContributedStateBase>
+      </target>
+    </targets>
+  </component>
+</project>
