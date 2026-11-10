@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-TARGET_DIR="/opt/design-cloud"
-ENGINE_BIN="${TARGET_DIR}/design-cloud-engine"
-LAUNCHER_BIN="${TARGET_DIR}/dc-launcher"
+TARGET_DIR="/opt/dce"
+ENGINE_BIN="${TARGET_DIR}/dc-engine"
+EXEC_BIN="${TARGET_DIR}/dc-exec"
 PKG_USER="__PKG_USER__"
 PKG_GROUP="__PKG_GROUP__"
 
@@ -16,20 +16,12 @@ if [[ -f "${ENGINE_BIN}" ]]; then
   chmod 0755 "${ENGINE_BIN}"
 fi
 
-if [[ -f "${LAUNCHER_BIN}" ]]; then
-  chown "${PKG_USER}:${PKG_GROUP}" "${LAUNCHER_BIN}"
-  chmod 0700 "${LAUNCHER_BIN}"
+if [[ -f "${EXEC_BIN}" ]]; then
+  chown "${PKG_USER}:${PKG_GROUP}" "${EXEC_BIN}"
+  chmod 0700 "${EXEC_BIN}"
 
   # RPM file replacement drops security.capability xattr — always re-apply.
-  if command -v setcap >/dev/null 2>&1; then
-    setcap cap_setuid,cap_setgid+ep "${LAUNCHER_BIN}"
-  elif [[ -x /sbin/setcap ]]; then
-    /sbin/setcap cap_setuid,cap_setgid+ep "${LAUNCHER_BIN}"
-  elif [[ -x /usr/sbin/setcap ]]; then
-    /usr/sbin/setcap cap_setuid,cap_setgid+ep "${LAUNCHER_BIN}"
-  else
-    echo "WARNING: setcap not found; ${LAUNCHER_BIN} will fail L0 capability check."
-  fi
+  dce_apply_exec_setcap "${EXEC_BIN}" || true
 fi
 
 # Known data paths: if they exist from a previous install under another owner,
@@ -47,8 +39,6 @@ if [[ -f /etc/design-cloud/config.toml ]]; then
 fi
 
 # Apply tmpfiles (creates /run/design-cloud etc. when systemd-tmpfiles exists).
-if command -v systemd-tmpfiles >/dev/null 2>&1; then
-  systemd-tmpfiles --create /usr/lib/tmpfiles.d/design-cloud-engine.conf 2>/dev/null || true
-fi
+dce_systemd_tmpfiles_create
 
 exit 0

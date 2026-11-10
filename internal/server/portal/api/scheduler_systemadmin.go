@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"errors"
 	"net/http"
-	"slices"
 
 	"design-cloud-engine/internal/server/portal/httputil"
 	"design-cloud-engine/internal/server/service/scheduler"
@@ -14,6 +13,9 @@ import (
 
 // route: /api/admin/system/scheduler
 func (h *schedulerHandler) adminSchedulerAPI(g *echo.Group) {
+	g.GET("/hosts", h.listHosts)
+	g.GET("/queues", h.listQueues)
+	g.GET("/meta", h.getMeta)
 	jobsGroup := g.Group("/jobs")
 	jobsGroup.GET("", h.adminListJobs)
 	jobsGroup.GET("/:id", h.adminGetJob)
@@ -24,11 +26,12 @@ func (h *schedulerHandler) adminSchedulerAPI(g *echo.Group) {
 
 // --- 获取所有任务（管理员）
 func (h *schedulerHandler) adminListJobs(c *echo.Context) error {
-	var query scheduler.JobListQuery
-	if err := c.Bind(&query); err != nil {
+	var userQuery scheduler.JobListQuery
+	if err := c.Bind(&userQuery); err != nil {
 		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
 	}
-	jobsInfo, err := h.scheduler.ListJobs(c.Request().Context(), query)
+	ctx := c.Request().Context()
+	jobsInfo, err := h.scheduler.ListJobs(ctx, userQuery)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
@@ -39,7 +42,7 @@ func (h *schedulerHandler) adminListJobs(c *echo.Context) error {
 func (h *schedulerHandler) adminGetJob(c *echo.Context) error {
 	jobInfo, err := h.scheduler.GetJob(c.Request().Context(), c.Param("id"))
 	if err != nil {
-		return httputil.RespondError(c, err)
+		return respondJobQueryError(c, err)
 	}
 	return c.JSON(http.StatusOK, httputil.Response{Data: jobInfo})
 }
@@ -47,10 +50,7 @@ func (h *schedulerHandler) adminGetJob(c *echo.Context) error {
 // --- 更改指定用户的任务状态（管理员）POST /jobs/:id/:op
 func (h *schedulerHandler) adminUpdateJobStatus(c *echo.Context) error {
 	jobID := c.Param("id")
-	if jobID == "0" {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "operation on job ID 0 is not allowed"})
-	}
-	op, ok := parseJobOp(c.Param("op"))
+	op, ok := scheduler.ParseJobOp(c.Param("op"))
 	if !ok {
 		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "unsupported job operation: " + c.Param("op")})
 	}
@@ -83,9 +83,6 @@ func (h *schedulerHandler) adminUpdateJobStatus(c *echo.Context) error {
 // --- 管理员修改单个作业属性（PATCH /jobs/:id，仅 name；队列切换走 :op=switch）
 func (h *schedulerHandler) adminModifyJob(c *echo.Context) error {
 	jobID := c.Param("id")
-	if jobID == "0" {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "operation on job ID 0 is not allowed"})
-	}
 	var req struct {
 		Name *string `json:"name,omitempty"`
 		User string  `json:"user"`
@@ -113,9 +110,6 @@ func (h *schedulerHandler) adminBatchUpdateJobStatus(c *echo.Context) error {
 	}
 	if len(req.JobIDs) == 0 {
 		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "jobIds is required"})
-	}
-	if slices.Contains(req.JobIDs, "0") {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "operation on job ID 0 is not allowed"})
 	}
 	user := cmp.Or(req.User, httputil.CurrentUsername(c))
 	failures, err := h.scheduler.ControlJob(c.Request().Context(), scheduler.JobControlRequest{

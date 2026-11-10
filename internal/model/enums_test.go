@@ -1,7 +1,7 @@
 package model
 
 import (
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,7 +40,7 @@ func TestUserStatusCode_Enum(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, UserLocked, uStatus)
 
-	// JSON Unmarshal from Int must fail (no legacy numeric fallback)
+	// JSON Unmarshal from Int must fail
 	err = json.Unmarshal([]byte(`2`), &uStatus)
 	assert.Error(t, err)
 }
@@ -74,13 +74,12 @@ func TestNodeStatus_Enum(t *testing.T) {
 
 	assert.Equal(t, "online", NodeStatusOnline.String())
 	assert.Equal(t, "offline", NodeStatusOffline.String())
-	assert.Equal(t, "pending", NodeStatusPending.String())
-	assert.Equal(t, "provisioned", NodeStatusProvisioned.String())
 	assert.Equal(t, "maintenance", NodeStatusMaintenance.String())
+	assert.Equal(t, "", NodeStatusUnset.String())
 
-	ns, err := ParseNodeStatus("provisioned")
+	ns, err := ParseNodeStatus("maintenance")
 	require.NoError(t, err)
-	assert.Equal(t, NodeStatusProvisioned, ns)
+	assert.Equal(t, NodeStatusMaintenance, ns)
 
 	bytes, err := json.Marshal(NodeStatusOnline)
 	require.NoError(t, err)
@@ -95,15 +94,41 @@ func TestNodeStatus_Enum(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestConnectionStatus_And_Source(t *testing.T) {
+func TestConnectionStatus(t *testing.T) {
 	t.Parallel()
+
+	assert.Equal(t, ConnectionStatus(1), ConnectionRunning)
+	assert.Equal(t, ConnectionStatus(2), ConnectionStopped)
+	assert.Equal(t, ConnectionStatus(3), ConnectionPending)
+	assert.Equal(t, ConnectionStatus(4), ConnectionTerminating)
+	assert.Equal(t, ConnectionStatus(5), ConnectionUnknown)
+	assert.Equal(t, ConnectionStatus(6), ConnectionMaintenance)
+
+	assert.True(t, ConnectionRunning.IsPersisted())
+	assert.True(t, ConnectionStopped.IsPersisted())
+	assert.True(t, ConnectionPending.IsPersisted())
+	assert.True(t, ConnectionTerminating.IsPersisted())
+	assert.False(t, ConnectionUnknown.IsPersisted())
+	assert.False(t, ConnectionMaintenance.IsPersisted())
 
 	assert.Equal(t, "running", ConnectionRunning.String())
 	assert.Equal(t, "stopped", ConnectionStopped.String())
+	assert.Equal(t, "pending", ConnectionPending.String())
+	assert.Equal(t, "terminating", ConnectionTerminating.String())
+	assert.Equal(t, "unknown", ConnectionUnknown.String())
+	assert.Equal(t, "maintenance", ConnectionMaintenance.String())
 
 	cs, err := ParseConnectionStatus("running")
 	require.NoError(t, err)
 	assert.Equal(t, ConnectionRunning, cs)
+
+	pending, err := ParseConnectionStatus("pending")
+	require.NoError(t, err)
+	assert.Equal(t, ConnectionPending, pending)
+
+	terminating, err := ParseConnectionStatus("terminating")
+	require.NoError(t, err)
+	assert.Equal(t, ConnectionTerminating, terminating)
 
 	bytes, err := json.Marshal(ConnectionStopped)
 	require.NoError(t, err)
@@ -116,32 +141,6 @@ func TestConnectionStatus_And_Source(t *testing.T) {
 
 	// Numeric JSON should be rejected
 	err = json.Unmarshal([]byte(`1`), &connSt)
-	assert.Error(t, err)
-
-	// Source
-	assert.Equal(t, "manual", ConnectionSourceManual.String())
-	assert.Equal(t, "discovered", ConnectionSourceDiscovered.String())
-	assert.Equal(t, "fixed", ConnectionSourceFixed.String())
-
-	src, err := ParseConnectionSource("discovered")
-	require.NoError(t, err)
-	assert.Equal(t, ConnectionSourceDiscovered, src)
-
-	src, err = ParseConnectionSource("fixed")
-	require.NoError(t, err)
-	assert.Equal(t, ConnectionSourceFixed, src)
-
-	var connSrc ConnectionSource
-	err = json.Unmarshal([]byte(`"manual"`), &connSrc)
-	require.NoError(t, err)
-	assert.Equal(t, ConnectionSourceManual, connSrc)
-
-	err = json.Unmarshal([]byte(`"fixed"`), &connSrc)
-	require.NoError(t, err)
-	assert.Equal(t, ConnectionSourceFixed, connSrc)
-
-	// Numeric JSON should be rejected
-	err = json.Unmarshal([]byte(`1`), &connSrc)
 	assert.Error(t, err)
 }
 

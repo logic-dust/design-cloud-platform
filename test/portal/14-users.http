@@ -1,0 +1,44 @@
+# ========================================
+# ===== USERS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+
+### 获取用户基础资料
+GET {{addr}}/api/users/me
+Authorization: Bearer {{accessToken}}
+
+
+### 批量解析 UID/GID → 名字
+# ----- 约束：去重后 uids+gids ≤ 5000；去重前每个数组 ≤ 8192；缺省/null 等价空数组 -----
+# ----- 响应含 users/groups/notFound/ttl/negativeTtl；notFound={uids,gids}，仅表示已确认不存在（故障时 503） -----
+# ----- 无 GET /api/users 目录搜索端点；用户侧仅 /me、改密、id-mappings -----
+POST {{addr}}/api/users/id-mappings
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "uids": [1000, 10001, 10002],
+  "gids": [998, 9000]
+}
+
+### 批量解析 UID/GID → 名字（空请求：users/groups 为 {}，notFound.uids/gids 为 []）
+POST {{addr}}/api/users/id-mappings
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "uids": null,
+  "gids": []
+}
+
+
+# @manual
+### 修改密码（会改 LDAP 密码，勿在自动化回归中执行）
+PATCH {{addr}}/api/users/me/password
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "oldPassword": "{{password}}",
+  "password": "new_password"
+}

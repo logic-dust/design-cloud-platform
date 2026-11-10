@@ -2,25 +2,19 @@ name: "design-cloud-engine"
 arch: "${PKG_ARCH}"
 platform: "linux"
 version: "${VERSION}"
-release: "1"
+release: "${PKG_RELEASE}"
 section: "default"
 priority: "extra"
 maintainer: "Design Cloud Team <team@example.com>"
 description: |
-  Design Cloud Engine — HPC desktop management engine and privilege launcher.
-  Engine and dc-launcher are version-locked in this single package.
+  Design Cloud Engine — HPC desktop management engine and dc-exec.
+  Engine and dc-exec are version-locked in this single package.
 vendor: "Design Cloud"
 homepage: "https://github.com/levinit/design-cloud-engine"
 license: "Proprietary"
 
-# Replaces old launcher-only package (nFPM maps this to RPM Obsoletes).
-replaces:
-  - design-cloud-launcher
-provides:
-  - design-cloud-launcher
-
 contents:
-  - dst: "/opt/design-cloud"
+  - dst: "/opt/dce"
     type: dir
     file_info:
       mode: 0755
@@ -28,14 +22,14 @@ contents:
       group: root
 
   - src: "${ENGINE_ABS_PATH}"
-    dst: "/opt/design-cloud/design-cloud-engine"
+    dst: "/opt/dce/dc-engine"
     file_info:
       mode: 0755
       owner: "${PKG_USER}"
       group: "${PKG_GROUP}"
 
-  - src: "${LAUNCHER_ABS_PATH}"
-    dst: "/opt/design-cloud/dc-launcher"
+  - src: "${EXEC_BIN_ABS_PATH}"
+    dst: "/opt/dce/dc-exec"
     file_info:
       mode: 0700
       owner: "${PKG_USER}"
@@ -91,9 +85,25 @@ contents:
       owner: root
       group: root
 
+  - src: "${VNC_WRAPPER_ABS_PATH}"
+    dst: "/usr/share/design-cloud-engine/scripts/vnc/job-gui-wrapper.sh"
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  - src: "${LOGROTATE_ABS_PATH}"
+    dst: "/etc/logrotate.d/design-cloud-engine"
+    type: config|noreplace
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
 scripts:
   preinstall: "${PRE_INSTALL_SCRIPT}"
   postinstall: "${POST_INSTALL_SCRIPT}"
+  preremove: "${PRE_REMOVE_SCRIPT}"
 
 # RPM-only scriptlets live under the rpm section (RPMScripts: pretrans/posttrans/verify).
 # Putting posttrans under the generic scripts block fails the nFPM schema:

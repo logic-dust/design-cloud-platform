@@ -1,7 +1,7 @@
 package execution
 
 import (
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"fmt"
 )
 

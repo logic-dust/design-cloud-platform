@@ -13,8 +13,9 @@ import (
 	"strconv"
 	"time"
 
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/agent/probe"
 	pb "design-cloud-engine/internal/contract/proto"
+	"design-cloud-engine/internal/platform/config"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -38,7 +39,7 @@ func (a *Agent) connectLoop() {
 
 	for {
 		select {
-		case <-a.stopCh:
+		case <-a.ctx.Done():
 			return
 		default:
 		}
@@ -55,7 +56,7 @@ func (a *Agent) connectLoop() {
 		skipDelay := false
 		for _, addr := range addresses {
 			select {
-			case <-a.stopCh:
+			case <-a.ctx.Done():
 				return
 			default:
 			}
@@ -130,7 +131,7 @@ func (a *Agent) connectLoop() {
 		retryTimer := time.NewTimer(currentDelay + jitter)
 
 		select {
-		case <-a.stopCh:
+		case <-a.ctx.Done():
 			retryTimer.Stop()
 			return
 		case <-retryTimer.C:
@@ -240,7 +241,7 @@ func (a *Agent) connectToServer(addr string) error {
 		a.logger.Info("Server shutting down, delaying reconnection", "delay", delay)
 		select {
 		case <-time.After(delay):
-		case <-a.stopCh:
+		case <-a.ctx.Done():
 			// Stop() called during Thundering Herd delay: abort the wait early
 			return err
 		}
@@ -274,10 +275,6 @@ func (a *Agent) buildDialOptions(addr string) ([]grpc.DialOption, error) {
 		}))
 	}
 
-	if a.cfg.DialContext != nil {
-		opts = append(opts, grpc.WithContextDialer(a.cfg.DialContext))
-	}
-
 	return opts, nil
 }
 
@@ -296,18 +293,9 @@ func (a *Agent) buildTLSCredentials(addr string) (credentials.TransportCredentia
 		return nil, fmt.Errorf("TLS server name is required")
 	}
 
-	cert, err := tls.LoadX509KeyPair(a.cfg.TLS.CertPath, a.cfg.TLS.KeyPath)
+	cert, pool, err := loadTLSMaterial(a.cfg.TLS)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load key pair: %w", err)
-	}
-
-	pool := x509.NewCertPool()
-	ca, err := os.ReadFile(a.cfg.TLS.CAPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read CA certificate from %s: %w", a.cfg.TLS.CAPath, err)
-	}
-	if ok := pool.AppendCertsFromPEM(ca); !ok {
-		return nil, fmt.Errorf("failed to append CA certificate")
+		return nil, err
 	}
 
 	return credentials.NewTLS(&tls.Config{
@@ -316,6 +304,26 @@ func (a *Agent) buildTLSCredentials(addr string) (credentials.TransportCredentia
 		ServerName:   serverName,
 		MinVersion:   tls.VersionTLS13,
 	}), nil
+}
+
+// loadTLSMaterial validates and loads the current client identity and trusted CA.
+// It is also called during manager construction to fail fast on static TLS errors;
+// reconnects reload the files so certificate renewal takes effect without restart.
+func loadTLSMaterial(cfg TLSClientConfig) (tls.Certificate, *x509.CertPool, error) {
+	cert, err := tls.LoadX509KeyPair(cfg.CertPath, cfg.KeyPath)
+	if err != nil {
+		return tls.Certificate{}, nil, fmt.Errorf("failed to load key pair: %w", err)
+	}
+
+	ca, err := os.ReadFile(cfg.CAPath)
+	if err != nil {
+		return tls.Certificate{}, nil, fmt.Errorf("failed to read CA certificate from %s: %w", cfg.CAPath, err)
+	}
+	pool := x509.NewCertPool()
+	if ok := pool.AppendCertsFromPEM(ca); !ok {
+		return tls.Certificate{}, nil, fmt.Errorf("failed to append CA certificate from %s", cfg.CAPath)
+	}
+	return cert, pool, nil
 }
 
 func prependUniqueAddress(addresses []string, preferred string) []string {
@@ -344,6 +352,7 @@ func leaderRedirectAddr(clusterPort int, leaderID, leaderAddr string) string {
 
 // sendRegister sends the registration request to the server
 func (a *Agent) sendRegister(stream pb.ControlService_SyncClient) error {
+	info := probe.DetectSysInfo()
 	return a.sendMessage(stream, &pb.AgentMessage{
 		Payload: &pb.AgentMessage_RegisterRequest{
 			RegisterRequest: &pb.RegisterRequest{
@@ -351,9 +360,12 @@ func (a *Agent) sendRegister(stream pb.ControlService_SyncClient) error {
 				Version:      config.VERSION,
 				RegisteredAt: time.Now().Unix(),
 				SystemInfo: &pb.SystemInfo{
-					Os:       runtime.GOOS,
-					Arch:     runtime.GOARCH,
-					CpuCores: int64(runtime.NumCPU()),
+					Os:            runtime.GOOS,
+					Arch:          runtime.GOARCH,
+					CpuCores:      int64(runtime.NumCPU()),
+					OsName:        info.OSName,
+					OsVersion:     info.OSVersion,
+					KernelVersion: info.KernelVersion,
 				},
 			},
 		},

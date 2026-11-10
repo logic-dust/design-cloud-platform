@@ -130,6 +130,107 @@ func TestIssueNodeCert_DefaultsToAgentValidity(t *testing.T) {
 	}
 }
 
+func TestPublishCertKeyPair_RestoresOnKeyWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "n.crt")
+	keyPath := filepath.Join(dir, "n.key")
+	oldCert, oldKey := []byte("OLD-CERT"), []byte("OLD-KEY-MATERIAL")
+	if err := publishCertKeyPair(certPath, keyPath, oldCert, oldKey); err != nil {
+		t.Fatalf("seed pair: %v", err)
+	}
+
+	blocked := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(blocked, []byte("not-a-dir"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	badKey := filepath.Join(blocked, "n.key")
+
+	if err := publishCertKeyPair(certPath, badKey, []byte("NEW-CERT"), []byte("NEW-KEY")); err == nil {
+		t.Fatal("expected key write failure")
+	}
+	got, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read cert: %v", err)
+	}
+	if string(got) != string(oldCert) {
+		t.Fatalf("cert after failed publish = %q, want restored %q", got, oldCert)
+	}
+	gotKey, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read key: %v", err)
+	}
+	if string(gotKey) != string(oldKey) {
+		t.Fatalf("original key path changed unexpectedly: %q", gotKey)
+	}
+}
+
+func TestPublishCertKeyPair_KeepsPrevForCommitWindow(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "n.crt")
+	keyPath := filepath.Join(dir, "n.key")
+	if err := publishCertKeyPair(certPath, keyPath, []byte("v1-cert"), []byte("v1-key")); err != nil {
+		t.Fatalf("v1: %v", err)
+	}
+	if err := publishCertKeyPair(certPath, keyPath, []byte("v2-cert"), []byte("v2-key")); err != nil {
+		t.Fatalf("v2: %v", err)
+	}
+	prevCert, err := os.ReadFile(certPath + certPairPrevSuffix)
+	if err != nil {
+		t.Fatalf("read cert.prev: %v", err)
+	}
+	if string(prevCert) != "v1-cert" {
+		t.Fatalf("cert.prev = %q, want v1-cert", prevCert)
+	}
+	prevKey, err := os.ReadFile(keyPath + certPairPrevSuffix)
+	if err != nil {
+		t.Fatalf("read key.prev: %v", err)
+	}
+	if string(prevKey) != "v1-key" {
+		t.Fatalf("key.prev = %q, want v1-key", prevKey)
+	}
+}
+
+func TestCommitCertPair_RemovesSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "n.crt")
+	keyPath := filepath.Join(dir, "n.key")
+	if err := publishCertKeyPair(certPath, keyPath, []byte("v1-cert"), []byte("v1-key")); err != nil {
+		t.Fatalf("v1: %v", err)
+	}
+	if err := publishCertKeyPair(certPath, keyPath, []byte("v2-cert"), []byte("v2-key")); err != nil {
+		t.Fatalf("v2: %v", err)
+	}
+	CommitCertPair(certPath, keyPath)
+	for _, p := range []string{certPath + certPairPrevSuffix, keyPath + certPairPrevSuffix} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s should be removed after commit", p)
+		}
+	}
+}
+
+func TestRollbackCertPair_RestoresPreviousPair(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "n.crt")
+	keyPath := filepath.Join(dir, "n.key")
+	if err := publishCertKeyPair(certPath, keyPath, []byte("v1-cert"), []byte("v1-key")); err != nil {
+		t.Fatalf("v1: %v", err)
+	}
+	if err := publishCertKeyPair(certPath, keyPath, []byte("v2-cert"), []byte("v2-key")); err != nil {
+		t.Fatalf("v2: %v", err)
+	}
+	if err := RollbackCertPair(certPath, keyPath); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	cert, err := os.ReadFile(certPath)
+	if err != nil || string(cert) != "v1-cert" {
+		t.Fatalf("cert = %q, err=%v", cert, err)
+	}
+	key, err := os.ReadFile(keyPath)
+	if err != nil || string(key) != "v1-key" {
+		t.Fatalf("key = %q, err=%v", key, err)
+	}
+}
+
 func newTestCSR(t *testing.T, cn string) []byte {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

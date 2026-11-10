@@ -2,21 +2,21 @@ package settings
 
 import (
 	"bytes"
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"errors"
 	"fmt"
 
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/settings/schema"
 
 	"gorm.io/gorm"
 )
 
-// EnsureDefaults seeds default runtime settings into the database for all known domains.
-// It only creates missing rows; settings are a fresh contract and are never migrated.
+// EnsureDefaults seeds missing domain defaults.
 func EnsureDefaults(store *db.Store) error {
 	for _, domain := range schema.AllDomains() {
+
 		settings, ok := schema.DefaultSettings(domain)
 		if !ok {
 			continue

@@ -1,7 +1,7 @@
 package execution_test
 
 import (
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"testing"
 
 	"design-cloud-engine/internal/execution"
@@ -128,4 +128,5 @@ func TestGetPayload(t *testing.T) {
 			t.Fatal("expected unmarshal error for invalid json bytes")
 		}
 	})
+
 }

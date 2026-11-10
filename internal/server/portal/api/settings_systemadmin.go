@@ -4,11 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 
+	"design-cloud-engine/internal/contract"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/server/portal/httputil"
-	"design-cloud-engine/internal/server/service/settings/schema"
 
 	"github.com/labstack/echo/v5"
 )
@@ -36,7 +36,7 @@ func (h *settingsHandler) getSettingsByDomain(c *echo.Context) error {
 	}
 	settings, err := h.settings.GetByDomain(c.Request().Context(), domain)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, contract.ErrNotFound) {
 			return c.JSON(http.StatusNotFound, httputil.Response{Message: "unknown domain: " + domainStr})
 		}
 		return httputil.RespondError(c, err)
@@ -58,11 +58,8 @@ func (h *settingsHandler) updateSettingsByDomain(c *echo.Context) error {
 	}
 	if err := h.settings.UpdateByDomain(c.Request().Context(), domain, raw); err != nil {
 		switch {
-		case errors.Is(err, fs.ErrNotExist):
+		case errors.Is(err, contract.ErrNotFound):
 			return c.JSON(http.StatusNotFound, httputil.Response{Message: "unknown domain: " + domainStr})
-		case errors.Is(err, fs.ErrInvalid):
-			// 业务规则校验失败（字段越界/enum 不合法）→ 422，非 400。
-			return c.JSON(http.StatusUnprocessableEntity, httputil.Response{Message: err.Error()})
 		default:
 			return httputil.RespondError(c, err)
 		}

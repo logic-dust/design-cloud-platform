@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/cmd/engine/console"
+	"design-cloud-engine/internal/platform/config"
 )
 
 // runCheckConfigCommand 加载并校验配置文件（TOML 解析 → 运行时解析 → 业务校验），
@@ -30,12 +30,15 @@ func runCheckConfigCommand(flags *Flags, args []string) error {
 		return fmt.Errorf("config check failed for %s: %w", path, err)
 	}
 
-	common.PrintStdout("config OK: %s\n", path)
-	common.PrintStdout("  node_id=%s server=%t agent=true\n",
+	console.PrintStdout("config OK: %s\n", path)
+	console.PrintStdout("  node_id=%s server=%t agent=true\n",
 		cfg.Runtime.NodeID, cfg.Runtime.ServerEnabled)
-	common.PrintStdout("  portal=%s:%s tls=%t\n", cfg.Portal.Host, cfg.Portal.Port, cfg.Portal.TLS)
-	common.PrintStdout("  cluster.port=%d servers=%d\n", cfg.Cluster.Port, len(cfg.Cluster.Servers))
-	common.PrintStdout("  database=%s@%s:%s/%s\n",
+	console.PrintStdout("  portal=%s:%s tls=%t\n", cfg.Portal.Host, cfg.Portal.Port, cfg.Portal.TLS)
+	// data_dir 是生效后的 DataDir（配置为空时已回退 BaseDir）。部署/调试脚本据此预检目录可写性：
+	// DataDir 不可写会让 engine 在初始化集群 CA 阶段退出（dlv 仍在监听 → “dlv 起来但 engine 秒退”）。
+	console.PrintStdout("  data_dir=%s\n", cfg.Runtime.DataDir)
+	console.PrintStdout("  cluster.port=%d servers=%d\n", cfg.Cluster.Port, len(cfg.Cluster.Servers))
+	console.PrintStdout("  database=%s@%s:%s/%s\n",
 		cfg.Database.User, cfg.Database.Host, cfg.Database.Port, cfg.Database.Name)
 	return nil
 }

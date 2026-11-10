@@ -3,17 +3,18 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"os"
 
 	"design-cloud-engine/cmd/engine/command"
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/cmd/engine/console"
+	"design-cloud-engine/internal/platform/config"
 )
 
 func main() {
-	// 1. 平台前置准入门禁（Fail-Fast：第一行执行，Linux 阻断 root 越权，保护子命令与主服务）
+	// 1. 平台前置准入门禁（Fail-Fast：第一行执行，配置平台级进程上下文）
 	if err := checkPlatformPreconditions(); err != nil {
-		common.PrintStderr("Error: %v\n", err)
+		console.PrintStderr("Error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -24,14 +25,17 @@ func main() {
 		if errors.Is(err, command.ErrHelpRequested) {
 			os.Exit(0)
 		}
-		common.PrintStderr("Error: %v\n", err)
+		console.PrintStderr("Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	// 3. 执行 CLI 子命令并在完成后退出（所有一次性子命令统一由 command 包调度执行）
 	if len(commandArgs) > 0 {
 		if err := command.Execute(flags, commandArgs); err != nil {
-			common.PrintStderr("Error: %v\n", err)
+			if errors.Is(err, flag.ErrHelp) || errors.Is(err, command.ErrHelpRequested) {
+				os.Exit(0)
+			}
+			console.PrintStderr("Error: %v\n", err)
 			os.Exit(1)
 		}
 		return
@@ -41,7 +45,7 @@ func main() {
 	if err := runWithLifecycle(flags, func(ctx context.Context) error {
 		return runEngine(ctx, flags)
 	}); err != nil {
-		common.PrintStderr("Error: %v\n", err)
+		console.PrintStderr("Error: %v\n", err)
 		os.Exit(1)
 	}
 }

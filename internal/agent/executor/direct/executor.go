@@ -12,8 +12,8 @@ import (
 
 	"design-cloud-engine/internal/execution/payload"
 
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/execution"
+	"design-cloud-engine/internal/platform/process"
 )
 
 // Config holds configuration for the direct executor. It has no platform-specific
@@ -63,6 +63,9 @@ func (e *Executor) Execute(ctx context.Context, req *execution.ExecuteRequest) (
 		resp, err = executeAction(ctx, req, handleGroupList)
 	case execution.ActionGroupGet:
 		resp, err = executeAction(ctx, req, handleGroupGet)
+
+	case execution.ActionSessionControl:
+		resp, err = executeAction(ctx, req, handleSessionControl)
 
 	default:
 		return &execution.ExecuteResponse{
@@ -157,8 +160,8 @@ func executeCommandWithDir(ctx context.Context, req *execution.ExecuteRequest, d
 	cmd.Dir = dir
 	cmd.Env = execution.BuildCleanEnv(req.Env)
 
-	var stdout common.BoundedBuffer
-	var stderr common.BoundedBuffer
+	var stdout process.BoundedBuffer
+	var stderr process.BoundedBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

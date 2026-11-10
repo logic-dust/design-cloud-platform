@@ -9,16 +9,16 @@ import (
 	"time"
 
 	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/config"
 	pb "design-cloud-engine/internal/contract/proto"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/push"
+	"design-cloud-engine/internal/platform/config"
+	"design-cloud-engine/internal/server/push"
 	"design-cloud-engine/internal/server/service/settings"
 )
 
 // newSourceEvaluator 构造一个真实 DB 支撑的告警引擎（默认 DomainAlert 配置 + 告警历史仓储），
-// 用于覆盖 EvalResource/EvalStorage/GetHistory 数据源接入路径。
+// 用于覆盖 EvalMetrics/EvalStorage/GetHistory 数据源接入路径。
 func newSourceEvaluator(t *testing.T) (*Evaluator, *push.Client, *db.Repos) {
 	t.Helper()
 
@@ -52,65 +52,66 @@ func newSourceEvaluator(t *testing.T) (*Evaluator, *push.Client, *db.Repos) {
 		}
 	})
 
-	svc, err := settings.NewService(repos.Setting, auditSvc, nil)
+	svc, err := settings.NewService(repos.Setting, slog.Default(), auditSvc, nil, repos.CacheVersion, repos.Node)
 	if err != nil {
 		t.Fatalf("new settings service: %v", err)
 	}
-	svc.SetNodeRepo(repos.Node)
 
 	hub := push.NewHub()
-	client := hub.Register("admin-1", model.RoleSystemAdmin)
+	client, err := hub.Register("admin-1", model.RoleSystemAdmin)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
 	t.Cleanup(func() { hub.Unregister(client) })
 
-	e := NewEvaluator(hub, svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	e.SetHistoryRepo(repos.AlertHistory)
+	e := NewEvaluator(hub, svc, repos.AlertHistory, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return e, client, repos
 }
 
-// TestEvalResourceMemoryAndDisk 验证节点资源上报：内存/磁盘使用率触发与恢复。
+// TestEvalMetricsMemoryAndDisk 验证节点资源指标：内存/磁盘使用率触发与恢复。
 // 默认 DomainAlert：Memory.Enabled(UsedPercent=90, MinFree=0)、Disk.Enabled(UsedPercent=90, MinFree=0)。
-func TestEvalResourceMemoryAndDisk(t *testing.T) {
+func TestEvalMetricsMemoryAndDisk(t *testing.T) {
 	e, client, _ := newSourceEvaluator(t)
 	ctx := context.Background()
 
 	// 触发：内存 93.75% >= 90 → fire；磁盘 90% >= 90 → fire
-	report := &pb.ResourceReport{
+	report := &pb.Metrics{
 		MemTotal: 128 * 1024 * 1024,
 		MemUsed:  120 * 1024 * 1024, // 93.75%
 		DiskUsages: []*pb.DiskUsage{
 			{MountPoint: "/", Total: 500 * 1024 * 1024, Used: 450 * 1024 * 1024}, // 90%
 		},
 	}
-	if err := e.EvalResource(ctx, "node-01", report); err != nil {
-		t.Fatalf("EvalResource: %v", err)
+	if err := e.EvalMetrics(ctx, "node-01", report); err != nil {
+		t.Fatalf("EvalMetrics: %v", err)
 	}
 	mustReceive(t, client) // memory fire
 	mustReceive(t, client) // disk fire
 	mustNotReceive(t, client)
 
 	// 恢复：内存 50%、磁盘 40%
-	reportOK := &pb.ResourceReport{
+	reportOK := &pb.Metrics{
 		MemTotal: 128 * 1024 * 1024,
 		MemUsed:  64 * 1024 * 1024, // 50%
 		DiskUsages: []*pb.DiskUsage{
 			{MountPoint: "/", Total: 500 * 1024 * 1024, Used: 200 * 1024 * 1024}, // 40%
 		},
 	}
-	if err := e.EvalResource(ctx, "node-01", reportOK); err != nil {
-		t.Fatalf("EvalResource recover: %v", err)
+	if err := e.EvalMetrics(ctx, "node-01", reportOK); err != nil {
+		t.Fatalf("EvalMetrics recover: %v", err)
 	}
 	mustReceive(t, client) // memory recover
 	mustReceive(t, client) // disk recover
 	mustNotReceive(t, client)
 }
 
-// TestEvalResourceDiskMinFree 验证磁盘最小剩余空间维度（MinFree，KB 口径）：
+// TestEvalMetricsDiskMinFree 验证磁盘最小剩余空间维度（MinFree，KiB 口径）：
 // 大盘（>MinFree）剩余低于阈值 → fire；小盘不误报。
-func TestEvalResourceDiskMinFree(t *testing.T) {
+func TestEvalMetricsDiskMinFree(t *testing.T) {
 	e, client, repos := newSourceEvaluator(t)
 	ctx := context.Background()
 
-	// 覆盖：磁盘 MinFreeSpace = 50GB（52428800 KB），关闭 maxUsedPercent 维度
+	// 覆盖：磁盘 MinFreeSpace = 50GB（52428800 KiB），关闭 maxUsedPercent 维度
 	enabled := true
 	usedPercent := float64(0)
 	minFree := int64(52428800)
@@ -131,46 +132,46 @@ func TestEvalResourceDiskMinFree(t *testing.T) {
 	}
 
 	// 大盘（500GB）剩余 20GB < 50GB → fire
-	bigDisk := &pb.ResourceReport{
+	bigDisk := &pb.Metrics{
 		DiskUsages: []*pb.DiskUsage{
-			{MountPoint: "/", Total: 500 * 1024 * 1024, Used: 480 * 1024 * 1024}, // free=20GB (20971520 KB)
+			{MountPoint: "/", Total: 500 * 1024 * 1024, Used: 480 * 1024 * 1024}, // free=20GB (20971520 KiB)
 		},
 	}
-	if err := e.EvalResource(ctx, "node-01", bigDisk); err != nil {
-		t.Fatalf("EvalResource big disk: %v", err)
+	if err := e.EvalMetrics(ctx, "node-01", bigDisk); err != nil {
+		t.Fatalf("EvalMetrics big disk: %v", err)
 	}
 	fireNotify := mustReceive(t, client)
-	expectedFireMsg := "node.node-01.disk. 当前值 20971520.00，阈值 52428800.00"
+	expectedFireMsg := "node.node-01.disk. 当前值 20.00 GiB，阈值 50.00 GiB"
 	if fireNotify.Message != expectedFireMsg {
 		t.Errorf("got notify.Message = %q, want %q", fireNotify.Message, expectedFireMsg)
 	}
 
 	// 恢复：剩余 300GB > 50GB
-	bigDiskOK := &pb.ResourceReport{
+	bigDiskOK := &pb.Metrics{
 		DiskUsages: []*pb.DiskUsage{
 			{MountPoint: "/", Total: 500 * 1024 * 1024, Used: 200 * 1024 * 1024}, // free=300GB
 		},
 	}
-	if err := e.EvalResource(ctx, "node-01", bigDiskOK); err != nil {
-		t.Fatalf("EvalResource big disk recover: %v", err)
+	if err := e.EvalMetrics(ctx, "node-01", bigDiskOK); err != nil {
+		t.Fatalf("EvalMetrics big disk recover: %v", err)
 	}
 	mustReceive(t, client) // recover
 	mustNotReceive(t, client)
 
 	// 小盘（40GB，< MinFreeSpace 50GB）：剩余 10GB 也不该按 MinFreeSpace 误报
-	smallDisk := &pb.ResourceReport{
+	smallDisk := &pb.Metrics{
 		DiskUsages: []*pb.DiskUsage{
 			{MountPoint: "/", Total: 40 * 1024 * 1024, Used: 30 * 1024 * 1024}, // free=10GB
 		},
 	}
-	if err := e.EvalResource(ctx, "node-01", smallDisk); err != nil {
-		t.Fatalf("EvalResource small disk: %v", err)
+	if err := e.EvalMetrics(ctx, "node-01", smallDisk); err != nil {
+		t.Fatalf("EvalMetrics small disk: %v", err)
 	}
 	mustNotReceive(t, client)
 }
 
-// TestEvalResourceNodeOverride 验证节点级 override 可开启默认关闭的 CPU 告警维度。
-func TestEvalResourceNodeOverride(t *testing.T) {
+// TestEvalMetricsNodeOverride 验证节点级 override 可开启默认关闭的 CPU 告警维度。
+func TestEvalMetricsNodeOverride(t *testing.T) {
 	e, client, repos := newSourceEvaluator(t)
 	ctx := context.Background()
 
@@ -199,32 +200,32 @@ func TestEvalResourceNodeOverride(t *testing.T) {
 		t.Fatalf("create node: %v", err)
 	}
 
-	report := &pb.ResourceReport{
+	report := &pb.Metrics{
 		MemTotal: 128 * 1024 * 1024,
 		MemUsed:  64 * 1024 * 1024, // 50%（memory 已禁用，不影响）
 		CpuCores: 16,
 		CpuUtil:  0.9, // 90% >= 80 → CPU fire
 	}
-	if err := e.EvalResource(ctx, "node-01", report); err != nil {
-		t.Fatalf("EvalResource: %v", err)
+	if err := e.EvalMetrics(ctx, "node-01", report); err != nil {
+		t.Fatalf("EvalMetrics: %v", err)
 	}
 	mustReceive(t, client) // CPU fire
 	mustNotReceive(t, client)
 }
 
-// TestEvalResourceLoadPercent 验证 Load 按相对核数百分比 (load1/cores * 100) 评估告警。
-func TestEvalResourceLoadPercent(t *testing.T) {
+// TestEvalMetricsLoadPercent 验证 Load 按相对核数百分比 (load1/cores * 100) 评估告警。
+func TestEvalMetricsLoadPercent(t *testing.T) {
 	e, client, repos := newSourceEvaluator(t)
 	ctx := context.Background()
 
-	// 开启 Load 告警：阈值 90% (100核超过90告警，8核超过7.2告警)
+	// 开启 Load 告警：阈值 100% (100 核 load1>100 即 >100% 告警)
 	node := &model.Node{
 		NodeID: "node-100c",
 		Settings: map[string]any{
 			"alert": map[string]any{
 				"load": map[string]any{
 					"enabled":        true,
-					"maxLoadPercent": float64(90),
+					"maxLoadPercent": float64(100),
 				},
 			},
 		},
@@ -233,27 +234,27 @@ func TestEvalResourceLoadPercent(t *testing.T) {
 		t.Fatalf("create node: %v", err)
 	}
 
-	// 100 核机器，Load1=91 → 91% >= 90% → fire
-	reportFire := &pb.ResourceReport{
+	// 100 核机器，Load1=101 → 101% >= 100% → fire
+	reportFire := &pb.Metrics{
 		CpuCores: 100,
-		Load1:    91.0,
+		Load1:    101.0,
 	}
-	if err := e.EvalResource(ctx, "node-100c", reportFire); err != nil {
-		t.Fatalf("EvalResource load: %v", err)
+	if err := e.EvalMetrics(ctx, "node-100c", reportFire); err != nil {
+		t.Fatalf("EvalMetrics load: %v", err)
 	}
 	notify := mustReceive(t, client)
-	expectedMsg := "node.node-100c.load 当前值 91.00，阈值 90.00"
+	expectedMsg := "node.node-100c.load 当前值 101.00%，阈值 100.00%"
 	if notify.Message != expectedMsg {
 		t.Errorf("got notify.Message = %q, want %q", notify.Message, expectedMsg)
 	}
 
 	// 恢复：Load1 降到 80 → 80% < 85.5% (带迟滞) → recover
-	reportRecover := &pb.ResourceReport{
+	reportRecover := &pb.Metrics{
 		CpuCores: 100,
 		Load1:    80.0,
 	}
-	if err := e.EvalResource(ctx, "node-100c", reportRecover); err != nil {
-		t.Fatalf("EvalResource load recover: %v", err)
+	if err := e.EvalMetrics(ctx, "node-100c", reportRecover); err != nil {
+		t.Fatalf("EvalMetrics load recover: %v", err)
 	}
 	recoverNotify := mustReceive(t, client)
 	if recoverNotify.Level != "info" {
@@ -311,12 +312,12 @@ func TestEvalHistoryRecords(t *testing.T) {
 	}
 }
 
-// TestEvalResourceDualThresholdMetricConsistency 验证双阈值配置下，由 MinFreeSpace 触发的告警在恢复时量纲对齐一致（仍为容量 KB，非百分比）。
-func TestEvalResourceDualThresholdMetricConsistency(t *testing.T) {
+// TestEvalMetricsDualThresholdMetricConsistency 验证双阈值配置下，由 MinFreeSpace 触发的告警在恢复时量纲对齐一致（仍为容量 KiB，非百分比）。
+func TestEvalMetricsDualThresholdMetricConsistency(t *testing.T) {
 	e, client, repos := newSourceEvaluator(t)
 	ctx := context.Background()
 
-	// 覆盖：内存 MaxUsedPercent = 90, MinFreeSpace = 50GB (52428800 KB)
+	// 覆盖：内存 MaxUsedPercent = 90, MinFreeSpace = 50GB (52428800 KiB)
 	enabled := true
 	usedPercent := float64(90)
 	minFree := int64(52428800)
@@ -337,12 +338,12 @@ func TestEvalResourceDualThresholdMetricConsistency(t *testing.T) {
 	}
 
 	// 场景 1：总内存 200GB，已用 160GB (80% < 90%)，但剩余 40GB < 50GB -> 由 MinFreeSpace 触发
-	reportFire := &pb.ResourceReport{
+	reportFire := &pb.Metrics{
 		MemTotal: 200 * 1024 * 1024,
 		MemUsed:  160 * 1024 * 1024,
 	}
-	if err := e.EvalResource(ctx, "node-02", reportFire); err != nil {
-		t.Fatalf("EvalResource fire: %v", err)
+	if err := e.EvalMetrics(ctx, "node-02", reportFire); err != nil {
+		t.Fatalf("EvalMetrics fire: %v", err)
 	}
 	mustReceive(t, client)
 
@@ -356,16 +357,16 @@ func TestEvalResourceDualThresholdMetricConsistency(t *testing.T) {
 	}
 
 	// 场景 2：释放内存，总内存 200GB，已用 120GB (60% < 90%)，剩余 80GB (> 50GB*1.05 = 52.5GB) -> 恢复
-	reportRecover := &pb.ResourceReport{
+	reportRecover := &pb.Metrics{
 		MemTotal: 200 * 1024 * 1024,
-		MemUsed:  120 * 1024 * 1024, // free = 80GB (83886080 KB)
+		MemUsed:  120 * 1024 * 1024, // free = 80GB (83886080 KiB)
 	}
-	if err := e.EvalResource(ctx, "node-02", reportRecover); err != nil {
-		t.Fatalf("EvalResource recover: %v", err)
+	if err := e.EvalMetrics(ctx, "node-02", reportRecover); err != nil {
+		t.Fatalf("EvalMetrics recover: %v", err)
 	}
 	mustReceive(t, client)
 
-	// 验证恢复时的历史记录：量纲应为 KB 且对应 MinFreeSpace，而非百分比
+	// 验证恢复时的历史记录：量纲应为 KiB 且对应 MinFreeSpace，而非百分比
 	historyAfter, err := e.GetHistory(ctx, 2)
 	if err != nil || len(historyAfter) < 2 {
 		t.Fatalf("get history after recover: %v", err)
@@ -374,9 +375,9 @@ func TestEvalResourceDualThresholdMetricConsistency(t *testing.T) {
 	if latest.AlertState != "recover" {
 		t.Fatalf("expected latest history to be recover, got %s", latest.AlertState)
 	}
-	expectedFreeKB := float64(80 * 1024 * 1024)
-	if latest.Metric != expectedFreeKB {
-		t.Errorf("expected recover metric to be freeKB (%v), got %v", expectedFreeKB, latest.Metric)
+	expectedFreeKiB := float64(80 * 1024 * 1024)
+	if latest.Metric != expectedFreeKiB {
+		t.Errorf("expected recover metric to be freeKiB (%v), got %v", expectedFreeKiB, latest.Metric)
 	}
 	if latest.Threshold != float64(minFree) {
 		t.Errorf("expected recover threshold to match minFree (%v), got %v", minFree, latest.Threshold)

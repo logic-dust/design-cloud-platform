@@ -1,7 +1,0 @@
-<component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="remote-engine-debug" type="GoRemoteDebugConfigurationType" factoryName="Go Remote" show_console_on_std_err="true" show_console_on_std_out="true" host="cent7.dev.vm">
-    <option name="disconnectOption" value="LEAVE" />
-    <disconnect value="LEAVE" />
-    <method v="2" />
-  </configuration>
-</component>

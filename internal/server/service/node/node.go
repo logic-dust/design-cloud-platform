@@ -3,23 +3,28 @@ package node
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/contract"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/push"
-	"design-cloud-engine/internal/server/service/settings"
-	"design-cloud-engine/internal/server/service/settings/schema"
+	"design-cloud-engine/internal/platform/concurrency"
+	"design-cloud-engine/internal/server/push"
+
+	"gorm.io/gorm"
 )
+
+const defaultBatchSettingsPushWorkers = 16
 
 // Config holds the narrow configuration the node service needs to derive
 // cluster certificate paths. It intentionally does NOT carry the full
@@ -38,11 +43,17 @@ type Service struct {
 	auditSvc       *audit.Service
 	publisher      push.Publisher
 	collectTrigger contract.CollectTrigger
-	settingsSvc    *settings.Service
+	settingsSvc    SettingsCoordinator
 	settingsPusher contract.NodeSettingsPusher
+	connChecker    ConnectionChecker
+
+	nodeCertLocks sync.Map // nodeID → *sync.Mutex; serializes cert file writes per node
 }
 
-// NewService creates a new node service
+// NewService creates a new node service.
+// settingsPusher and connChecker are optional — nil means settings changes
+// won't be pushed to agents and maintenance mode cannot check live connections,
+// which is acceptable for unit tests.
 func NewService(
 	nodeRepo *db.NodeRepo,
 	logger *slog.Logger,
@@ -50,7 +61,9 @@ func NewService(
 	auditSvc *audit.Service,
 	publisher push.Publisher,
 	collectTrigger contract.CollectTrigger,
-	settingsSvc *settings.Service,
+	settingsSvc SettingsCoordinator,
+	settingsPusher contract.NodeSettingsPusher,
+	connChecker ConnectionChecker,
 ) *Service {
 	if publisher == nil {
 		publisher = push.NoopPublisher{}
@@ -63,12 +76,9 @@ func NewService(
 		publisher:      publisher,
 		collectTrigger: collectTrigger,
 		settingsSvc:    settingsSvc,
+		settingsPusher: settingsPusher,
+		connChecker:    connChecker,
 	}
-}
-
-// SetSettingsPusher sets the facade for pushing node settings updates to connected agents.
-func (s *Service) SetSettingsPusher(p contract.NodeSettingsPusher) {
-	s.settingsPusher = p
 }
 
 // TriggerCollect triggers an on-demand resource collection probe across the cluster.
@@ -76,16 +86,27 @@ func (s *Service) TriggerCollect(ctx context.Context) error {
 	if s.collectTrigger == nil {
 		return nil
 	}
-	return s.collectTrigger.TriggerCollect(ctx, contract.CollectTargetResource)
+	return s.collectTrigger.TriggerCollect(ctx, contract.CollectTargetMetrics)
 }
 
-// CountByStatus returns the number of nodes grouped by status.
-func (s *Service) CountByStatus(ctx context.Context) (map[model.NodeStatus]int64, error) {
-	counts, err := s.nodeRepo.CountByStatus(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("count nodes by status: %w", err)
+// CountRuntimeStatus returns enrolled node counts by runtime status.
+func (s *Service) CountRuntimeStatus(ctx context.Context) (online, offline, maintenance int64, err error) {
+	return s.nodeRepo.CountRuntimeByStatus(ctx)
+}
+
+const heartbeatFreshWindow = 2 * time.Minute
+
+func (s *Service) resolveRuntimeStatusAfterMaintenance(ctx context.Context, node model.Node) model.NodeStatus {
+	if !node.HasEnrolled() {
+		return model.NodeStatusUnset
 	}
-	return counts, nil
+	if s.connChecker != nil && s.connChecker.IsConnected(node.NodeID) {
+		return model.NodeStatusOnline
+	}
+	if !node.LastHeartbeatAt.IsZero() && time.Since(node.LastHeartbeatAt) <= heartbeatFreshWindow {
+		return model.NodeStatusOnline
+	}
+	return model.NodeStatusOffline
 }
 
 // LogCertRenew records a certificate renewal lifecycle event in the audit log
@@ -97,75 +118,106 @@ func (s *Service) LogCertRenew(ctx context.Context, nodeID, phase, message strin
 	})
 }
 
-// GetResourceReport returns resource report for a specific node
-func (s *Service) GetResourceReport(ctx context.Context, nodeID string) (model.NodeResourceReport, error) {
-	report, err := s.nodeRepo.GetResourceReport(ctx, nodeID)
+// GetRuntime returns the latest metrics snapshot for a specific node.
+func (s *Service) GetRuntime(ctx context.Context, nodeID string) (model.NodeRuntime, error) {
+	metrics, err := s.nodeRepo.GetRuntime(ctx, nodeID)
 	if err != nil {
-		return model.NodeResourceReport{}, fmt.Errorf("get resource report for node %q: %w", nodeID, err)
+		return model.NodeRuntime{}, fmt.Errorf("get metrics for node %q: %w", nodeID, err)
 	}
-	return report, nil
+	return metrics, nil
 }
 
-// Update updates mutable node fields (is_server, client_host, labels,
-func (s *Service) Update(ctx context.Context, nodeID string, req UpdateNodeRequest) (*model.Node, error) {
+// Update updates mutable admin fields and writes NODE_UPDATE when admin fields change.
+func (s *Service) Update(ctx context.Context, nodeID string, req UpdateNodeRequest) (*NodeAdminView, error) {
 	var err error
 	nodeID, err = validateNodeID(nodeID)
 	if err != nil {
 		return nil, err
 	}
-
-	// Validate status if provided
-	if req.Status != 0 {
-		switch req.Status {
-		case model.NodeStatusPending, model.NodeStatusOnline, model.NodeStatusOffline,
-			model.NodeStatusMaintenance:
-			// valid
-		default:
-			return nil, fmt.Errorf("%w: %d", ErrInvalidNodeStatus, req.Status)
-		}
-	}
-	if req.ClientHost != nil {
-		clientHost, err := normalizeClientHost(*req.ClientHost)
+	if req.DialHost != nil {
+		dialHost, err := normalizeDialHost(*req.DialHost)
 		if err != nil {
 			return nil, err
 		}
-		req.ClientHost = &clientHost
+		req.DialHost = &dialHost
+	}
+	if req.Description != nil {
+		if err := validateDescription(*req.Description); err != nil {
+			return nil, err
+		}
+		trimmed := strings.TrimSpace(*req.Description)
+		req.Description = &trimmed
+	}
+	replaceGroups := req.Groups != nil
+	if replaceGroups {
+		for _, g := range req.Groups {
+			if err := model.ValidateNodeGroupName(g); err != nil {
+				return nil, contract.NewValidationError(err.Error())
+			}
+		}
+		req.Groups = model.NormalizeNodeGroups(req.Groups)
 	}
 
-	// Fetch node
 	node, err := s.nodeRepo.GetByNodeID(ctx, nodeID)
 	if err != nil {
-		if errors.Is(err, common.ErrNotFound) {
+		if errors.Is(err, contract.ErrNotFound) {
 			return nil, ErrNodeNotFound
 		}
 		return nil, fmt.Errorf("get node %q for update: %w", nodeID, err)
 	}
 
-	// Apply only provided (non-nil/non-zero) fields
+	patch := db.NodeAdminPatch{}
+	changedFields := make([]string, 0, 8)
+
 	if req.IsServer != nil {
-		node.IsServer = *req.IsServer
+		patch.IsServer = req.IsServer
+		changedFields = append(changedFields, "isServer")
 	}
-	if req.Status != 0 {
-		node.Status = req.Status
+	if req.DialHost != nil {
+		patch.DialHost = req.DialHost
+		changedFields = append(changedFields, "dialHost")
 	}
-	if req.ClientHost != nil {
-		node.ClientHost = *req.ClientHost
+	if replaceGroups {
+		patch.Groups = req.Groups
+		patch.GroupsSet = true
+		changedFields = append(changedFields, "groups")
 	}
-	if req.Labels != nil {
-		node.Labels = req.Labels
+	if req.Description != nil {
+		patch.Description = req.Description
+		changedFields = append(changedFields, "description")
 	}
 	if req.AllowConnections != nil {
-		node.AllowConnections = *req.AllowConnections
+		patch.AllowConnections = req.AllowConnections
+		changedFields = append(changedFields, "allowConnections")
 	}
 	if req.MaxConnections != nil {
-		node.MaxConnections = *req.MaxConnections
+		patch.MaxConnections = req.MaxConnections
+		changedFields = append(changedFields, "maxConnections")
+	}
+	if req.Maintenance != nil {
+		changedFields = append(changedFields, "maintenance")
+		if *req.Maintenance {
+			st := model.NodeStatusMaintenance
+			patch.Status = &st
+		} else {
+			next := s.resolveRuntimeStatusAfterMaintenance(ctx, node)
+			patch.Status = &next
+		}
 	}
 
-	if err := s.nodeRepo.UpdateAllFields(ctx, &node); err != nil {
+	if len(changedFields) == 0 {
+		view := BuildNodeAdminView(node)
+		return &view, nil
+	}
+
+	if err := s.nodeRepo.UpdateAdminFields(ctx, nodeID, patch); err != nil {
 		return nil, fmt.Errorf("update node %q: %w", nodeID, err)
 	}
 
-	// 推送事件：通知系统管理员节点信息/状态变更
+	s.auditSvc.LogNode(ctx, "NODE_UPDATE", "success", nodeID, slog.LevelInfo, map[string]any{
+		"fields": changedFields,
+	})
+
 	s.publisher.PublishToRole(ctx, model.RoleSystemAdmin, push.Message{
 		Name: push.EventNode,
 		Payload: push.EventPayload{
@@ -174,9 +226,42 @@ func (s *Service) Update(ctx context.Context, nodeID string, req UpdateNodeReque
 		},
 	})
 
-	// Clear token before returning
-	node.Token = ""
-	return &node, nil
+	updated, err := s.nodeRepo.GetByNodeID(ctx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	view := BuildNodeAdminView(updated)
+	return &view, nil
+}
+
+// AdminBatchUpdate sparsely updates existing nodes; does not create.
+// Empty items or more than 100 return InvalidParamError for the whole request.
+// Missing nodes and per-item validation errors go into failures; items with no
+// mutable fields are skipped (not counted in updated, not failures).
+func (s *Service) AdminBatchUpdate(ctx context.Context, items []BatchNodeUpdateItem) (*BatchNodeUpdateResponse, error) {
+	if len(items) == 0 {
+		return nil, contract.NewInvalidParamError("items is required")
+	}
+	if len(items) > maxNodeBatchItems {
+		return nil, contract.NewInvalidParamError(fmt.Sprintf("items exceeds limit of %d", maxNodeBatchItems))
+	}
+	out := &BatchNodeUpdateResponse{}
+	for i := range items {
+		item := items[i]
+		if !item.hasFields() {
+			continue
+		}
+		if _, err := s.Update(ctx, item.NodeID, item.toUpdateRequest()); err != nil {
+			out.Failures = append(out.Failures, BatchNodeUpdateFailure{
+				Index:   i,
+				NodeID:  item.NodeID,
+				Message: err.Error(),
+			})
+			continue
+		}
+		out.Updated++
+	}
+	return out, nil
 }
 
 // GetAgentConfig returns the agent configuration for a node.
@@ -189,7 +274,7 @@ func (s *Service) GetAgentConfig(ctx context.Context, nodeID, serverAddr string)
 	}
 	node, err := s.nodeRepo.GetByNodeID(ctx, nodeID)
 	if err != nil {
-		if errors.Is(err, common.ErrNotFound) {
+		if errors.Is(err, contract.ErrNotFound) {
 			return nil, ErrNodeNotFound
 		}
 		return nil, fmt.Errorf("get node %q for agent config: %w", nodeID, err)
@@ -198,7 +283,6 @@ func (s *Service) GetAgentConfig(ctx context.Context, nodeID, serverAddr string)
 	return &AgentConfig{
 		ServerAddr: serverAddr,
 		NodeID:     node.NodeID,
-		Token:      node.Token,
 		CertPath:   s.clusterNodeCertPath(node.NodeID),
 		KeyPath:    s.clusterNodeKeyPath(node.NodeID),
 		CAPath:     s.clusterCACertPath(),
@@ -229,34 +313,62 @@ func (s *Service) clusterNodeKeyPath(nodeID string) string {
 }
 
 func validateNodeID(nodeID string) (string, error) {
+	nodeID = strings.TrimSpace(nodeID)
 	if nodeID == "" {
 		return "", fmt.Errorf("%w: nodeID is required", ErrInvalidNodeID)
 	}
-	if strings.Contains(nodeID, "..") || strings.Contains(nodeID, "/") {
-		return "", fmt.Errorf("%w: nodeID must not contain '..' or '/'", ErrInvalidNodeID)
+	if err := model.ValidateNodeID(nodeID); err != nil {
+		return "", fmt.Errorf("%w: %s", ErrInvalidNodeID, err.Error())
 	}
 	return nodeID, nil
 }
 
 // GetView returns admin-facing node metadata for the given nodeID.
-func (s *Service) GetView(ctx context.Context, nodeID string) (*model.Node, error) {
+func (s *Service) GetView(ctx context.Context, nodeID string) (*NodeAdminView, error) {
 	node, err := s.nodeRepo.GetByNodeID(ctx, nodeID)
 	if err != nil {
-		if errors.Is(err, common.ErrNotFound) {
+		if errors.Is(err, contract.ErrNotFound) {
 			return nil, ErrNodeNotFound
 		}
 		return nil, fmt.Errorf("get node %q for view: %w", nodeID, err)
 	}
-	return &node, nil
+	view := BuildNodeAdminView(node)
+	return &view, nil
 }
 
 // ListViews returns admin-facing node metadata for all nodes.
-func (s *Service) ListViews(ctx context.Context) ([]model.Node, error) {
+func (s *Service) ListViews(ctx context.Context) ([]NodeAdminView, error) {
 	nodes, err := s.nodeRepo.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
-	return nodes, nil
+	out := make([]NodeAdminView, len(nodes))
+	for i, n := range nodes {
+		out[i] = BuildNodeAdminView(n)
+	}
+	return out, nil
+}
+
+// ListViewsPage returns admin-facing node metadata with limit/offset pagination.
+func (s *Service) ListViewsPage(ctx context.Context, groups []string, limit, offset int) ([]NodeAdminView, int64, error) {
+	var filter db.NodeFilter
+	if len(groups) > 0 {
+		for _, g := range groups {
+			if err := model.ValidateNodeGroupName(g); err != nil {
+				return nil, 0, contract.NewValidationError(err.Error())
+			}
+		}
+		filter.Groups = groups
+	}
+	nodes, total, err := s.nodeRepo.ListPage(ctx, filter, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list nodes: %w", err)
+	}
+	out := make([]NodeAdminView, len(nodes))
+	for i, n := range nodes {
+		out[i] = BuildNodeAdminView(n)
+	}
+	return out, total, nil
 }
 
 // GetNodeSettings retrieves the override and effective settings for a node.
@@ -267,7 +379,7 @@ func (s *Service) GetNodeSettings(ctx context.Context, nodeID string) (*schema.N
 	}
 	node, err := s.nodeRepo.GetByNodeID(ctx, nodeID)
 	if err != nil {
-		if errors.Is(err, common.ErrNotFound) {
+		if errors.Is(err, contract.ErrNotFound) {
 			return nil, ErrNodeNotFound
 		}
 		return nil, fmt.Errorf("get node %q for settings: %w", nodeID, err)
@@ -284,23 +396,11 @@ func (s *Service) GetNodeSettings(ctx context.Context, nodeID string) (*schema.N
 
 	var effective schema.NodeEffectiveSettings
 	if s.settingsSvc != nil {
-		effectiveAgent, effErr := s.settingsSvc.GetEffectiveAgentSettingsForNode(ctx, nodeID)
+		eff, effErr := s.settingsSvc.BuildNodeEffectiveSettings(ctx, nodeID, override, true)
 		if effErr != nil {
-			return nil, fmt.Errorf("get effective agent settings for node %q: %w", nodeID, effErr)
+			return nil, fmt.Errorf("build effective settings for node %q: %w", nodeID, effErr)
 		}
-		effectiveAlert, effErr := s.settingsSvc.GetEffectiveAlertSettingsForNode(ctx, nodeID)
-		if effErr != nil {
-			return nil, fmt.Errorf("get effective alert settings for node %q: %w", nodeID, effErr)
-		}
-		effectiveLicense, effErr := s.settingsSvc.GetEffectiveLicenseSettingsForNode(ctx, nodeID)
-		if effErr != nil {
-			return nil, fmt.Errorf("get effective license settings for node %q: %w", nodeID, effErr)
-		}
-		effective = schema.NodeEffectiveSettings{
-			Agent:   effectiveAgent,
-			Alert:   effectiveAlert,
-			License: effectiveLicense,
-		}
+		effective = eff
 	}
 
 	return &schema.NodeSettingsView{
@@ -318,7 +418,7 @@ func (s *Service) UpdateNodeSettings(ctx context.Context, nodeID string, patchRa
 	}
 	node, err := s.nodeRepo.GetByNodeID(ctx, nodeID)
 	if err != nil {
-		if errors.Is(err, common.ErrNotFound) {
+		if errors.Is(err, contract.ErrNotFound) {
 			return nil, ErrNodeNotFound
 		}
 		return nil, fmt.Errorf("get node %q before update settings: %w", nodeID, err)
@@ -343,7 +443,12 @@ func (s *Service) UpdateNodeSettings(ctx context.Context, nodeID string, patchRa
 		return nil, fmt.Errorf("unmarshal merged node settings: %w", err)
 	}
 
-	if err := s.nodeRepo.UpdateSettings(ctx, nodeID, settingsMap); err != nil {
+	if err := s.nodeRepo.UpdateSettingsInTx(ctx, nodeID, settingsMap, func(tx *gorm.DB) error {
+		if s.settingsSvc == nil {
+			return nil
+		}
+		return s.settingsSvc.BumpNodeOverridesTopicTx(ctx, tx)
+	}); err != nil {
 		return nil, fmt.Errorf("update settings for node %q: %w", nodeID, err)
 	}
 
@@ -352,7 +457,7 @@ func (s *Service) UpdateNodeSettings(ctx context.Context, nodeID string, patchRa
 	}
 
 	if s.settingsPusher != nil {
-		common.SafeGo(s.logger, "push-node-settings", func() {
+		concurrency.SafeGo(s.logger, "push-node-settings", func() {
 			pCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if pushErr := s.settingsPusher.PushNodeSettingsUpdate(pCtx, nodeID); pushErr != nil {
@@ -370,40 +475,29 @@ func (s *Service) UpdateNodeSettings(ctx context.Context, nodeID string, patchRa
 func (s *Service) BatchUpdateNodeSettings(ctx context.Context, req BatchUpdateNodeSettingsRequest) (*BatchNodeSettingsResponse, error) {
 	// 1. Selector cannot be empty
 	if req.Selector == nil || req.Selector.IsEmpty() {
-		return nil, common.NewValidationError("selector cannot be empty")
+		return nil, contract.NewValidationError("selector cannot be empty")
 	}
 
-	// 2. Validate selector status if specified
-	var parsedStatuses []model.NodeStatus
-	for _, st := range req.Selector.Status {
-		parsed, err := model.ParseNodeStatus(st)
-		if err != nil {
-			return nil, common.NewValidationError(fmt.Sprintf("invalid status %q in selector", st))
-		}
-		parsedStatuses = append(parsedStatuses, parsed)
-	}
-
-	// 3. Patch cannot be empty
-	trimmedPatch := bytes.TrimSpace(req.Patch)
-	if len(trimmedPatch) == 0 {
-		return nil, common.NewValidationError("patch cannot be empty")
-	}
-
-	// 4. Strict check that patch conforms to NodeSettings whitelist (rejects storage, unknown fields, malformed JSON)
-	if _, err := schema.DecodeNodeSettingsPayload(trimmedPatch); err != nil {
+	// 5. Resolve candidate nodes (group filter before pagination elsewhere)
+	nodeIDs, err := s.ResolveSelectorNodeIDs(ctx, req.Selector)
+	if err != nil {
 		return nil, err
 	}
-
-	// 5. Query candidate nodes
-	filter := db.NodeFilter{
-		NodeIDs: req.Selector.NodeIDs,
-		OS:      req.Selector.OS,
-		Status:  parsedStatuses,
-		Labels:  req.Selector.Labels,
+	var nodes []model.Node
+	if len(nodeIDs) > 0 {
+		nodes, err = s.nodeRepo.ListByNodeIDs(ctx, nodeIDs)
+		if err != nil {
+			return nil, fmt.Errorf("list nodes by ids: %w", err)
+		}
 	}
-	nodes, err := s.nodeRepo.ListByFilter(ctx, filter)
-	if err != nil {
-		return nil, fmt.Errorf("list nodes by filter: %w", err)
+
+	trimmedPatch := bytes.TrimSpace(req.Patch)
+	if len(trimmedPatch) == 0 {
+		return nil, contract.NewValidationError("patch cannot be empty")
+	}
+
+	if _, err := schema.DecodeNodeSettingsPayload(trimmedPatch); err != nil {
+		return nil, err
 	}
 
 	resp := &BatchNodeSettingsResponse{
@@ -449,17 +543,15 @@ func (s *Service) BatchUpdateNodeSettings(ctx context.Context, req BatchUpdateNo
 			continue
 		}
 
-		// Canonical comparison to detect if settings actually changed
-		var existingMap, mergedMap map[string]any
-		if len(existingJSON) > 0 {
-			_ = json.Unmarshal(existingJSON, &existingMap)
+		var mergedMap map[string]any
+		if err := json.Unmarshal(mergedJSON, &mergedMap); err != nil {
+			resp.Failures = append(resp.Failures, BatchNodeFailure{
+				NodeID:  n.NodeID,
+				Message: fmt.Sprintf("unmarshal merged settings: %v", err),
+			})
+			continue
 		}
-		_ = json.Unmarshal(mergedJSON, &mergedMap)
-
-		existingNorm, _ := json.Marshal(existingMap)
-		mergedNorm, _ := json.Marshal(mergedMap)
-
-		if bytes.Equal(existingNorm, mergedNorm) {
+		if settingsMapsEqual(n.Settings, mergedMap) {
 			resp.Unchanged++
 			continue
 		}
@@ -479,22 +571,21 @@ func (s *Service) BatchUpdateNodeSettings(ctx context.Context, req BatchUpdateNo
 		}
 	}
 
-	// Invalidate cache and push to online nodes
+	// Invalidate cache and push to online nodes (bounded worker pool for pushes).
+	// Invalidate local cache, bump node_overrides once, then push. Bump failure must not
+	// undo successful DB writes or skip Agent push (TTL still bounds cross-Portal lag).
 	if !req.DryRun {
-		for _, nodeID := range updatedNodeIDs {
-			if s.settingsSvc != nil {
+		if s.settingsSvc != nil && len(updatedNodeIDs) > 0 {
+			for _, nodeID := range updatedNodeIDs {
 				s.settingsSvc.InvalidateNodeOverride(nodeID)
 			}
-			if s.settingsPusher != nil {
-				targetNodeID := nodeID
-				common.SafeGo(s.logger, "push-batch-node-settings", func() {
-					pCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					if pushErr := s.settingsPusher.PushNodeSettingsUpdate(pCtx, targetNodeID); pushErr != nil {
-						s.logger.Warn("Failed to push batch settings to node", "nodeID", targetNodeID, "error", pushErr)
-					}
-				})
+			if err := s.settingsSvc.BumpNodeOverridesTopic(ctx); err != nil {
+				s.logger.Warn("Failed to bump node_overrides after batch settings update",
+					"error", err, "updated", len(updatedNodeIDs))
 			}
+		}
+		if len(updatedNodeIDs) > 0 {
+			s.pushBatchNodeSettings(updatedNodeIDs)
 		}
 	}
 
@@ -512,4 +603,40 @@ func (s *Service) BatchUpdateNodeSettings(ctx context.Context, req BatchUpdateNo
 	}
 
 	return resp, nil
+}
+
+// settingsMapsEqual compares node settings maps; nil and empty both count as empty.
+func settingsMapsEqual(a, b map[string]any) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+func (s *Service) pushBatchNodeSettings(nodeIDs []string) {
+	if s.settingsPusher == nil || len(nodeIDs) == 0 {
+		return
+	}
+	jobs := make(chan string, len(nodeIDs))
+	for _, id := range nodeIDs {
+		jobs <- id
+	}
+	close(jobs)
+
+	workers := min(defaultBatchSettingsPushWorkers, len(nodeIDs))
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			defer concurrency.SafeRecover(s.logger, "push-batch-node-settings-pool")()
+			for nodeID := range jobs {
+				pCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				pushErr := s.settingsPusher.PushNodeSettingsUpdate(pCtx, nodeID)
+				cancel()
+				if pushErr != nil {
+					s.logger.Warn("Failed to push batch settings to node", "nodeID", nodeID, "error", pushErr)
+				}
+			}
+		})
+	}
+	wg.Wait()
 }

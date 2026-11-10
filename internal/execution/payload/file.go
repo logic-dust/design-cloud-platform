@@ -1,7 +1,7 @@
 package payload
 
 // FileInfo represents file metadata returned by FILE_LIST and other file operations.
-// This is the canonical file information structure shared across launcher and service layers.
+// This is the canonical file information structure shared across PrivilegedExec and service layers.
 type FileInfo struct {
 	Name       string `json:"name"`
 	Size       int64  `json:"size"`
@@ -15,9 +15,12 @@ type FileInfo struct {
 	LinkTarget string `json:"linkTarget,omitempty"`
 }
 
-// FileList for FILE_LIST
+// FileList for FILE_LIST.
+// Limit is required and must be > 0 (Portal fills it from file.listMaxEntries).
+// The PrivilegedExec returns up to Limit+100 names; it does not clamp to settings bounds.
 type FileList struct {
-	Dir string `json:"dir"`
+	Dir   string `json:"dir"`
+	Limit int    `json:"limit,omitempty"`
 }
 
 // FileRead for FILE_READ
@@ -83,8 +86,9 @@ type FileUpload struct {
 	Size    *int64 `json:"size"`
 }
 
-// FileDownload for FILE_DOWNLOAD
-// The file body is returned as raw bytes on stdout (no JSON envelope).
+// FileDownload is the FILE_DOWNLOAD streaming action payload (node-local file bytes
+// to stdout). It is not the Portal download-approval model (model.DownloadRequest /
+// table download_requests).
 type FileDownload struct {
 	SrcPath string `json:"srcPath"`
 	Size    *int64 `json:"size"`
@@ -92,8 +96,10 @@ type FileDownload struct {
 
 // TrashMove for TRASH_MOVE
 type TrashMove struct {
-	Dir   string   `json:"dir"`
-	Files []string `json:"files"`
+	Dir      string   `json:"dir"`
+	Files    []string `json:"files"`
+	MaxBytes int64    `json:"maxBytes,omitempty"`
+	MaxCount int      `json:"maxCount,omitempty"`
 }
 
 // TrashDelete for TRASH_DELETE
@@ -106,10 +112,18 @@ type TrashDeleteMany struct {
 	TrashNames []string `json:"trashNames"`
 }
 
+// TrashRestoreMany for TRASH_RESTORE_MANY
+type TrashRestoreMany struct {
+	TrashNames []string `json:"trashNames"`
+}
+
 // TrashEmpty for TRASH_EMPTY
 type TrashEmpty struct{}
 
-// TrashList for TRASH_LIST
+// TrashList for TRASH_LIST.
+// Limit is required and must be > 0 (Portal fills it from file.listMaxEntries).
+// The PrivilegedExec returns up to Limit+100 names; it does not clamp to settings bounds.
 type TrashList struct {
 	TrashPath string `json:"trashPath"`
+	Limit     int    `json:"limit,omitempty"`
 }

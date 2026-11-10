@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/service/security"
 	"design-cloud-engine/internal/server/service/user/provider"
 
+	"design-cloud-engine/internal/contract"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -24,7 +24,7 @@ type passwordVerifier interface {
 // securityChecker is the subset of security.Service used by AuthManager.
 type securityChecker interface {
 	IsBanned(ctx context.Context, IP, username string) (bool, security.BannedRecord)
-	AddFailedCount(ctx context.Context, keyName string, recordType model.BanType, IP, username string)
+	RecordFailure(ctx context.Context, keyName string, subject model.BanSubject, source model.BanSource, IP, username string)
 	DeleteByKey(ctx context.Context, keyName string)
 }
 
@@ -106,7 +106,7 @@ func (s *AuthManager) Authenticate(ctx context.Context, username, password, IP s
 
 	userRecord, err := s.store.GetByName(ctx, username)
 	if err != nil {
-		if !errors.Is(err, common.ErrNotFound) {
+		if !errors.Is(err, contract.ErrNotFound) {
 			s.logAuth(ctx, "DB_USER_LOOKUP", "error", username, IP, slog.LevelWarn, map[string]any{
 				"error": err.Error(),
 			}, time.Since(startTime))
@@ -162,7 +162,7 @@ func (s *AuthManager) Authenticate(ctx context.Context, username, password, IP s
 
 	if err != nil {
 		if errors.Is(err, provider.ErrUserNotFound) {
-			s.addFailedCount(ctx, IP, model.BanTypeIP, IP, "")
+			s.addFailedCount(ctx, IP, model.BanSubjectIP, IP, "")
 			s.logAuth(ctx, "OS_USER_AUTH", "failed", username, IP, slog.LevelWarn, map[string]any{
 				"error": "user_not_found",
 			}, time.Since(startTime))
@@ -175,12 +175,6 @@ func (s *AuthManager) Authenticate(ctx context.Context, username, password, IP s
 			"error": "auth_failed",
 		}, time.Since(startTime))
 		return Result{}, provider.ErrUserPasswordIncorrect
-	}
-
-	if userRecord.ID != 0 && userRecord.Status == model.UserPasswordExpired {
-		s.clearUserFailures(ctx, IP, username)
-		s.logAuth(ctx, "OS_USER_AUTH", "password_expired", username, IP, slog.LevelInfo, map[string]any{}, time.Since(startTime))
-		return Result{PasswordMustChange: true}, nil
 	}
 
 	s.clearUserFailures(ctx, IP, username)
@@ -201,14 +195,14 @@ func (s *AuthManager) logSecurity(ctx context.Context, action, result string, le
 }
 
 func (s *AuthManager) recordUserAndIPFailure(ctx context.Context, IP, username string) {
-	s.addFailedCount(ctx, IP+":"+username, model.BanTypeUser, IP, username)
-	s.addFailedCount(ctx, IP, model.BanTypeIP, IP, "")
+	s.addFailedCount(ctx, IP+":"+username, model.BanSubjectUserIP, IP, username)
+	s.addFailedCount(ctx, IP, model.BanSubjectIP, IP, "")
 }
 
-func (s *AuthManager) addFailedCount(ctx context.Context, keyName string, recordType model.BanType, IP, username string) {
+func (s *AuthManager) addFailedCount(ctx context.Context, keyName string, subject model.BanSubject, IP, username string) {
 	securityCtx, cancel := authSideEffectContext(ctx)
 	defer cancel()
-	s.security.AddFailedCount(securityCtx, keyName, recordType, IP, username)
+	s.security.RecordFailure(securityCtx, keyName, subject, model.BanSourceLogin, IP, username)
 }
 
 func (s *AuthManager) clearUserFailures(ctx context.Context, IP, username string) {

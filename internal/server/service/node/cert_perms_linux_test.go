@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	fsutil "design-cloud-engine/internal/common/fs"
+	fsutil "design-cloud-engine/internal/platform/fs"
 )
 
 func assertPerm(t *testing.T, path string, want os.FileMode) {

@@ -1,7 +1,7 @@
 ---
 title: 节点注册与引导
 linkTitle: 节点注册
-weight: 90
+weight: 50
 description: 节点 OTP 注册与证书材料下发流程
 ---
 
@@ -12,7 +12,7 @@ description: 节点 OTP 注册与证书材料下发流程
 3. 节点本地落盘后，以已登记证书通过 mTLS 接入 cluster
 
 > 对大多数内部可信集群，优先推荐 Server 统一签发证书 + 自动注册的方式：
-> Server 直接签发节点证书，通过共享目录或受控分发获取证书文件（见[部署指南](./guide.md)）。
+> Server 直接签发节点证书，通过共享目录或受控分发获取证书文件（见[安装与首次部署](./install.md)）。
 > 本文覆盖的是基于 OTP token 自助注册的方式，适合无需共享存储的场景。
 
 ## 设计目标
@@ -24,8 +24,8 @@ description: 节点 OTP 注册与证书材料下发流程
 
 ## 参与对象
 
-- `Node`：数据库中的节点记录，包含 `node_id`、角色标记、状态、证书信息和注册 token
-- `registration token`：一次性随机 token（24h 过期），用于首次领取证书材料
+- `Node`：数据库中的节点记录，包含 `node_id`、角色标记、运行状态（可为空）、证书信息与 enrollment token **哈希**（`enrollment_token_hash` / `enrollment_token_expires_at`，库中无明文）
+- `registration token`：一次性随机 token（24h 过期），用于首次领取证书材料；明文仅在签发响应中返回一次
 - `registration materials`：Server 返回给节点的 `cert.pem`、`key.pem`、`ca.pem` 与 `serverAddr`
 - `cluster certificate`：后续 mTLS 接入使用的节点证书
 
@@ -35,7 +35,7 @@ description: 节点 OTP 注册与证书材料下发流程
 
 **方式 A：HTTP API（需管理员登录）**
 
-创建节点白名单记录（自动生成 token）：
+创建节点白名单记录（写入 enrollment token 哈希，**不**在响应中返回明文）：
 
 ```http
 POST /api/admin/system/nodes
@@ -45,21 +45,23 @@ Authorization: Bearer <admin-token>
 {"nodeId": "agent-01", "isServer": false}
 ```
 
-如需轮换 token：
+获取或轮换**明文** token（创建后首次签发、或后续轮换均用此接口）：
 
 ```http
 POST /api/admin/system/nodes/agent-01/tokens
 Authorization: Bearer <admin-token>
 ```
 
+响应 `data` 含 `nodeId`、`token`、`expiresAt`。
+
 **方式 B：CLI（主节点本地操作 DB，免登录）**
 
 ```bash
 # 默认创建纯 Agent 计算节点（若创建复合管理节点则加 --server）
-./design-cloud-engine node issue-token --hostname agent-01
+./dc-engine node issue-token --hostname agent-01
 ```
 
-节点不存在时自动创建 pending 记录并生成 token；已存在时轮换 token。
+节点不存在时自动创建节点行（运行状态为空、`enrollmentStage` 为 `awaiting_certificate`）并写入 token 哈希，CLI 输出明文 token；已存在时轮换 token 哈希并输出新明文。
 
 **token 规则：**
 
@@ -82,7 +84,7 @@ Content-Type: application/json
 **方式 B：CLI**
 
 ```bash
-./design-cloud-engine node register --portal-url https://<portal-host>:<port> --token <registration-token> [--insecure-http] [--data-dir <dir>] [--hostname <nodeID>]
+./dc-engine node register --portal-url https://<portal-host>:<port> --token <registration-token> [--insecure-http] [--data-dir <dir>] [--hostname <nodeID>]
 
 # --portal-url / --token：必填；不读 config.toml
 # --portal-url 默认强制要求 https:// 协议；若在隔离测试环境使用明文 http://，必须显式附加 --insecure-http 自担中间人窃听与篡改风险
@@ -95,7 +97,7 @@ Content-Type: application/json
 
 > [!IMPORTANT]
 > **传输层安全强制约束 (HTTPS 强制与 `--insecure-http` 豁免)**：
-> 节点注册交互时，请求上行携带一次性 OTP 令牌，响应下行返回签发的节点私钥与集群根 CA 证书。为防止网络中间人（MitM）窃听令牌或篡改 CA 证书劫持集群，`node register` 与自动化安装脚本默认**强制要求 `--portal-url` 使用 `https://` 协议**。若误用明文 `http://`，命令将打印高危安全告警并阻断退出。仅在受信任的隔离开发/测试沙箱中，才允许显式附加 `--insecure-http`（或环境变量 `DCE_INSECURE_HTTP=1`）由用户自担风险继续。
+> 节点注册交互时，请求上行携带一次性 OTP 令牌，响应下行返回签发的节点私钥与集群根 CA 证书。为防止网络中间人（MitM）窃听令牌或篡改 CA 证书劫持集群，`node register` 与自动化安装脚本默认**强制要求 `--portal-url` 使用 `https://` 协议**。若误用明文 `http://`，命令将打印高危安全告警并阻断退出。仅在受信任的隔离开发/测试沙箱中，才允许显式附加 `--insecure-http` 由用户自担风险继续。
 
 > **注意：**
 > - 在非共享存储（各自安装）的环境下，**必须在真正的目标节点物理机上执行此命令**。
@@ -111,7 +113,7 @@ sudo bash deployment/install.sh agent \
   [--data-dir /var/lib/design-cloud] [--skip-register]
 ```
 
-脚本会创建数据目录、落盘引擎与 launcher、调用 `node register` 领证，安装 canonical unit 并写入
+脚本会创建数据目录、落盘引擎与 dc-exec、调用 `node register` 领证，安装 canonical unit 并写入
 configless drop-in 后 `systemctl enable --now`；`--skip-register` 用于证书材料已就位（离线/共享目录交付）的场景。
 若本机已有同名服务，替换二进制前会先停服（否则旧进程持有已删除的旧 inode，升级会静默失效）。
 判据：节点侧日志 `Starting AGENT` → `Successfully registered with server`，集群 Server 侧
@@ -140,17 +142,17 @@ powershell -ExecutionPolicy Bypass -File .\deployment\install-win-agent-configle
 
 ```bash
 # 模式 1：导出为 tar.gz 归档（最推荐：方便通过介质或 Ansible 批量推送到隔离节点）
-./design-cloud-engine node issue-cert --hostname compute-01 --archive /tmp/compute-01.tar.gz
+./dc-engine node issue-cert --hostname compute-01 --archive /tmp/compute-01.tar.gz
 
 # 模式 2：导出到指定离线目录
-./design-cloud-engine node issue-cert --hostname compute-01 --out-dir /mnt/usb/certs/
+./dc-engine node issue-cert --hostname compute-01 --out-dir /mnt/usb/certs/
 
 # 模式 3：直接落入 Server 的标准集群目录（适合 NFS 共享存储：直接落盘即交付）
-./design-cloud-engine node issue-cert --hostname compute-01
+./dc-engine node issue-cert --hostname compute-01
 
 # 提示：若非当前目录下的 config.toml，可通过 --config 指定配置文件路径，如：
-# ./design-cloud-engine --config /etc/design-cloud/config.toml node issue-cert --hostname compute-01 ...
-# 或：./design-cloud-engine node issue-cert --config /etc/design-cloud/config.toml --hostname compute-01 ...
+# ./dc-engine --config /etc/design-cloud/config.toml node issue-cert --hostname compute-01 ...
+# 或：./dc-engine node issue-cert --config /etc/design-cloud/config.toml --hostname compute-01 ...
 ```
 
 在目标节点上，解压材料至 `<data-dir>/certs/cluster/`（缺省 `/var/lib/design-cloud/certs/cluster/`）并启动 Agent 即可直接上线：
@@ -178,7 +180,7 @@ sudo bash deployment/install.sh agent --servers "mgt01,mgt02" --skip-register
 **接口语义：**
 
 - `node_id` 必须已存在
-- token 必须匹配且未过期（常量时间比较，防时序攻击）。有效 token 即授权签发或重新签发，不要求节点仍为 `pending`、也不要求尚未绑定证书
+- token 必须匹配且未过期（常量时间比较，防时序攻击）。有效 token 即授权签发或重新签发
 - 管理员对已引导节点再次 `issue-token` 后，节点可凭新 token 重新领取证书；成功后旧证书绑定被新指纹覆盖，token 立即清空
 - Server 成功签发证书后，把证书指纹、主题和到期时间写入节点记录
 - 该接口本身不会把节点状态改为 `online`（见下文）
@@ -193,17 +195,16 @@ CLI 自动将证书写入标准规范路径（基准目录 `--data-dir`，缺省
 
 HTTP API 用户需自行规范落盘路径与权限，确保私钥仅 Agent 运行账户可读。
 
-证书就绪后启动 Engine，Agent 使用该证书通过 mTLS 建立 `ControlService/Sync` 连接，Server 验证指纹一致后标记节点为 `online`。
+证书就绪后启动 Engine，Agent 使用该证书通过 mTLS 建立 `ControlService/Sync` 连接；Server 验证指纹后，在**首次注册消息**中调用 `MarkOnlineRegister`（写入平台字段并将运行状态设为 `online`）。
 
 ## 注册成功后的状态
 
 - 节点记录保存 `cert_fingerprint`、`cert_subject`、`cert_expires_at`
 - 注册 token 已清空
-- 节点状态变为 `provisioned`（已领证，等待 Agent 首次上线）；不是仍停在 `pending`，也不是已经 `online`
+- 运行状态列仍为空（`enrollmentStage` 为 `awaiting_connect`）；首次 Agent 连接后写入 `LastConnectedAt` 并推进为 `online`
 - 节点本地已具备启动 Agent 所需的全部 TLS 材料
 
-节点不会因为注册 API 成功而变成 `online`。后续 Agent 使用已签发证书建立 `ControlService/Sync` 连接后，Server 才会调用
-`MarkOnline()` 推进状态；之后由心跳持续更新 `last_heartbeat_at` / `last_seen_server`。
+节点不会因为 **OTP 注册 HTTP API** 成功而变成 `online`（彼时 `enrollmentStage` 为 `awaiting_connect`）。Agent 首次 `Sync` 注册时 Server 调用 **`MarkOnlineRegister`**（`online` + `last_connected_at` + 平台列）；后续重连心跳由 **`MarkOnline`** / **`TouchHeartbeat`** 维护 `last_heartbeat_at`（平台字段仅在注册消息写入，心跳不更新 `osName` / `osVersion` / `kernelVersion`）。
 
 ## 证书生命周期管理与在线自动续签（L3）
 
@@ -255,6 +256,7 @@ sequenceDiagram
 
 ## 相关文档
 
-- [部署指南](./guide.md)
-- [集群协议](../development/cluster/cluster-protocol.md)
+- [安装与首次部署](./install.md)
+- [TLS 证书配置](./tls.md)
+- [集群协议](/docs/architecture/cluster/protocol)
 - [Portal API](../api)

@@ -2,8 +2,7 @@ package file
 
 import (
 	"context"
-	"fmt"
-	"io/fs"
+	"design-cloud-engine/internal/contract"
 	"path/filepath"
 
 	"design-cloud-engine/internal/execution/payload"
@@ -41,7 +40,7 @@ func (s *Service) DeleteLocationPaths(ctx context.Context, locationName string, 
 
 func (s *Service) locationPathsByDir(ctx context.Context, locationName string, relPaths []string, runUser string) (map[string][]string, error) {
 	if len(relPaths) == 0 {
-		return nil, fmt.Errorf("%w: missing paths", fs.ErrInvalid)
+		return nil, contract.NewInvalidParamError("missing paths")
 	}
 
 	filesByDir := make(map[string][]string)
@@ -51,7 +50,7 @@ func (s *Service) locationPathsByDir(ctx context.Context, locationName string, r
 			return nil, err
 		}
 		if cleanPath == "" {
-			return nil, fmt.Errorf("%w: path is required", fs.ErrInvalid)
+			return nil, contract.NewInvalidParamError("path is required")
 		}
 		targetPath, err := s.ResolveLocationPath(ctx, locationName, cleanPath, runUser)
 		if err != nil {

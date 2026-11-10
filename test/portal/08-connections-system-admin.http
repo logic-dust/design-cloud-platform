@@ -1,0 +1,179 @@
+# ========================================
+# ===== ADMIN-CONNECTIONS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录（需要 System Admin 权限） -----
+
+# @expect 200,201,409
+### 管理员创建连接规格 (Admin only)
+POST {{addr}}/api/admin/system/connections/resources
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "fixed-test-vnc-resource",
+  "protocol": "VNC",
+  "nodes": ["{{testNode}}"],
+  "nodeGroups": [],
+  "maxPerUser": 1,
+  "public": true
+}
+
+> {%
+  const payload = response.body;
+  if (payload?.data?.id) {
+    client.global.set("testResourceID", String(payload.data.id));
+    client.log(`Stored testResourceID=${payload.data.id}`);
+  } else {
+    throw new Error("Expected resource creation to return data.id");
+  }
+%}
+
+# @expect 200
+### 管理员批量 upsert 连接规格（同名覆盖） (Admin only)
+POST {{addr}}/api/admin/system/connections/resources/batch-upsert
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "items": [
+    {
+      "id": 0,
+      "name": "fixed-test-vnc-resource",
+      "protocol": "VNC",
+      "nodes": ["{{testNode}}"],
+      "nodeGroups": [],
+      "maxPerUser": 1,
+      "public": true
+    }
+  ]
+}
+
+### 管理员获取连接规格列表 (Admin only)
+GET {{addr}}/api/admin/system/connections/resources
+Authorization: Bearer {{accessToken}}
+
+### 管理员获取连接规格详情 (Admin only)
+GET {{addr}}/api/admin/system/connections/resources/{{testResourceID}}
+Authorization: Bearer {{accessToken}}
+
+# @probe
+# @expect 200,404,409
+### 管理员更新连接规格 (Admin only)
+PUT {{addr}}/api/admin/system/connections/resources/{{testResourceID}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "fixed-test-vnc-resource",
+  "protocol": "VNC",
+  "nodes": ["{{testNode}}"],
+  "nodeGroups": [],
+  "maxPerUser": 1,
+  "public": true
+}
+
+# @probe
+# @expect 200,404
+### 管理员获取连接规格授权用户（公开规格返回空数组） (Admin only)
+GET {{addr}}/api/admin/system/connections/resources/{{testResourceID}}/users
+Authorization: Bearer {{accessToken}}
+
+# @probe
+# @expect 204,400,404
+### 管理员全量替换连接规格授权用户（公开规格返回 400） (Admin only)
+PUT {{addr}}/api/admin/system/connections/resources/{{testResourceID}}/users
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "userIds": []
+}
+
+# @probe
+# @expect 204,400,404
+### 管理员增量调整连接规格授权用户（公开规格返回 400） (Admin only)
+PATCH {{addr}}/api/admin/system/connections/resources/{{testResourceID}}/users
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "addUserIds": [],
+  "removeUserIds": []
+}
+
+### 管理员获取所有连接实例 (Admin only)
+GET {{addr}}/api/admin/system/connections
+Authorization: Bearer {{accessToken}}
+
+> {%
+if (response.status === 200) {
+  const conns = response.body?.data;
+  if (Array.isArray(conns) && conns.length > 0) {
+    client.global.set("adminConnectionId", String(conns[0].id));
+  }
+}
+%}
+
+# @expect 200,404
+### 管理员获取连接实例详情 (Admin only)
+GET {{addr}}/api/admin/system/connections/{{adminConnectionId}}
+Authorization: Bearer {{accessToken}}
+
+# @probe
+### 管理员操作连接生命周期 (Admin only)
+POST {{addr}}/api/admin/system/connections/{{adminConnectionId}}/stop
+Authorization: Bearer {{accessToken}}
+
+# @probe
+### 管理员为 VNC 获取一次性密码 (Admin only)
+POST {{addr}}/api/admin/system/connections/{{adminConnectionId}}/vnc-otp
+Authorization: Bearer {{accessToken}}
+
+# @manual
+### 管理员删除连接实例 (Admin only)
+DELETE {{addr}}/api/admin/system/connections/{{adminConnectionId}}
+Authorization: Bearer {{accessToken}}
+
+### 触发全局连接刷新 (Admin only)
+POST {{addr}}/api/admin/system/connections/refresh
+Authorization: Bearer {{accessToken}}
+
+### 管理员执行连接清理 (Admin only)
+POST {{addr}}/api/admin/system/connections/cleanup
+Authorization: Bearer {{accessToken}}
+
+### 管理员批量删除连接 — 空 ids 应 400 (Admin only)
+POST {{addr}}/api/admin/system/connections/batch-delete
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "ids": []
+}
+
+### 管理员创建公共 RDP 规格 (Admin only)
+POST {{addr}}/api/admin/system/connections/resources
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "public-windows-rdp",
+  "protocol": "RDP",
+  "nodes": ["{{testNode}}"],
+  "nodeGroups": [],
+  "port": 3389,
+  "maxPerUser": 1,
+  "public": true
+}
+
+> {%
+  const payload = response.body;
+  if (payload?.data?.id) {
+    client.global.set("testRDPResourceID", String(payload.data.id));
+    client.log(`Stored testRDPResourceID=${payload.data.id}`);
+  } else {
+    throw new Error("Expected RDP resource creation to return data.id");
+  }
+%}
+
+# 规格删除见 08-connections.http 末尾（用户侧用完后统一清理）

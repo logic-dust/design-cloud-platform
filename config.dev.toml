@@ -8,12 +8,9 @@ data_dir = ''                 # 空 = 回退 BaseDir（源码树同树）；生�
 
 # ── 日志 ──────────────────────────────────────────────────────────────────────
 [log]
-dir = 'logs'                  # 相对 BaseDir；生产常用 /var/log/design-cloud 或 unit --log-dir
+dir = 'logs'              # 审计/安全日志目录（相对 BaseDir）；应用/访问日志写 stdout
 app_level = 'DEBUG'       # 应用日志级别：DEBUG / INFO / WARN / ERROR
 access_level = 'DEBUG'    # HTTP 访问日志级别
-max_age = 30              # 日志文件保留天数
-max_size = 100            # 单个日志文件最大体积（MB）
-max_backups = 10          # 保留的历史日志文件数量
 
 # ── Portal HTTP 服务 ───────────────────────────────────────────────────────────
 [portal]
@@ -53,10 +50,10 @@ servers = [
 type = 'postgres'
 host = 'cent7.dev.vm'
 port = '5432'
-user = 'dc'
+user = 'dce'
 password = ''                 # 优先从 password_file 读取，此处留空即可
 password_file = 'dbpwd'       # 相对 BaseDir；生产打包模板为 /etc/design-cloud/dbpwd
-name = 'dc'
+name = 'dce'
 ssl_mode = 'disable'          # PostgreSQL SSL 模式：disable / require / verify-full
 max_idle_conns = 10           # 连接池最大空闲连接数
 max_open_conns = 25           # 连接池最大打开连接数
@@ -79,11 +76,6 @@ group_base_dn = 'cn=groups,cn=accounts,dc=dev,dc=vm'
 group_filter = '(objectClass=posixGroup)'   # 组搜索过滤器
 password_modify = true        # 是否支持通过 RFC 3062 修改 LDAP 密码
 tls_ca_path = ''              # 自定义 CA 证书路径，为空则使用系统信任链
-
-# ── 作业调度器 ─────────────────────────────────────────────────────────────────
-[scheduler]
-type = 'lsf'                  # 调度器类型：lsf / slurm / openlava
-env_script = '/share/apps/lsf/conf/profile.lsf'  # 调度器环境初始化脚本
 
 # ── 管理员模式 ─────────────────────────────────────────────────────────────────
 [admin]

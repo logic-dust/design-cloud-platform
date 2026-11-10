@@ -2,133 +2,175 @@ package connection
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net"
+	"strings"
+	"time"
 
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/contract"
-	pb "design-cloud-engine/internal/contract/proto"
 	"design-cloud-engine/internal/model"
 )
 
-const (
-	DefaultRDPPort = 3389
-	DefaultRDPName = "Windows 3D Workstation"
-)
-
-// SyncStaticRDPConnection ensures a static, shared RDP connection exists for a Windows node
-// and reconciles its host, listener port and readiness state.
-//
-// rdp carries the latest agent probe result (availability + actual listener port). A nil rdp
-// means "no observation" — node registration, a Linux agent, or an indeterminate Windows
-// probe: a missing record is then created with the unknown state, while an existing record
-// keeps its state and port untouched.
-func (s *Service) SyncStaticRDPConnection(ctx context.Context, nodeID, peerAddr string, rdp *pb.RDPStatus) error {
-	if nodeID == "" {
-		return fmt.Errorf("node ID is required")
-	}
-
-	host := ""
-	if peerAddr != "" {
-		if h, _, err := net.SplitHostPort(peerAddr); err == nil {
-			host = h
-		} else {
-			host = peerAddr
-		}
-	}
-	if host == "" || host == "127.0.0.1" || host == "::1" {
-		if node, err := s.nodeRepo.GetByNodeID(ctx, nodeID); err == nil && node.ClientHost != "" {
-			host = node.ClientHost
-		}
-	}
-
-	// An absent probe result is "no observation", never a state of its own: it must not
-	// overwrite what the agent reported earlier.
-	port, status, observed := uint(DefaultRDPPort), model.ConnectionUnknown, false
-	if rdp != nil {
-		observed = true
-		status = model.ConnectionStopped
-		if rdp.Available {
-			status = model.ConnectionRunning
-		}
-		if rdp.Port != 0 {
-			port = uint(rdp.Port)
-		}
-	}
-
-	existing, found, err := s.connectionRepo.FindSharedStatic(ctx, nodeID, contract.RDPProtocol)
+// reconcileRDPSessions aligns Windows desktop RDP portal rows with OS login sessions from the probe.
+// - running + no matching sessions for that user → stopped tombstone (resource kept)
+// - terminating + sessions gone / teardown ok → finish tombstone
+// - stopped + matching sessions appear → resume running
+// - RDP desktop sessions without row → adopt unmanaged connection
+func (s *Service) reconcileRDPSessions(
+	ctx context.Context,
+	nodeID string,
+	rdp []contract.RDPSessionInfo,
+) error {
+	rows, err := s.connectionRepo.ListRDPByNode(ctx, nodeID)
 	if err != nil {
-		return fmt.Errorf("lookup shared RDP connection for node %s: %w", nodeID, err)
+		return fmt.Errorf("list RDP connections for node %s: %w", nodeID, err)
+	}
+	rdpCount := countSessionsByUser(rdpUsernames(rdp))
+
+	rdpUserHasRow := make(map[string]bool)
+	for _, c := range rows {
+		rdpUserHasRow[strings.ToLower(c.Username)] = true
 	}
 
-	if !found {
+	owners := make(map[string]struct{})
+	matchCache := newVNCMatchCache()
+	for _, c := range rows {
+		live := s.rdpLiveCount(ctx, c.Username, rdpCount)
+
+		switch c.Status {
+		case model.ConnectionTerminating:
+			if live == 0 {
+				if err := s.finishTerminatingAfterSeatGone(ctx, c); err != nil && s.logger != nil {
+					s.logger.Warn("finish RDP terminating after sessions gone", "connectionID", c.ID, "error", err)
+				}
+			} else if err := s.finishTerminatingKill(ctx, c); err != nil && s.logger != nil {
+				s.logger.Warn("terminating RDP teardown still failing",
+					"connectionID", c.ID, "protocol", c.Protocol.String(), "error", err)
+			}
+			owners[c.Username] = struct{}{}
+		case model.ConnectionRunning:
+			if live == 0 {
+				if err := s.markStoppedTombstone(ctx, c); err != nil {
+					if s.logger != nil {
+						s.logger.Warn("mark RDP stopped after sessions gone", "connectionID", c.ID, "error", err)
+					}
+					continue
+				}
+				owners[c.Username] = struct{}{}
+				continue
+			}
+			if c.ResourceID == nil {
+				bestRes, tied, ok := s.matchResource(ctx, c.Username, nodeID, contract.RDPProtocol, nil, matchCache)
+				if ok {
+					if err := s.connectionRepo.UpdateFields(ctx, c.ID, map[string]any{
+						"resource_id": bestRes.ID,
+						"name":        model.ConnectionName(bestRes.Name, nodeID),
+					}); err == nil {
+						owners[c.Username] = struct{}{}
+					}
+				} else if len(tied) > 1 {
+					s.warnTiedCandidateResources(nodeID, c.Username, nil, tied)
+				}
+			}
+		case model.ConnectionStopped:
+			fields := make(map[string]any)
+			if live > 0 {
+				fields["status"] = model.ConnectionRunning
+			}
+			if c.ResourceID == nil {
+				bestRes, tied, ok := s.matchResource(ctx, c.Username, nodeID, contract.RDPProtocol, nil, matchCache)
+				if ok {
+					fields["resource_id"] = bestRes.ID
+					fields["name"] = model.ConnectionName(bestRes.Name, nodeID)
+				} else if len(tied) > 1 {
+					s.warnTiedCandidateResources(nodeID, c.Username, nil, tied)
+				}
+			}
+			if len(fields) > 0 {
+				if err := s.connectionRepo.UpdateFields(ctx, c.ID, fields); err == nil {
+					owners[c.Username] = struct{}{}
+				}
+			}
+		}
+	}
+
+	for osUser, count := range rdpCount {
+		if count <= 0 {
+			continue
+		}
+		portalUser := osUser
+		if mapped, ok := s.portalUsername(ctx, osUser); ok {
+			portalUser = mapped
+		}
+		if rdpUserHasRow[strings.ToLower(portalUser)] {
+			continue
+		}
+		now := time.Now()
+		connName := model.ProbedConnectionName("rdp", nodeID, 3389)
+		var boundResourceID *uint
+		bestRes, tied, ok := s.matchResource(ctx, portalUser, nodeID, contract.RDPProtocol, nil, matchCache)
+		if ok {
+			boundResourceID = &bestRes.ID
+			connName = model.ConnectionName(bestRes.Name, nodeID)
+		} else if len(tied) > 1 {
+			s.warnTiedCandidateResources(nodeID, portalUser, nil, tied)
+		}
 		newConn := &model.Connection{
-			Name:         DefaultRDPName,
-			TargetNodeID: nodeID,
-			Host:         host,
-			Port:         port,
-			Protocol:     contract.RDPProtocol,
-			Shared:       true,
-			Source:       model.ConnectionSourceFixed,
-			Status:       status,
+			ResourceID:     boundResourceID,
+			Name:           connName,
+			Username:       portalUser,
+			Protocol:       contract.RDPProtocol,
+			NodeID:         nodeID,
+			Port:           3389,
+			Status:         model.ConnectionRunning,
+			LastAccessedAt: &now,
 		}
-		if err := s.connectionRepo.CreateWithQuota(ctx, newConn, 0); err != nil {
-			if dErr, ok := errors.AsType[common.DomainError](err); ok && dErr.HTTPStatus() == 422 {
-				s.logger.Debug("Skip registering shared RDP connection on non-admitting node", "node_id", nodeID, "reason", dErr.Error())
-				return nil
+		if err := s.connectionRepo.Create(ctx, newConn); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("failed to adopt probed RDP connection",
+					"nodeID", nodeID, "username", portalUser, "error", err)
 			}
-			// Concurrent registration/heartbeat may race on the shared node+protocol unique index.
-			if common.IsUniqueConstraintError(err) {
-				existing, found, findErr := s.connectionRepo.FindSharedStatic(ctx, nodeID, contract.RDPProtocol)
-				if findErr != nil {
-					return fmt.Errorf("lookup shared RDP after unique conflict for node %s: %w", nodeID, findErr)
-				}
-				if !found {
-					return fmt.Errorf("create static RDP connection conflict but no match found for node %s: %w", nodeID, err)
-				}
-				return s.patchSharedRDP(ctx, &existing, host, port, status, observed)
-			}
-			return fmt.Errorf("create static RDP connection for node %s: %w", nodeID, err)
+			continue
 		}
-		s.invalidateConnListCache("")
-		s.notifyOwnerRefresh(ctx, "", newConn.ID)
-		return nil
+		rdpUserHasRow[strings.ToLower(portalUser)] = true
+		owners[portalUser] = struct{}{}
 	}
 
-	return s.patchSharedRDP(ctx, &existing, host, port, status, observed)
+	for u := range owners {
+		s.notifyOwnerRefresh(ctx, "", u, 0)
+	}
+	return nil
 }
 
-// patchSharedRDP updates only host/status/port on an existing shared RDP row so concurrent
-// alias / lastAccessedAt edits are not overwritten by heartbeat reconciliation.
-func (s *Service) patchSharedRDP(ctx context.Context, existing *model.Connection, host string, port uint, status model.ConnectionStatus, observed bool) error {
-	fields := map[string]any{}
-
-	if !observed {
-		if host != "" && existing.Host != host {
-			fields["host"] = host
+func (s *Service) rdpLiveCount(ctx context.Context, portalUser string, byOSUser map[string]int) int {
+	n := 0
+	for osUser, c := range byOSUser {
+		if strings.EqualFold(osUser, portalUser) {
+			n += c
+			continue
 		}
-	} else {
-		if existing.Status != status {
-			fields["status"] = status
-		}
-		if existing.Port != port {
-			fields["port"] = port
-		}
-		if host != "" && existing.Host != host {
-			fields["host"] = host
+		if mapped, ok := s.portalUsername(ctx, osUser); ok && strings.EqualFold(mapped, portalUser) {
+			n += c
 		}
 	}
+	return n
+}
 
-	if len(fields) == 0 {
-		return nil
+func rdpUsernames(sessions []contract.RDPSessionInfo) []string {
+	out := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		out = append(out, s.Username)
 	}
+	return out
+}
 
-	if err := s.connectionRepo.UpdateFields(ctx, existing.ID, fields); err != nil {
-		return fmt.Errorf("update static RDP connection %d for node %s: %w", existing.ID, existing.TargetNodeID, err)
+func countSessionsByUser(names []string) map[string]int {
+	m := make(map[string]int, len(names))
+	for _, n := range names {
+		k := strings.ToLower(strings.TrimSpace(n))
+		if k == "" {
+			continue
+		}
+		m[k]++
 	}
-
-	s.invalidateConnListCache("")
-	s.notifyOwnerRefresh(ctx, "", existing.ID)
-	return nil
+	return m
 }

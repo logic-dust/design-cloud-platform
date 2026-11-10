@@ -1,0 +1,74 @@
+# ========================================
+# ===== PUBLIC API Http =====
+# ========================================
+# ----- 🔓 无需登录的公开接口 -----
+
+# ========================================
+# ===== 版本信息（公开，无需登录） =====
+# ========================================
+
+### 获取 Engine 版本详情
+GET {{addr}}/api/version
+
+# @probe
+# @expect 200,401,404
+### 获取 Desktop 最新发布信息
+GET {{addr}}/api/desktop/releases/latest
+
+# @probe
+# @expect 200,401,404
+### 获取 Desktop 首次安装 Setup 包元数据（非 Velopack nupkg）
+GET {{addr}}/api/desktop/releases/installer
+
+# @probe
+# @expect 200,401,404
+### 获取 Desktop 引导安装包元数据（CA + 配置预置）
+GET {{addr}}/api/desktop/releases/bootstrap-installer
+
+# @probe
+# @expect 200,401,404
+### 获取 Desktop 最新发布信息（仅 Windows 平台）
+GET {{addr}}/api/desktop/releases/latest?os=windows
+
+# @probe
+# @expect 200,401,404
+### 获取 Desktop 最新发布信息（限制返回 1 个资产）
+GET {{addr}}/api/desktop/releases/latest?limit=1
+
+# ========================================
+# ===== Desktop 发布包下载（公开，无需登录） =====
+# ========================================
+
+# @probe
+# @expect 200,401,404
+### 下载 Desktop 最新完整安装包（一键直接下载最新版）
+GET {{addr}}/api/desktop/releases/download/latest
+
+# @probe
+# @expect 200,401,404
+### 下载 Desktop 最新完整安装包（仅 Linux 平台）
+GET {{addr}}/api/desktop/releases/download/latest?os=linux
+
+# @probe
+# @expect 200,401,404
+### 下载 Desktop 指定安装包（按文件名下载全量/差分包）
+GET {{addr}}/api/desktop/releases/download/DesignCloudDesktop-1.0.0.nupkg
+
+# ========================================
+# ===== Desktop 插件发布与下载（公开，无需登录） =====
+# ========================================
+
+# @probe
+# @expect 200,401,404
+### 获取 Desktop 指定插件最新版本信息
+GET {{addr}}/api/desktop/plugins/turbovnc/latest
+
+# @probe
+# @expect 200,401,404
+### 下载 Desktop 指定插件最新包
+GET {{addr}}/api/desktop/plugins/turbovnc/download/latest
+
+# @probe
+# @expect 200,401,404
+### 下载 Desktop 指定插件指定文件名安装包
+GET {{addr}}/api/desktop/plugins/turbovnc/download/latest.zip

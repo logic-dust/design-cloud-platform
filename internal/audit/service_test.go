@@ -6,10 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"design-cloud-engine/internal/db"
+	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 )
 
 func newTestServiceWithDir(t *testing.T) (*Service, string) {
@@ -58,6 +61,35 @@ func TestNewService(t *testing.T) {
 	}
 	if !strings.Contains(content, "AUDIT_SYSTEM_STOP") {
 		t.Error("audit.log missing AUDIT_SYSTEM_STOP")
+	}
+}
+
+func TestCloseSerializesConcurrentAuditWrites(t *testing.T) {
+	svc, dir := newTestServiceWithDir(t)
+	var writers sync.WaitGroup
+	for range 4 {
+		writers.Go(func() {
+			for range 100 {
+				svc.LogSystem(context.Background(), "CONCURRENT_EVENT", slog.LevelInfo, nil)
+			}
+		})
+	}
+
+	if err := svc.Close(); err != nil {
+		t.Fatalf("close audit service: %v", err)
+	}
+	writers.Wait()
+	if err := svc.Close(); err != nil {
+		t.Fatalf("second close audit service: %v", err)
+	}
+	svc.LogSystem(context.Background(), "AFTER_CLOSE", slog.LevelInfo, nil)
+
+	content := readPrimaryLog(t, dir)
+	if got := strings.Count(content, "AUDIT_SYSTEM_STOP"); got != 1 {
+		t.Fatalf("stop event count = %d, want 1", got)
+	}
+	if strings.Contains(content, "AFTER_CLOSE") {
+		t.Fatal("audit event was written after logger close")
 	}
 }
 
@@ -241,12 +273,40 @@ func TestExecutionQueryWithoutAttachedRepoReturnsError(t *testing.T) {
 	svc, _ := newTestServiceWithDir(t)
 	defer func() { _ = svc.Close() }()
 
-	_, err := svc.ListExecutions(context.Background(), db.ExecutionListFilter{})
+	_, err := svc.ListExecutions(context.Background(), model.ExecutionListFilter{})
 	if err == nil {
 		t.Fatal("expected ErrExecutionRepoNotAttached, got nil")
 	}
 	_, err = svc.GetExecutionByExecutionID(context.Background(), "any")
 	if err == nil {
 		t.Fatal("expected ErrExecutionRepoNotAttached, got nil")
+	}
+}
+
+func TestListExecutionsResolvesLimit(t *testing.T) {
+	t.Parallel()
+
+	store, err := db.NewStore(config.Database{
+		Type: config.DatabaseTypeSQLite,
+		Path: filepath.Join(t.TempDir(), "audit_exec.db") + "?_busy_timeout=5000",
+	}, slog.Default())
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	svc, _ := newTestServiceWithDir(t)
+	svc.WithExecutionRepo(db.NewRepos(store).Execution)
+	defer func() { _ = svc.Close() }()
+
+	out, err := svc.ListExecutions(context.Background(), model.ExecutionListFilter{Limit: db.MaxListLimit + 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Limit != db.MaxListLimit {
+		t.Fatalf("Limit=%d want %d", out.Limit, db.MaxListLimit)
 	}
 }

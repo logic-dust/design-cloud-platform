@@ -1,0 +1,62 @@
+# ========================================
+# ===== SYSTEM USERS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+# ----- 用户管理在 /api/admin/system/users 下（System Admin） -----
+
+### 获取所有用户 (System admin)
+GET {{addr}}/api/admin/system/users?limit=50&offset=0
+Authorization: Bearer {{accessToken}}
+
+### 按用户名 / lastLoginIP 子串搜索 (System admin)
+GET {{addr}}/api/admin/system/users?limit=50&offset=0&q={{username}}
+Authorization: Bearer {{accessToken}}
+
+### 搜索无结果 (System admin)
+GET {{addr}}/api/admin/system/users?limit=50&offset=0&q=__no_such_user__
+Authorization: Bearer {{accessToken}}
+
+### 获取单个用户详情 (System admin)
+GET {{addr}}/api/admin/system/users/{{username}}
+Authorization: Bearer {{accessToken}}
+
+### 同步系统/LDAP用户 (System admin)
+POST {{addr}}/api/admin/system/users/sync
+Authorization: Bearer {{accessToken}}
+
+### 刷新 UID/GID 名字映射缓存 (System admin)
+# ----- 202=本机已清空并广播；503=广播失败（本机已生效，可重试） -----
+POST {{addr}}/api/admin/system/users/id-mappings/refresh
+Authorization: Bearer {{accessToken}}
+
+### 更新用户记录 (System admin)
+PATCH {{addr}}/api/admin/system/users/{{username}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "status": 1,
+  "maxConnections": 10,
+  "downloadAccess": true,
+  "uploadAccess": true
+}
+
+# @manual
+### 重置用户密码 (System admin)
+POST {{addr}}/api/admin/system/users/{{normalUser}}/reset-password
+Authorization: Bearer {{accessToken}}
+
+# @manual
+### 删除门户用户 (System admin)
+# ----- 204：已关闭代理、结束 VNC，并删除该用户的 connections -----
+# ----- 404：用户不存在 -----
+DELETE {{addr}}/api/admin/system/users/{{normalUser}}
+Authorization: Bearer {{accessToken}}
+
+### 获取用户组列表 (System admin)
+GET {{addr}}/api/admin/system/users/groups
+Authorization: Bearer {{accessToken}}
+
+### 获取特定组的成员 (System admin)
+GET {{addr}}/api/admin/system/users/groups/{{testGroup}}
+Authorization: Bearer {{accessToken}}

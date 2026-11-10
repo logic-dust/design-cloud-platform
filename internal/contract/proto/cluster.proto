@@ -15,11 +15,10 @@ service ControlService {
   // Server 通过此流下发命令、认证请求等
   rpc Sync(stream AgentMessage) returns (stream ServerCommand);
 
-  // ForwardDispatch allows a standby server node to ask the leader to dispatch
-  // a command-plane request on its behalf.
+  // ForwardDispatch：Standby Server 委托 Leader 代为派发控制面请求
   rpc ForwardDispatch(ForwardDispatchRequest) returns (ForwardDispatchResponse);
 
-  // ForwardClusterEvent allows server nodes to synchronize push notifications across the cluster.
+  // ForwardClusterEvent：跨 Server 节点同步 Portal 推送事件
   rpc ForwardClusterEvent(ForwardClusterEventRequest) returns (ForwardClusterEventResponse);
 }
 
@@ -31,21 +30,22 @@ message AgentMessage {
     RegisterRequest register_request = 1;           // 注册请求（首次连接）
     HeartbeatRequest heartbeat_request = 2;         // 心跳
     CommandResult command_result = 3;               // 命令执行结果
-    ResourceReport resource_report = 4;     // 资源上报
-    ConnectionReport connection_report = 5; // 运行态连接上报
-    StorageProbeReport storage_probe_report = 6; // Storage probe report
-    RenewCertRequest renew_cert_request = 7;     // 证书续签：Agent 生成密钥对并上送 CSR
-    RenewCertResult renew_cert_result = 8;       // 证书续签：本地安装结果回报
+    Metrics metrics = 4;                            // 节点资源指标
+    ConnectionReport connection_report = 5;         // 连接席位运行态上报（VNC/XRDP/RDP）
+    StorageProbeReport storage_probe_report = 6;    // 共享存储容量周期采样
+    RenewCertRequest renew_cert_request = 7;        // 证书续签：Agent 生成密钥对并上送 CSR
+    RenewCertResult renew_cert_result = 8;          // 证书续签：本地安装结果回报
   }
 }
 
-// StorageProbeReport is sent by the agent as a periodic shared storage capacity sample.
+// StorageProbeItem 单条共享存储用量
 message StorageProbeItem {
   string storage_id = 1;
-  int64 total = 2;       // 总容量，单位 KB (KiB)
-  int64 used = 3;        // 已使用，单位 KB (KiB)
+  int64 total = 2; // 总容量，单位 KB (KiB)
+  int64 used = 3;  // 已使用，单位 KB (KiB)
 }
 
+// StorageProbeReport Agent 周期上报的共享存储容量样本
 message StorageProbeReport {
   repeated StorageProbeItem items = 1;
   int64 reported_at = 2; // 上报数据时间（agent 采集时打点，Unix 秒）
@@ -53,100 +53,119 @@ message StorageProbeReport {
 
 // RegisterRequest Agent 注册请求
 message RegisterRequest {
-  string node_id = 1;               // 节点标识（主标识）
-  string version = 2;              // Agent 版本
-  int64 registered_at = 3;         // 注册时间戳（Unix 秒）
-  SystemInfo system_info = 4;       // 系统信息
+  string node_id = 1;         // 节点标识（主标识）
+  string version = 2;         // Agent 版本
+  int64 registered_at = 3;    // 注册时间戳（Unix 秒）
+  SystemInfo system_info = 4; // 系统信息
 }
 
 // SystemInfo 系统信息
 message SystemInfo {
-  string os = 1;                   // 操作系统
-  string arch = 2;                 // CPU 架构
-  int64 cpu_cores = 3;             // CPU 核心数
+  string os = 1;             // 操作系统家族：Agent 编译目标 runtime.GOOS
+  string arch = 2;           // CPU 架构：Agent 编译目标 runtime.GOARCH
+  int64 cpu_cores = 3;       // CPU 核心数
+  string os_name = 4;        // 操作系统产品名（连接时探测一次，如 CentOS Linux）
+  string os_version = 5;     // 操作系统版本（连接时探测一次）
+  string kernel_version = 6; // 内核版本（可选；Windows 可为空）
 }
 
 // HeartbeatRequest 心跳请求
 message HeartbeatRequest {
-  int64 reported_at = 1;           // 上报数据时间（agent 采集时打点，Unix 秒）
-  RDPStatus rdp = 2;               // Windows 节点远程桌面状态（消息字段自带 presence，Linux 不填）
+  int64 reported_at = 1; // 上报数据时间（agent 采集时打点，Unix 秒）
 }
 
-// RDPStatus Windows 远程桌面（TermService）就绪状态
-message RDPStatus {
-  bool available = 1;              // 注册表策略 + TermService 状态 + 端口握手 三级探活综合判定
-  uint32 port = 2;                 // 实际监听端口（注册表 WinStations\RDP-Tcp\PortNumber，默认 3389）
-}
-
-// CommandResult 包含了命令执行的通用结果字段
+// CommandResult 命令执行的通用结果字段
 message CommandResult {
-  string trace_id = 1;              // 对应的追踪 ID
-  bool success = 2;                // 执行成功状态（exit_code == 0）
-  int32 exit_code = 3;              // 进程退出码
-  string stdout = 4;               // 标准输出
-  string stderr = 5;               // 标准错误
-  google.protobuf.Duration duration = 6;  // 执行耗时
-  string system_error = 7;          // Agent 系统错误
+  string trace_id = 1;                   // 对应的追踪 ID
+  bool success = 2;                        // 执行成功状态（exit_code == 0）
+  int32 exit_code = 3;                     // 进程退出码
+  string stdout = 4;                       // 标准输出
+  string stderr = 5;                       // 标准错误
+  google.protobuf.Duration duration = 6; // 执行耗时
+  string system_error = 7;                 // Agent 系统错误
 }
 
 // GPUInfo GPU 设备信息
 message GPUInfo {
-  string name = 1;                 // GPU 名称（如 "NVIDIA GeForce RTX 3080"）
-  int64 mem_total = 2;             // 总显存，单位 KB (KiB)
-  int64 mem_used = 3;              // 已用显存，单位 KB (KiB)
-  double utilization = 4;          // GPU 利用率 (0-1 比例数值，如 0.4250 表示 42.5%)
+  string name = 1;         // GPU 名称（如 "NVIDIA GeForce RTX 3080"）
+  int64 mem_total = 2;     // 总显存，单位 KB (KiB)
+  int64 mem_used = 3;      // 已用显存，单位 KB (KiB)
+  double utilization = 4;  // GPU 利用率 (0-1 比例数值，如 0.4250 表示 42.5%)
 }
 
-// ResourceReport 资源上报
-message ResourceReport {
+// Metrics 节点资源指标（CPU/内存/负载/GPU/磁盘等）
+message Metrics {
   double cpu_util = 1;              // CPU 使用率 (0-1 比例数值，如 0.0131 表示 1.31%)
   int64 mem_total = 2;              // /proc/meminfo MemTotal，单位 KB (KiB)
-  int64 mem_used = 3;          // /proc/meminfo MemTotal - MemAvailable，单位 KB (KiB)
+  int64 mem_used = 3;               // /proc/meminfo MemTotal - MemAvailable，单位 KB (KiB)
   int64 swap_total = 4;             // /proc/meminfo SwapTotal，单位 KB (KiB)
   int64 swap_free = 5;              // /proc/meminfo SwapFree，单位 KB (KiB)
-  double load1 = 6;                // /proc/loadavg 1 分钟负载
-  double load5 = 7;                // /proc/loadavg 5 分钟负载
-  double load15 = 8;               // /proc/loadavg 15 分钟负载
-  int64 uptime = 9;          // 运行时长
-  int64 active_tasks = 10;          // 当前活跃任务数
-  repeated GPUInfo gpus = 11;      // GPU 设备列表
-  int64 cpu_cores = 12;             // CPU 核心数
+  double load1 = 6;                   // /proc/loadavg 1 分钟负载
+  double load5 = 7;                   // /proc/loadavg 5 分钟负载
+  double load15 = 8;                  // /proc/loadavg 15 分钟负载
+  int64 uptime = 9;                   // 运行时长（秒）
+  int64 active_tasks = 10;            // 当前活跃任务数
+  repeated GPUInfo gpus = 11;         // GPU 设备列表
+  int64 cpu_cores = 12;               // CPU 核心数
   repeated DiskUsage disk_usages = 13; // 磁盘使用情况（自定义监控对象）
-  int64 reported_at = 14;           // 上报数据时间（agent 采集时打点，Unix 秒）
+  int64 reported_at = 14;             // 上报数据时间（agent 采集时打点，Unix 秒）
 }
 
 // DiskUsage 磁盘使用情况（df 输出结构化）
 message DiskUsage {
-  string mount_point = 1;           // 挂载点，如 /
-  int64 total = 2;                 // 总容量，单位 KB (KiB)
-  int64 used = 3;                  // 已使用，单位 KB (KiB)
-  string monitor_name = 4;         // 监控对象显示名（来自模板或自定义配置）
-  string filesystem = 5;           // 文件系统类型，如 ext4, xfs, nfs4
+  string mount_point = 1;  // 挂载点，如 /
+  int64 total = 2;         // 总容量，单位 KB (KiB)
+  int64 used = 3;          // 已使用，单位 KB (KiB)
+  string monitor_name = 4; // 监控对象显示名（来自模板或自定义配置）
+  string filesystem = 5;     // 文件系统类型，如 ext4, xfs, nfs4
 }
 
-message ConnectionInfo {
+// VNCSeatInfo VNC 席位运行态
+message VNCSeatInfo {
   int64 connection_id = 1;
   string name = 2;
   string username = 3;
-  string host = 4;
-  int32 port = 5;
-  int32 pid = 6;
-  string display = 7;
-  string protocol = 8;
+  int32 port = 4;
+  int32 pid = 5;
+  optional int32 display = 6;    // VNC 显示号。未设置表示无显示号；0 表示 :0。不使用带冒号的字符串。
+  optional int64 started_at = 7; // 进程物理启动绝对时间戳（秒），用于探针自动收养时保留真实创建时间
 }
 
+// XRDPSeatInfo xrdp 管理的 X 席位（每用户 Xorg）。
+// TCP 端口为共享 xrdp 监听（通常 3389），不按席位单独上报。
+message XRDPSeatInfo {
+  int64 connection_id = 1;
+  string name = 2;
+  string username = 3;
+  int32 pid = 4;
+  optional int32 display = 5; // X 显示号。未设置表示无；0 表示 :0。
+  // 为 true 表示该 X 席位无健康的 logind 会话（缺失或正在关闭）；
+  // 断开保活仍维持活动会话时不会设置本字段。
+  bool session_ending_confirmed = 6;
+  optional int64 started_at = 7; // 进程物理启动绝对时间戳（秒），用于探针自动收养时保留真实创建时间
+}
+
+// RDPSessionInfo Windows 全桌面 RDP 会话（非 RemoteApp / 控制台）
+message RDPSessionInfo {
+  string username = 1;
+  int32 session_id = 2;
+  string session_name = 3; // 例如 rdp-tcp#1
+}
+
+// ConnectionReport 连接席位汇总上报
 message ConnectionReport {
-  int64 reported_at = 1;                   // 上报数据时间（agent 采集时打点，Unix 秒）
-  repeated ConnectionInfo connections = 2; // 当前运行态连接信息列表
+  int64 reported_at = 1;
+  repeated VNCSeatInfo vnc_seats = 2;
+  repeated XRDPSeatInfo xrdp_seats = 3;
+  repeated RDPSessionInfo rdp_sessions = 4;
 }
 
-// RenewCertRequest carries the agent-generated CSR. The private key never
-// leaves the agent (CSR signing mode).
+// RenewCertRequest Agent 上送的证书签名请求（私钥不出节点）
 message RenewCertRequest {
-  bytes csr = 1; // PEM-encoded certificate request
+  bytes csr = 1; // PEM 编码的 CSR
 }
 
-// RenewCertResult reports the local installation outcome to the server.
+// RenewCertResult Agent 本地安装证书结果回报
 message RenewCertResult {
   bool ok = 1;
   string message = 2;
@@ -157,119 +176,122 @@ message RenewCertResult {
 // ServerCommand 是 Server 发送给 Agent 的命令封装
 message ServerCommand {
   oneof payload {
-    RegisterResponse register_response = 1;       // 注册响应
-    HeartbeatResponse heartbeat_response = 2;     // 心跳响应
-    CommandRequest command_request = 3;           // 执行命令
-    CancelCommand cancel_command = 4;               // 取消任务命令
-    RedirectCommand redirect_command = 5;           // leader 重定向命令
+    RegisterResponse register_response = 1;          // 注册响应
+    HeartbeatResponse heartbeat_response = 2;        // 心跳响应
+    CommandRequest command_request = 3;              // 执行命令
+    CancelCommand cancel_command = 4;                // 取消任务命令
+    RedirectCommand redirect_command = 5;            // Leader 重定向命令
     CommandResultAck command_result_ack = 6;         // 执行结果确认
-    CollectProbeCommand collect_probe_command = 7;   // 触发一次节点探针即时采集 (vnc-probe/resource-report/storage-probe)
+    CollectProbeCommand collect_probe_command = 7;   // 触发一次节点探针即时采集 (connection-probe/metrics/storage-probe)
     UpdateSettingsCommand update_settings_command = 8; // 更新 Agent 配置
-    RenewCertCommand renew_cert_command = 9;           // 证书续签：请求 Agent 生成密钥对与 CSR
-    RenewCertResponse renew_cert_response = 10;        // 证书续签：回传签发后的证书与 CA
+    RenewCertCommand renew_cert_command = 9;         // 证书续签：请求 Agent 生成密钥对与 CSR
+    RenewCertResponse renew_cert_response = 10;      // 证书续签：回传签发后的证书与 CA
   }
 }
 
-// RenewCertCommand asks the agent to start certificate renewal (generate a new
-// key pair and CSR). Carries no sensitive payload.
+// RenewCertCommand 请求 Agent 启动证书续签（生成新密钥对与 CSR，无敏感载荷）
 message RenewCertCommand {
-  string reason = 1; // e.g. "expiring"
+  string reason = 1; // 例如 expiring
 }
 
-// RenewCertResponse carries the signed certificate and the cluster CA back.
+// RenewCertResponse 签发后的节点证书与集群 CA
 message RenewCertResponse {
-  bytes cert = 1; // PEM-encoded signed node certificate (SAN decided by server)
-  bytes ca = 2;   // PEM-encoded cluster CA certificate
+  bytes cert = 1; // PEM 编码的节点证书（SAN 由 Server 决定）
+  bytes ca = 2;   // PEM 编码的集群 CA 证书
 }
 
 // RegisterResponse 注册响应
 message RegisterResponse {
-  bool accepted = 1;                       // 是否接受注册
-  string message = 2;                      // 接受/拒绝消息
-  string leader_node_id = 3;                 // 当前 leader 节点 ID（如有）
-  string leader_addr = 4;                   // 当前 leader gRPC 地址（如有）
-  AgentSettings agent_settings = 5;         // 下发给 Agent 的工具路径等配置
+  bool accepted = 1;                  // 是否接受注册
+  string message = 2;                 // 接受/拒绝消息
+  string leader_node_id = 3;          // 当前 leader 节点 ID（如有）
+  string leader_addr = 4;           // 当前 leader gRPC 地址（如有）
+  AgentSettings agent_settings = 5;   // 下发给 Agent 的工具路径等配置
 }
 
+// VNCConfig VNC 探针与启动相关配置
 message VNCConfig {
   string bin_dir = 1;
-  int32 scan_interval = 2;   // VNC 进程扫描周期，单位秒，默认 1800 (30min)；0=不启用周期扫描
-  bool scan_enabled = 3;     // 是否启用 VNC 周期扫描，默认 true
+  int32 scan_interval = 2;     // VNC 进程扫描周期，单位秒，默认 60 (1min)；0=不启用周期扫描
+  bool scan_enabled = 3;       // 是否启用 VNC 周期扫描，默认 true
   repeated string server_args = 4;
 }
 
+// MonitorConfig 节点资源与磁盘监控配置
 message MonitorConfig {
-  string nvidia_smi_path = 1;          // GPU 相关配置（nvidia-smi 路径等）
+  string nvidia_smi_path = 1;         // GPU 相关配置（nvidia-smi 路径等）
   repeated MountTarget disk_mounts = 2; // 额外磁盘挂载监听列表
-  int32 resource_report_interval = 3;   // 资源上报间隔，单位秒
-  bool resource_report_enabled = 4;     // 是否启用资源上报
+  int32 metrics_interval = 3;         // 资源指标上报间隔，单位秒
+  bool metrics_enabled = 4;           // 是否启用资源指标上报
 }
 
-// AgentSettings contains per-node config that the Server pushes to the Agent.
+// AgentSettings Server 推送给 Agent 的节点生效配置
 message AgentSettings {
-  string launcher_path = 1;
+  string exec_bin_path = 1;
   VNCConfig vnc = 2;
   MonitorConfig monitor = 3;
-  repeated StorageConfig storages = 4; // Only storages this node should probe
-  int32 probe_interval = 5;                        // 共享存储探测间隔，单位秒（0 = 使用默认值 1h）
-  string lmutil_path = 6;                          // 节点生效的 lmutil 可执行文件绝对路径
+  repeated StorageConfig storages = 4; // 本节点应探测的共享存储列表
+  int32 probe_interval = 5;          // 共享存储探测间隔，单位秒（0 = 使用默认值 1h）
+  string lmutil_path = 6;            // 节点生效的 lmutil 可执行文件绝对路径
+  string scheduler_env_script = 7;   // 节点生效的调度器环境初始化脚本绝对路径（空 = 不 source）
 }
 
-// StorageConfig describes a shared storage volume the agent should probe.
+// StorageConfig Agent 应探测的共享存储卷
 message StorageConfig {
   string id = 1;
   string mount_point = 2;
 }
 
-// MountTarget defines a mount point that the agent should monitor via statfs.
+// MountTarget Agent 通过 statfs 监控的挂载点
 message MountTarget {
-  string name = 1;     // 显示名，如"项目盘"
-  string path = 2;     // 挂载路径，如 /mnt/project
-  bool enabled = 3;    // 是否启用采集，默认 true
-  string os = 4;       // 适用操作系统 (linux / windows / 空表示全部)
+  string name = 1;   // 显示名，如"项目盘"
+  string path = 2;   // 挂载路径，如 /mnt/project
+  bool enabled = 3;  // 是否启用采集，默认 true
+  string os = 4;     // 适用操作系统 (linux / windows / 空表示全部)
 }
 
 // HeartbeatResponse 心跳响应
 message HeartbeatResponse {
-  int64 server_timestamp = 1;               // Server 时间戳
+  int64 server_timestamp = 1; // Server 时间戳（Unix 秒）
 }
 
-// CommandRequest 包含了命令请求的通用字段
+// CommandRequest 命令请求的通用字段
 message CommandRequest {
-  string trace_id = 1;                      // 唯一追踪标识符
-  string execution_id = 2;                  // 执行唯一标识符（用于幂等性）
-  string target_user = 3;                   // 目标用户名
-  string action_name = 4;                   // 操作名称 (ActionName)
-  string payload_json = 5;                  // 结构化参数 (JSON)
-  map<string, string> env = 6;             // 环境变量
-  google.protobuf.Duration timeout = 7;     // 超时时间
+  string trace_id = 1;       // 唯一追踪标识符
+  string execution_id = 2;   // 执行唯一标识符（用于幂等性）
+  string target_user = 3;    // 目标用户名
+  string action_name = 4;    // 操作名称 (ActionName)
+  string payload_json = 5;   // 结构化参数 (JSON)
+  map<string, string> env = 6; // 环境变量
+  google.protobuf.Duration timeout = 7; // 超时时间
 }
 
 // CancelCommand 取消任务命令
 message CancelCommand {
-  string trace_id = 1;                      // 要取消的任务 TraceID
+  string trace_id = 1; // 要取消的任务 TraceID
 }
 
 // CommandResultAck 命令执行结果确认（Server 确认已收到并持久化）
 message CommandResultAck {
-  string trace_id = 1;                      // 对应的追踪 ID
-  bool persisted = 2;                      // 是否已持久化到数据库
+  string trace_id = 1;  // 对应的追踪 ID
+  bool persisted = 2;   // 是否已持久化到数据库
 }
 
-// RedirectCommand tells an agent to reconnect to the current leader.
+// RedirectCommand 指示 Agent 重连至当前 Leader
 message RedirectCommand {
   string leader_node_id = 1;
   string leader_addr = 2;
   string reason = 3;
 }
 
+// CollectProbeCommand 按需触发即时探针采集
 message CollectProbeCommand {
-  string probe_name = 1;    // 探针标识 (如 "vnc-probe", "resource-report", "storage-probe")
+  string probe_name = 1; // 探针标识 (如 connection-probe, metrics, storage-probe)
   string trace_id = 2;
-  int64 requested_at = 3;
+  int64 requested_at = 3; // 请求时间（Unix 秒）
 }
 
-// UpdateSettingsCommand pushes new tool paths or agent settings dynamically.
+// UpdateSettingsCommand 动态推送 Agent 工具路径与运行配置
 message UpdateSettingsCommand {
   AgentSettings agent_settings = 1;
 }
@@ -286,30 +308,39 @@ enum RunMode {
   RUN_MODE_ASYNC_TRACKED = 1;
 }
 
+// ForwardDispatchRequest Standby 向 Leader 转发的派发请求
 message ForwardDispatchRequest {
   CommandRequest request = 1;
   string source_node_id = 2;
   string target_node = 3;
-  map<string, string> node_selector = 4;
+  repeated string node_selector = 4;
   NodeAffinity node_affinity = 5;
   RunMode run_mode = 6;
+  uint64 leader_epoch = 7; // Standby 观测到的 Leader epoch（fencing token）
+  uint32 hop = 8;          // 转发跳数，上限 1（防御性防环）
 }
 
+// ForwardDispatchResponse Leader 派发结果
 message ForwardDispatchResponse {
   CommandResult result = 1;
   string execution_id = 2;
   bool accepted = 3;
 }
 
+// ForwardClusterEventRequest 跨节点 Portal 推送事件转发
 message ForwardClusterEventRequest {
   string source_node_id = 1;
-  string target_type = 2; // "user", "role", "broadcast"
-  repeated string user_ids = 3;
-  int32 role = 4;
-  string event_name = 5;
-  string payload_json = 6;
+  string event_id = 2;         // 全局唯一事件 ID，接收端按此去重
+  int64 expires_at = 3;        // Unix 秒；超过 TTL 的事件丢弃
+  string target_type = 4;      // user、role、broadcast
+  repeated string user_ids = 5;
+  int32 role = 6;
+  string event_name = 7;
+  string payload_json = 8;
+  uint32 hop = 9; // 转发跳数，上限 1（防御性防环）
 }
 
+// ForwardClusterEventResponse 转发处理结果
 message ForwardClusterEventResponse {
   bool success = 1;
 }

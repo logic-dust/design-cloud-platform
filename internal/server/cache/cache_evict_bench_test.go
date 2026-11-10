@@ -23,9 +23,10 @@ func BenchmarkInsertAtCapacity(b *testing.B) {
 				c.SetWithTTL(i, i, time.Duration(i%3600+1)*time.Second)
 			}
 			b.ReportAllocs()
-			b.ResetTimer()
-			for i := range b.N {
+			i := 0
+			for b.Loop() {
 				c.SetWithTTL(n+i, i, time.Hour)
+				i++
 			}
 		})
 	}
@@ -40,8 +41,9 @@ func BenchmarkOverwriteAtCapacity(b *testing.B) {
 		c.SetWithTTL(i, i, time.Hour)
 	}
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := range b.N {
+	i := 0
+	for b.Loop() {
 		c.SetWithTTL(i%n, i, time.Hour)
+		i++
 	}
 }

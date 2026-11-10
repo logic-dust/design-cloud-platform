@@ -1,28 +1,29 @@
 ---
-title: 开发与设计
-linkTitle: 开发与设计
-weight: 50
-description: 系统架构、设计文档与开发指南
+title: 开发者指南
+linkTitle: 开发者指南
+weight: 40
+description: 本地研发环境准备、编码规范、依赖装配、Action 扩展与测试门禁
 ---
 
-## 架构与设计
+欢迎参与 Design Cloud Engine 开发。本目录面向后端与嵌入式前端开发者，提供从本地环境搭建、工程开发规范、组件装配到新增特权动作及提交前门禁测试的完整指引。
+
+> [!NOTE]
+> 系统的整体运行架构、集群协议机制与各业务领域设计请参阅顶级专栏：[核心架构与领域设计](/docs/architecture)。
+
+## 推荐开发旅程
+
+```
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│  1. 环境与规范   │ ──> │  2. 装配与扩展   │ ──> │  3. 测试与验证   │
+│  dev-env/convent │     │wire/action/web   │     │testing/verifiers │
+└──────────────────┘     └──────────────────┘     └──────────────────┘
+```
 
 {{< cards >}}
-{{< card link="architecture" title="系统架构" >}}
-{{< card link="launcher" title="启动器(dc-launcher)" >}}
-{{< card link="cluster" title="集群" >}}
-{{< card link="remote-access" title="远程访问" >}}
-{{< card link="session" title="会话设计" >}}
-{{< card link="user-system" title="用户系统" >}}
-{{< card link="settings" title="系统设置(Settings)" >}}
-{{< card link="dashboard" title="Dashboard 数据与推送" >}}
-{{< card link="events-and-streaming" title="全局事件与实时流" >}}
-{{< card link="cache" title="缓存架构与决策模型" >}}
-{{< card link="background-tasks" title="后台任务与分布式租约" >}}
-{{< /cards >}}
-
-## 开发指南
-
-{{< cards >}}
-{{< card link="guide" title="开发指南" >}}
+{{< card link="dev-environment" title="1. 本地开发环境准备" >}}
+{{< card link="code-conventions" title="2. 代码规范与工程约束" >}}
+{{< card link="dependency-wiring" title="3. 依赖装配与服务生命周期" >}}
+{{< card link="execution-development" title="4. 扩展特权 Action 与调度驱动" >}}
+{{< card link="web-design" title="5. 嵌入式前端开发规范" >}}
+{{< card link="testing" title="6. 测试策略与门禁验证" >}}
 {{< /cards >}}

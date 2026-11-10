@@ -3,18 +3,15 @@ package api
 import (
 	"errors"
 	"io"
-	"io/fs"
 	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/portal/httputil"
-	"design-cloud-engine/internal/server/service"
 	"design-cloud-engine/internal/server/service/file"
 
 	"github.com/labstack/echo/v5"
@@ -24,8 +21,8 @@ type fileHandler struct {
 	file *file.Service
 }
 
-func newFileHandler(svc *service.Container) *fileHandler {
-	return &fileHandler{file: svc.File}
+func newFileHandler(fileSvc *file.Service) *fileHandler {
+	return &fileHandler{file: fileSvc}
 }
 
 func (h *fileHandler) requireFileEnabled(next echo.HandlerFunc) echo.HandlerFunc {
@@ -54,10 +51,8 @@ func (h *fileHandler) filesAPI(g *echo.Group) {
 
 	// --- downloads
 	g.POST("/download-requests", h.createDownloadRequest)
-	g.POST("/download-tokens", h.createDownloadToken)
 	g.GET("/download-requests", h.listOwnDownloadRequests)
 	g.GET("/download-requests/:id", h.getOwnDownloadRequest)
-	g.POST("/download-requests/:id/tokens", h.createDownloadTokenFromRequest)
 
 	// --- trash
 	h.fileTrashRoutes(g.Group("/trash"))
@@ -67,7 +62,8 @@ func (h *fileHandler) filesAPI(g *echo.Group) {
 func (h *fileHandler) fileTransferAPI(g *echo.Group) {
 	g.Use(h.requireFileEnabled)
 
-	g.GET("/downloads/:token", h.download)
+	g.POST("/downloads", h.downloadDirect)
+	g.POST("/download-requests/:id/content", h.downloadApprovedRequest)
 	g.PUT("/locations/:name/contents/*", h.upload)
 }
 
@@ -79,16 +75,10 @@ func handleFileError(c *echo.Context, err error) error {
 	if errors.Is(err, file.ErrFileDisabled) {
 		return httputil.RespondError(c, err)
 	}
-	if errors.Is(err, fs.ErrNotExist) {
-		return c.JSON(http.StatusNotFound, httputil.Response{Message: err.Error()})
-	}
-	if errors.Is(err, fs.ErrPermission) {
-		return c.JSON(http.StatusForbidden, httputil.Response{Message: err.Error()})
-	}
-	if errors.Is(err, fs.ErrInvalid) || errors.Is(err, file.ErrInvalidFilePath) || errors.Is(err, file.ErrInvalidDownloadStatus) {
+	if errors.Is(err, file.ErrInvalidFilePath) || errors.Is(err, file.ErrInvalidDownloadStatus) {
 		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
 	}
-	if errors.Is(err, file.ErrUploadTooLarge) || errors.Is(err, file.ErrDownloadTooLarge) {
+	if errors.Is(err, file.ErrUploadTooLarge) || errors.Is(err, file.ErrDownloadTooLarge) || errors.Is(err, file.ErrTrashTooLarge) || errors.Is(err, file.ErrTrashTooManyFiles) || errors.Is(err, file.ErrDcExecResultTooLarge) {
 		return c.JSON(http.StatusRequestEntityTooLarge, httputil.Response{Message: err.Error()})
 	}
 	if errors.Is(err, file.ErrDownloadFileChanged) ||
@@ -100,8 +90,7 @@ func handleFileError(c *echo.Context, err error) error {
 	if errors.Is(err, file.ErrDownloadRequestExpired) {
 		return c.JSON(http.StatusGone, httputil.Response{Message: err.Error()})
 	}
-	if errors.Is(err, file.ErrInvalidDownloadToken) ||
-		errors.Is(err, file.ErrNoDownloadPermission) ||
+	if errors.Is(err, file.ErrNoDownloadPermission) ||
 		errors.Is(err, file.ErrNotAllowDownload) ||
 		errors.Is(err, file.ErrDownloadRequestNotApproved) ||
 		errors.Is(err, file.ErrDownloadRequestRejected) {
@@ -183,22 +172,6 @@ func (h *fileHandler) deleteLocationContent(c *echo.Context) error {
 // Downloads
 // ---------------------------------------------------------------------------
 
-func (h *fileHandler) createDownloadToken(c *echo.Context) error {
-	var req struct {
-		Location string `json:"location"`
-		Path     string `json:"path"`
-	}
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
-	}
-
-	downloadToken, err := h.file.CreateAllowedLocationDownloadToken(c.Request().Context(), req.Location, req.Path, httputil.CurrentUsername(c))
-	if err != nil {
-		return handleFileError(c, err)
-	}
-	return c.JSON(http.StatusCreated, httputil.Response{Data: downloadTokenResponse(downloadToken)})
-}
-
 func (h *fileHandler) createDownloadRequest(c *echo.Context) error {
 	var req struct {
 		Location string `json:"location"`
@@ -213,8 +186,8 @@ func (h *fileHandler) createDownloadRequest(c *echo.Context) error {
 		return handleFileError(c, err)
 	}
 	return c.JSON(http.StatusAccepted, httputil.Response{Data: struct {
-		DownloadRequestID uint                 `json:"downloadRequestId"`
-		Status            model.DownloadStatus `json:"status"`
+		DownloadRequestID uint                        `json:"downloadRequestId"`
+		Status            model.DownloadRequestStatus `json:"status"`
 	}{
 		DownloadRequestID: downloadRequest.ID,
 		Status:            downloadRequest.Status,
@@ -222,9 +195,9 @@ func (h *fileHandler) createDownloadRequest(c *echo.Context) error {
 }
 
 func (h *fileHandler) listOwnDownloadRequests(c *echo.Context) error {
-	var status model.DownloadStatus
+	var status model.DownloadRequestStatus
 	if s := c.QueryParam("status"); s != "" {
-		parsed, err := model.ParseDownloadStatus(s)
+		parsed, err := model.ParseDownloadRequestStatus(s)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
 		}
@@ -252,35 +225,40 @@ func (h *fileHandler) getOwnDownloadRequest(c *echo.Context) error {
 	return c.JSON(http.StatusOK, httputil.Response{Data: download})
 }
 
-func (h *fileHandler) createDownloadTokenFromRequest(c *echo.Context) error {
-	id, err := httputil.ParseUintParam(c, "id")
-	if err != nil {
-		return err
-	}
-	token, err := h.file.CreateApprovedDownloadToken(c.Request().Context(), int(id), httputil.CurrentUsername(c))
-	if err != nil {
-		return handleFileError(c, err)
-	}
-	return c.JSON(http.StatusCreated, httputil.Response{Data: downloadTokenResponse(token)})
-}
-
 // ---------------------------------------------------------------------------
 // File transfer (download stream / upload stream)
 // ---------------------------------------------------------------------------
 
-func (h *fileHandler) download(c *echo.Context) error {
-	requestUser := httputil.CurrentUsername(c)
-	token := c.Param("token")
-
-	if token == "" {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "missing download token"})
+func (h *fileHandler) downloadDirect(c *echo.Context) error {
+	var req struct {
+		Location string `json:"location"`
+		Path     string `json:"path"`
 	}
-
-	downloadFilePath, downloadSize, err := h.file.GetAllowedDownloadFile(c.Request().Context(), token, requestUser)
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	}
+	requestUser := httputil.CurrentUsername(c)
+	downloadFilePath, downloadSize, err := h.file.OpenAllowedLocationDownload(c.Request().Context(), req.Location, req.Path, requestUser)
 	if err != nil {
 		return handleFileError(c, err)
 	}
+	return h.streamDownloadFile(c, requestUser, downloadFilePath, downloadSize)
+}
 
+func (h *fileHandler) downloadApprovedRequest(c *echo.Context) error {
+	id, err := httputil.ParseUintParam(c, "id")
+	if err != nil {
+		return err
+	}
+	requestUser := httputil.CurrentUsername(c)
+	downloadFilePath, downloadSize, err := h.file.OpenApprovedDownloadRequest(c.Request().Context(), int(id), requestUser)
+	if err != nil {
+		return handleFileError(c, err)
+	}
+	return h.streamDownloadFile(c, requestUser, downloadFilePath, downloadSize)
+}
+
+func (h *fileHandler) streamDownloadFile(c *echo.Context, requestUser, downloadFilePath string, downloadSize int64) error {
 	filename := filepath.Base(downloadFilePath)
 	c.Response().Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
 	c.Response().Header().Set("Content-Type", "application/octet-stream")
@@ -300,22 +278,9 @@ func (h *fileHandler) download(c *echo.Context) error {
 func (h *fileHandler) upload(c *echo.Context) error {
 	apiPath := strings.TrimPrefix(c.Param("*"), "/")
 	if err := h.file.StreamUploadLocation(c.Request().Context(), uploadBodyReader(c.Request()), httputil.CurrentUsername(c), c.Param("name"), apiPath, c.Request().ContentLength); err != nil {
-		if errors.Is(err, fs.ErrPermission) {
-			return c.JSON(http.StatusForbidden, httputil.Response{Message: err.Error()})
-		}
 		return handleFileError(c, err)
 	}
 	return c.NoContent(http.StatusCreated)
-}
-
-func downloadTokenResponse(token file.DownloadToken) any {
-	return struct {
-		Token     string `json:"token"`
-		ExpiresAt string `json:"expiresAt,omitempty"`
-	}{
-		Token:     token.Token,
-		ExpiresAt: token.ExpiresAt.Format(time.RFC3339),
-	}
 }
 
 type limitReadCloser struct {
@@ -343,6 +308,7 @@ func (h *fileHandler) fileTrashRoutes(g *echo.Group) {
 	g.GET("/contents", h.listTrash)
 	g.GET("/contents/*", h.listTrash)
 	g.POST("/items", h.moveFilesToTrash)
+	g.POST("/items/restore", h.restoreTrashItems)
 	g.POST("/items/batch-delete", h.deleteTrashItems)
 	g.DELETE("/items/:trashName", h.deleteTrashItem)
 	g.DELETE("/items", h.emptyTrash)
@@ -376,6 +342,22 @@ func (h *fileHandler) deleteTrashItem(c *echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+func (h *fileHandler) restoreTrashItems(c *echo.Context) error {
+	var req struct {
+		TrashNames []string `json:"trashNames"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	}
+	if len(req.TrashNames) == 0 {
+		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "trashNames are required"})
+	}
+	if err := h.file.RestoreTrashItems(c.Request().Context(), req.TrashNames, httputil.CurrentUsername(c)); err != nil {
+		return handleFileError(c, err)
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
 func (h *fileHandler) deleteTrashItems(c *echo.Context) error {
 	var info struct {
 		Names []string `json:"names"`
@@ -393,12 +375,6 @@ func (h *fileHandler) listTrash(c *echo.Context) error {
 	trashPath := strings.TrimPrefix(c.Param("*"), "/")
 	dirInfo, err := h.file.ListTrash(c.Request().Context(), trashPath, httputil.CurrentUsername(c))
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return c.JSON(http.StatusNotFound, httputil.Response{Message: err.Error()})
-		}
-		if errors.Is(err, fs.ErrInvalid) {
-			return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
-		}
 		return httputil.RespondError(c, err)
 	}
 	return c.JSON(http.StatusOK, httputil.Response{Data: dirInfo})

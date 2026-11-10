@@ -1,0 +1,65 @@
+# ========================================
+# ===== SYSTEM-TICKETS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录（需要 System Admin 权限） -----
+# ----- lab 固定项目名 dc-portal-http-suite：GET 捕获 id；不存在则自动 POST 创建（201/409） -----
+
+# ========================================
+# ===== 项目管理 =====
+# ========================================
+
+### 获取项目列表并绑定 lab 项目 id（dc-portal-http-suite）
+GET {{addr}}/api/admin/system/tickets/projects?includeArchived=true
+Authorization: Bearer {{accessToken}}
+
+# @expect 201,409
+### 创建 lab 工单项目（名称冲突 409 时依赖上一步 GET 已捕获 id）
+POST {{addr}}/api/admin/system/tickets/projects
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "dc-portal-http-suite",
+  "description": "Portal HTTP 集成测试专用项目"
+}
+
+> {%
+
+
+
+const payload = response.body;
+if (payload?.data?.id) {
+  client.global.set("testProjectId", String(payload.data.id));
+  client.log(`Stored testProjectId=${payload.data.id}`);
+}
+
+
+
+%}
+
+# @expect 200,404,409
+### 更新 lab 项目描述
+PATCH {{addr}}/api/admin/system/tickets/projects/{{testProjectId}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "description": "Portal HTTP 集成测试（自动更新）"
+}
+
+# @manual
+### 归档 lab 项目（归档后不能在其中建单，返回 409）
+PATCH {{addr}}/api/admin/system/tickets/projects/{{testProjectId}}
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "isArchived": true
+}
+
+# 工单创建 / 用户 CRUD / 删除见 21-tickets.http；管理员批量删等见该文件末尾。
+
+# @manual
+### 删除 lab 项目（需无未删除工单，否则 409；套件默认保留项目 dc-portal-http-suite）
+DELETE {{addr}}/api/admin/system/tickets/projects/{{testProjectId}}
+Authorization: Bearer {{accessToken}}

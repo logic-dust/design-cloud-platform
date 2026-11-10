@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"testing"
@@ -51,6 +52,32 @@ func TestPrependUniqueAddress(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLoadTLSMaterial(t *testing.T) {
+	pki := newRenewTestPKI(t)
+	if _, _, err := loadTLSMaterial(TLSClientConfig{
+		CertPath: pki.certPath,
+		KeyPath:  pki.keyPath,
+		CAPath:   pki.caPath,
+	}); err != nil {
+		t.Fatalf("load valid TLS material: %v", err)
+	}
+
+	if _, _, err := loadTLSMaterial(TLSClientConfig{
+		CertPath: pki.certPath,
+		KeyPath:  pki.keyPath,
+		CAPath:   pki.certPath + ".missing",
+	}); err == nil {
+		t.Fatal("loadTLSMaterial() error = nil for missing CA file")
+	}
+	if _, _, err := loadTLSMaterial(TLSClientConfig{
+		CertPath: pki.certPath,
+		KeyPath:  pki.keyPath,
+		CAPath:   pki.keyPath,
+	}); err == nil {
+		t.Fatal("loadTLSMaterial() error = nil for a CA file without certificate PEM")
 	}
 }
 
@@ -141,7 +168,7 @@ func TestRedirectError(t *testing.T) {
 func TestHandleRedirect(t *testing.T) {
 	t.Parallel()
 
-	agent := NewAgent(nil, Config{
+	agent := NewAgent(context.Background(), nil, Config{
 		NodeID:      "agent-1",
 		ClusterPort: 52255,
 	}, slog.Default(), nil)
@@ -162,8 +189,8 @@ func TestHandleRedirect(t *testing.T) {
 		t.Fatal("handleRedirect want error, got nil")
 	}
 
-	var redErr *redirectError
-	if !errors.As(err, &redErr) {
+	redErr, ok := errors.AsType[*redirectError](err)
+	if !ok {
 		t.Fatalf("expected redirectError, got %T: %v", err, err)
 	}
 	if redErr.leaderID != "node-leader" || redErr.leaderAddr != "10.0.0.99:52255" || redErr.reason != "leader_demoted" {

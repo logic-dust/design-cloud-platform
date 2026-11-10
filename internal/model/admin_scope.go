@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"slices"
 )
 
 // AdminScope is a single bit representing one delegatable admin capability.
@@ -41,12 +42,9 @@ func (s *AdminScopes) HasAny(scopes ...AdminScope) bool {
 	if *s == AdminScopes(ScopeAll) {
 		return true
 	}
-	for _, scope := range scopes {
-		if int64(*s)&int64(scope) != 0 {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(scopes, func(scope AdminScope) bool {
+		return int64(*s)&int64(scope) != 0
+	})
 }
 
 func (s *AdminScopes) Set(scope AdminScope) {

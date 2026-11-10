@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # ==============================================================================
-# build-packages.sh — build design-cloud-engine RPM/DEB (engine + launcher lockstep)
+# build-packages.sh — build design-cloud-engine RPM/DEB (engine + dcexec lockstep)
 #
 # Usage:
-#   ./build-packages.sh <engine-bin> <launcher-bin> [version] [pkg_type] [user] [group] [arch]
+#   ./build-packages.sh <engine-bin> <dcexec-bin> [version] [release] [pkg_type] [user] [group] [arch]
 #   pkg_type: rpm | deb | all  (default: rpm — production is RHEL/CentOS)
 #
 # Note: gen-config always uses a host-native `go build` of cmd/engine so the
@@ -13,28 +13,49 @@ set -euo pipefail
 # ==============================================================================
 
 ENGINE_PATH="${1:?engine binary path required}"
-LAUNCHER_PATH="${2:?launcher binary path required}"
+EXEC_BIN_PATH="${2:?dc-exec binary path required}"
 export VERSION="${3:-0.1.0}"
-PKG_TYPE="${4:-rpm}"
-export PKG_USER="${5:-design-cloud}"
-export PKG_GROUP="${6:-design-cloud}"
-export PKG_ARCH="${7:-amd64}"
+export PKG_RELEASE="${4:-1}"
+PKG_TYPE="${5:-rpm}"
+export PKG_USER="${6:-dce}"
+export PKG_GROUP="${7:-dce}"
+export PKG_ARCH="${8:-amd64}"
 PACKAGE_NAME="design-cloud-engine"
 
+# 智能拆解与容错兼容：
+# 1) 若 VERSION 传了 "0.2.5-2"，拆分为 VERSION=0.2.5 与 PKG_RELEASE=2
+# 2) 若调用方按旧签名调用（$4 为 rpm/deb/all），平滑识别回落
+if [[ "${PKG_RELEASE}" == "rpm" || "${PKG_RELEASE}" == "deb" || "${PKG_RELEASE}" == "all" ]]; then
+  PKG_ARCH="${PKG_GROUP:-amd64}"
+  PKG_GROUP="${PKG_USER:-dce}"
+  PKG_USER="${PKG_TYPE:-dce}"
+  PKG_TYPE="${PKG_RELEASE}"
+  if [[ "${VERSION}" == *-* ]]; then
+    PKG_RELEASE="${VERSION#*-}"
+    VERSION="${VERSION%%-*}"
+  else
+    PKG_RELEASE="1"
+  fi
+elif [[ "${VERSION}" == *-* ]]; then
+  PKG_RELEASE="${VERSION#*-}"
+  VERSION="${VERSION%%-*}"
+fi
+
 export ENGINE_ABS_PATH="$(realpath "${ENGINE_PATH}")"
-export LAUNCHER_ABS_PATH="$(realpath "${LAUNCHER_PATH}")"
+export EXEC_BIN_ABS_PATH="$(realpath "${EXEC_BIN_PATH}")"
 export SCRIPT_DIR="$(realpath "$(dirname "${BASH_SOURCE[0]}")")"
 PROJECT_ROOT="$(realpath "${SCRIPT_DIR}/../..")"
 
 TMP_NFPM_YAML=""
 TMP_CONFIG_DIR=""
+TMP_STAGING_DIR=""
 TMP_HOST_ENGINE=""
 TMP_UNIT=""
 TMP_TMPFILES=""
 
 cleanup() {
   rm -f "${TMP_NFPM_YAML}" "${TMP_HOST_ENGINE}" "${TMP_UNIT}" "${TMP_TMPFILES}"
-  rm -rf "${TMP_CONFIG_DIR}"
+  rm -rf "${TMP_CONFIG_DIR}" "${TMP_STAGING_DIR}"
 }
 trap cleanup EXIT
 
@@ -42,12 +63,12 @@ if [[ ! -f "${ENGINE_ABS_PATH}" ]]; then
   echo "ERROR: engine binary not found: ${ENGINE_PATH}" >&2
   exit 1
 fi
-if [[ ! -f "${LAUNCHER_ABS_PATH}" ]]; then
-  echo "ERROR: launcher binary not found: ${LAUNCHER_PATH}" >&2
+if [[ ! -f "${EXEC_BIN_ABS_PATH}" ]]; then
+  echo "ERROR: dc-exec binary not found: ${EXEC_BIN_PATH}" >&2
   exit 1
 fi
 
-UNIT_SRC="${PROJECT_ROOT}/deployment/design-cloud-engine.service"
+UNIT_SRC="${PROJECT_ROOT}/deployment/systemd/design-cloud-engine.service"
 if [[ ! -f "${UNIT_SRC}" ]]; then
   echo "ERROR: systemd unit missing: ${UNIT_SRC}" >&2
   exit 1
@@ -59,24 +80,13 @@ if ! command -v nfpm >/dev/null 2>&1; then
   exit 1
 fi
 
-OUTPUT_DIR="${PROJECT_ROOT}/build/packages"
+OUTPUT_DIR="${PROJECT_ROOT}/build"
 mkdir -p "${OUTPUT_DIR}"
 
-# --- Render install scripts with service identity ---
-sed -e "s/__PKG_USER__/${PKG_USER}/g" -e "s/__PKG_GROUP__/${PKG_GROUP}/g" \
-  "${SCRIPT_DIR}/pre-install.sh" >"${OUTPUT_DIR}/pre-install.sh"
-sed -e "s/__PKG_USER__/${PKG_USER}/g" -e "s/__PKG_GROUP__/${PKG_GROUP}/g" \
-  "${SCRIPT_DIR}/post-install.sh" >"${OUTPUT_DIR}/post-install.sh"
-cp "${SCRIPT_DIR}/post-trans.sh" "${OUTPUT_DIR}/post-trans.sh"
-chmod +x "${OUTPUT_DIR}/pre-install.sh" "${OUTPUT_DIR}/post-install.sh" "${OUTPUT_DIR}/post-trans.sh"
-export PRE_INSTALL_SCRIPT="$(realpath "${OUTPUT_DIR}/pre-install.sh")"
-export POST_INSTALL_SCRIPT="$(realpath "${OUTPUT_DIR}/post-install.sh")"
-export POST_TRANS_SCRIPT="$(realpath "${OUTPUT_DIR}/post-trans.sh")"
-
-# --- Render unit + tmpfiles for PKG_USER/GROUP (canonical sources stay design-cloud) ---
+# --- Render unit + tmpfiles for PKG_USER/GROUP (canonical sources stay dce) ---
 TMP_UNIT="$(mktemp /tmp/dce-unit.XXXXXX.service)"
-sed -e "s/^User=design-cloud$/User=${PKG_USER}/" \
-    -e "s/^Group=design-cloud$/Group=${PKG_GROUP}/" \
+sed -e "s/^User=dce$/User=${PKG_USER}/" \
+    -e "s/^Group=dce$/Group=${PKG_GROUP}/" \
   "${UNIT_SRC}" >"${TMP_UNIT}"
 export UNIT_ABS_PATH="$(realpath "${TMP_UNIT}")"
 
@@ -86,8 +96,32 @@ sed -e "s/__PKG_USER__/${PKG_USER}/g" -e "s/__PKG_GROUP__/${PKG_GROUP}/g" \
 export TMPFILES_ABS_PATH="$(realpath "${TMP_TMPFILES}")"
 
 export CONFIGLESS_EXAMPLE_ABS_PATH="$(realpath "${SCRIPT_DIR}/configless.conf.example")"
+export VNC_WRAPPER_ABS_PATH="$(realpath "${PROJECT_ROOT}/deployment/share/vnc/job-gui-wrapper.sh")"
+export LOGROTATE_ABS_PATH="$(realpath "${SCRIPT_DIR}/logrotate.design-cloud-engine")"
 
-# --- Generate /etc config template (host-native engine; may differ from PKG_ARCH) ---
+embed_install_script() {
+  local src="$1" dst="$2"
+  {
+    head -n 1 "${src}"
+    cat "${PROJECT_ROOT}/deployment/lib/install-common.sh"
+    tail -n +2 "${src}"
+  } >"${dst}"
+}
+
+# --- Render install scripts with service identity in temporary staging dir ---
+TMP_STAGING_DIR="$(mktemp -d /tmp/dce-pkg-staging.XXXXXX)"
+
+embed_install_script "${SCRIPT_DIR}/pre-install.sh" "${TMP_STAGING_DIR}/pre-install.sh"
+embed_install_script "${SCRIPT_DIR}/post-install.sh" "${TMP_STAGING_DIR}/post-install.sh"
+embed_install_script "${SCRIPT_DIR}/pre-remove.sh" "${TMP_STAGING_DIR}/pre-remove.sh"
+sed -i -e "s/__PKG_USER__/${PKG_USER}/g" -e "s/__PKG_GROUP__/${PKG_GROUP}/g" \
+  "${TMP_STAGING_DIR}/pre-install.sh" "${TMP_STAGING_DIR}/post-install.sh"
+cp "${SCRIPT_DIR}/post-trans.sh" "${TMP_STAGING_DIR}/post-trans.sh"
+chmod +x "${TMP_STAGING_DIR}/pre-install.sh" "${TMP_STAGING_DIR}/post-install.sh" "${TMP_STAGING_DIR}/pre-remove.sh" "${TMP_STAGING_DIR}/post-trans.sh"
+export PRE_INSTALL_SCRIPT="$(realpath "${TMP_STAGING_DIR}/pre-install.sh")"
+export POST_INSTALL_SCRIPT="$(realpath "${TMP_STAGING_DIR}/post-install.sh")"
+export PRE_REMOVE_SCRIPT="$(realpath "${TMP_STAGING_DIR}/pre-remove.sh")"
+export POST_TRANS_SCRIPT="$(realpath "${TMP_STAGING_DIR}/post-trans.sh")"
 TMP_CONFIG_DIR="$(mktemp -d /tmp/dce-pkg-config.XXXXXX)"
 TMP_HOST_ENGINE="$(mktemp /tmp/dce-gen-config.XXXXXX)"
 (
@@ -109,13 +143,13 @@ HEADER='# Design Cloud Engine configuration template (packaged).
 {
   printf '%s\n' "${HEADER}"
   cat "${TMP_CONFIG_DIR}/config.example.toml"
-} >"${OUTPUT_DIR}/config.toml"
-chmod 0600 "${OUTPUT_DIR}/config.toml"
-export CONFIG_ABS_PATH="$(realpath "${OUTPUT_DIR}/config.toml")"
+} >"${TMP_STAGING_DIR}/config.toml"
+chmod 0600 "${TMP_STAGING_DIR}/config.toml"
+export CONFIG_ABS_PATH="$(realpath "${TMP_STAGING_DIR}/config.toml")"
 
-echo "Building ${PACKAGE_NAME} v${VERSION} (${PKG_TYPE}) arch=${PKG_ARCH} as ${PKG_USER}:${PKG_GROUP} ..."
+echo "Building ${PACKAGE_NAME} v${VERSION}-${PKG_RELEASE} (${PKG_TYPE}) arch=${PKG_ARCH} as ${PKG_USER}:${PKG_GROUP} ..."
 echo "  engine:   ${ENGINE_ABS_PATH}"
-echo "  launcher: ${LAUNCHER_ABS_PATH}"
+echo "  dc-exec: ${EXEC_BIN_ABS_PATH}"
 
 build_nfpm() {
   local packager="$1"

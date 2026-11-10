@@ -23,7 +23,7 @@ func (h *appHandler) adminAppsAPI(g *echo.Group) {
 
 // --- 获取所有应用（管理员）
 func (h *appHandler) adminListApps(c *echo.Context) error {
-	p := httputil.ParsePagination(c, 50, 200)
+	p := httputil.ParsePage(c)
 	list, total, err := h.app.List(c.Request().Context(), p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)
@@ -52,18 +52,12 @@ func (h *appHandler) adminListAppUsers(c *echo.Context) error {
 		return err
 	}
 
-	p := httputil.ParsePagination(c, 50, 200)
-	users, err := h.app.ListUsers(c.Request().Context(), appID)
+	p := httputil.ParsePage(c)
+	users, total, err := h.app.ListUsersPage(c.Request().Context(), appID, p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-
-	total := len(users)
-	if p.Offset >= total {
-		return httputil.RespondPage(c, []string{}, total)
-	}
-	end := min(p.Offset+p.Limit, total)
-	return httputil.RespondPage(c, users[p.Offset:end], total)
+	return httputil.RespondPage(c, users, total)
 }
 
 // --- 创建新应用

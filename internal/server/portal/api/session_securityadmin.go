@@ -18,7 +18,7 @@ func (h *sessionHandler) adminSessionsAPI(g *echo.Group) {
 
 // --- 列出所有在线 session（管理员）
 func (h *sessionHandler) adminListSessions(c *echo.Context) error {
-	p := httputil.ParsePagination(c, 50, 200)
+	p := httputil.ParsePage(c)
 	sessions, total, err := h.session.List(c.Request().Context(), p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)

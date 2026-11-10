@@ -6,16 +6,18 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/push"
+	"design-cloud-engine/internal/platform/config"
+	"design-cloud-engine/internal/server/push"
 	"design-cloud-engine/internal/server/service/security"
 	"design-cloud-engine/internal/server/service/settings"
-	"design-cloud-engine/internal/server/service/settings/schema"
 	usersvc "design-cloud-engine/internal/server/service/user"
 
 	"golang.org/x/crypto/bcrypt"
@@ -30,13 +32,19 @@ func TestCreateAllowsMultipleSessionsAndEvictsOldestAtLimit(t *testing.T) {
 	const password = "correct-password"
 
 	createAppUserForSessionTest(t, repos.User, username, password)
-	setMaxLoginSessionsPerUserForTest(t, repos.Setting, 3)
+	setMaxSessionsPerUserForTest(t, repos.Setting, 3)
 
 	var tokens []string
 	for i := range 4 {
-		payload, err := svc.Create(ctx, username, password, "10.0.0.1", false, nil)
+		payload, err := svc.Create(ctx, username, password, LoginClient{IP: "10.0.0.1"}, false, nil)
 		if err != nil {
 			t.Fatalf("create session #%d: %v", i+1, err)
+		}
+		if !payload.MultiSessionEnabled {
+			t.Fatal("multiSessionEnabled = false, want true when maxSessionsPerUser = 3")
+		}
+		if multi, err := svc.MultiSessionEnabled(ctx); err != nil || !multi {
+			t.Fatalf("MultiSessionEnabled = %v, %v; want true", multi, err)
 		}
 		tokens = append(tokens, payload.Token)
 	}
@@ -61,6 +69,29 @@ func TestCreateAllowsMultipleSessionsAndEvictsOldestAtLimit(t *testing.T) {
 		if _, err := svc.GetByToken(ctx, tokens[i]); err != nil {
 			t.Fatalf("session #%d token should remain valid: %v", i+1, err)
 		}
+	}
+}
+
+func TestCreateIncludesPlatformDisabledUserPortalModules(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	svc, repos := newSessionServiceForMultiSessionTest(t)
+	const username = "disabled-modules"
+	const password = "correct-password"
+
+	createAppUserForSessionTest(t, repos.User, username, password)
+	setPlatformDisabledModulesForTest(t, repos.Setting, "ai", "ticket", "file", "app")
+
+	payload, err := svc.Create(ctx, username, password, LoginClient{IP: "10.0.0.1"}, false, nil)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	got := payload.UI.UserPortal.Modules
+	want := []string{"ai", "app", "file", "ticket"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("userPortal.modules = %v, want %v", got, want)
 	}
 }
 
@@ -93,7 +124,7 @@ func newSessionServiceForMultiSessionTest(t *testing.T) (*Service, *db.Repos) {
 	}
 	t.Cleanup(func() { _ = auditSvc.Close() })
 
-	settingsSvc, err := settings.NewService(repos.Setting, auditSvc, nil)
+	settingsSvc, err := settings.NewService(repos.Setting, slog.Default(), auditSvc, nil, repos.CacheVersion, repos.Node)
 	if err != nil {
 		t.Fatalf("new settings service: %v", err)
 	}
@@ -111,7 +142,7 @@ func newSessionServiceForMultiSessionTest(t *testing.T) (*Service, *db.Repos) {
 
 	userSvc, err := usersvc.NewService(nil, usersvc.Config{
 		AuthMode: config.UserAuthModeLDAP,
-	}, settingsSvc, repos.User, repos.TaskLease, repos.CacheVersion, nil, logger, auditSvc)
+	}, settingsSvc, repos.User, repos.TaskLease, repos.CacheVersion, nil, logger, auditSvc, nil)
 	if err != nil {
 		t.Fatalf("new user service: %v", err)
 	}
@@ -121,7 +152,12 @@ func newSessionServiceForMultiSessionTest(t *testing.T) (*Service, *db.Repos) {
 		t.Fatalf("new auth manager: %v", err)
 	}
 
-	sessionSvc, err := NewService(logger, authMgr, userSvc, securitySvc, settingsSvc, repos.Session, nil, push.NoopPublisher{})
+	evictor, err := NewEvictor(logger, repos.Session, nil, nil)
+	if err != nil {
+		t.Fatalf("new session evictor: %v", err)
+	}
+
+	sessionSvc, err := NewService(logger, authMgr, userSvc, securitySvc, settingsSvc, repos.Session, evictor, push.NoopPublisher{})
 	if err != nil {
 		t.Fatalf("new session service: %v", err)
 	}
@@ -147,11 +183,11 @@ func createAppUserForSessionTest(t *testing.T, store *db.UserRepo, username, pas
 	}
 }
 
-func setMaxLoginSessionsPerUserForTest(t *testing.T, store *db.SettingRepo, maxLoginSessions int) {
+func setMaxSessionsPerUserForTest(t *testing.T, store *db.SettingRepo, maxSessions int) {
 	t.Helper()
 
 	// 从 schema 默认值出发：auth 是整体契约，零值结构体（SessionTTL=0 等）无法通过
-	// 校验，读取层会整体回退默认值，测试意图（只改 MaxLoginSessionsPerUser）会失效。
+	// 校验，读取层会整体回退默认值，测试意图（只改 MaxSessionsPerUser）会失效。
 	var auth schema.AuthSettings
 	if def, ok := schema.DefaultSettings(schema.DomainAuth); ok {
 		auth, _ = def.(schema.AuthSettings)
@@ -159,9 +195,25 @@ func setMaxLoginSessionsPerUserForTest(t *testing.T, store *db.SettingRepo, maxL
 	if err := store.Load(context.Background(), schema.DomainAuth.String(), &auth); err != nil {
 		t.Fatalf("load auth settings: %v", err)
 	}
-	auth.MaxLoginSessionsPerUser = maxLoginSessions
+	auth.MaxSessionsPerUser = maxSessions
 	if err := store.Save(context.Background(), schema.DomainAuth.String(), auth); err != nil {
 		t.Fatalf("save auth settings: %v", err)
+	}
+}
+
+func setPlatformDisabledModulesForTest(t *testing.T, store *db.SettingRepo, disabled ...string) {
+	t.Helper()
+
+	defaultValue, ok := schema.DefaultSettings(schema.DomainPlatform)
+	if !ok {
+		t.Fatal("platform defaults missing")
+	}
+	platform := defaultValue.(schema.PlatformSettings)
+	for _, module := range disabled {
+		platform.DisabledModules[module] = true
+	}
+	if err := store.Save(context.Background(), schema.DomainPlatform.String(), platform); err != nil {
+		t.Fatalf("save platform settings: %v", err)
 	}
 }
 
@@ -176,11 +228,11 @@ func TestDeleteOwnedByIDs_And_DeleteByIDs(t *testing.T) {
 
 	createAppUserForSessionTest(t, repos.User, userA, password)
 	createAppUserForSessionTest(t, repos.User, userB, password)
-	setMaxLoginSessionsPerUserForTest(t, repos.Setting, 10)
+	setMaxSessionsPerUserForTest(t, repos.Setting, 5)
 
-	sA1, _ := svc.Create(ctx, userA, password, "10.0.0.1", false, nil)
-	sA2, _ := svc.Create(ctx, userA, password, "10.0.0.2", false, nil)
-	sB1, _ := svc.Create(ctx, userB, password, "10.0.0.3", false, nil)
+	sA1, _ := svc.Create(ctx, userA, password, LoginClient{IP: "10.0.0.1"}, false, nil)
+	sA2, _ := svc.Create(ctx, userA, password, LoginClient{IP: "10.0.0.2"}, false, nil)
+	sB1, _ := svc.Create(ctx, userB, password, LoginClient{IP: "10.0.0.3"}, false, nil)
 
 	sessA1, _ := svc.GetByToken(ctx, sA1.Token)
 	sessA2, _ := svc.GetByToken(ctx, sA2.Token)
@@ -203,4 +255,45 @@ func TestDeleteOwnedByIDs_And_DeleteByIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("admin batch delete failed: %v", err)
 	}
+}
+
+func TestCreateRecordsClientInfoAndMultiSessionFlag(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	svc, repos := newSessionServiceForMultiSessionTest(t)
+	const username = "client-info"
+	const password = "correct-password"
+
+	createAppUserForSessionTest(t, repos.User, username, password)
+	setMaxSessionsPerUserForTest(t, repos.Setting, 1)
+
+	longHost := "  " + strings.Repeat("h", 300) + "  "
+	payload, err := svc.Create(ctx, username, password, LoginClient{IP: "10.0.0.9", Hostname: longHost, Platform: " windows ", OSVersion: " 10.0.19045 ", AppVersion: " v2.3.1 ", DeviceID: " device-abc "}, false, nil)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if payload.MultiSessionEnabled {
+		t.Fatal("multiSessionEnabled = true, want false when maxSessionsPerUser = 1")
+	}
+	session, err := svc.GetByToken(ctx, payload.Token)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got := len([]rune(session.Hostname)); got != model.MaxSessionHostnameLength {
+		t.Fatalf("hostname length = %d, want %d", got, model.MaxSessionHostnameLength)
+	}
+	if session.Platform != "windows" {
+		t.Fatalf("platform = %q, want trimmed value", session.Platform)
+	}
+	if session.OSVersion != "10.0.19045" {
+		t.Fatalf("osVersion = %q, want trimmed value", session.OSVersion)
+	}
+	if session.AppVersion != "v2.3.1" {
+		t.Fatalf("appVersion = %q, want trimmed value", session.AppVersion)
+	}
+	if session.DeviceID != "device-abc" {
+		t.Fatalf("deviceId = %q, want trimmed value", session.DeviceID)
+	}
+
 }

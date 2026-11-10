@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 )
 
 func newSessionRepoForTest(t *testing.T) (*Store, *SessionRepo) {
@@ -39,7 +39,7 @@ func TestSessionRenewReturnsNotFoundWhenNoActiveRowUpdated(t *testing.T) {
 
 	_, repo := newSessionRepoForTest(t)
 	err := repo.Renew(context.Background(), 404, time.Now().Add(time.Hour))
-	if !errors.Is(err, common.ErrNotFound) {
+	if !errors.Is(err, contract.ErrNotFound) {
 		t.Fatalf("renew missing session error = %v, want ErrNotFound", err)
 	}
 }
@@ -59,7 +59,7 @@ func TestSessionRenewDoesNotRenewExpiredSession(t *testing.T) {
 	}
 
 	err := repo.Renew(context.Background(), session.ID, time.Now().Add(time.Hour))
-	if !errors.Is(err, common.ErrNotFound) {
+	if !errors.Is(err, contract.ErrNotFound) {
 		t.Fatalf("renew expired session error = %v, want ErrNotFound", err)
 	}
 }
@@ -74,7 +74,7 @@ func TestSessionListIncludesRoleAndScopes(t *testing.T) {
 		Token:       "scoped-token",
 		IP:          "10.0.0.2",
 		Role:        model.RoleNormal,
-		Type:        model.UserTypeSystem,
+		UserType:    model.UserTypeSystem,
 		AdminScopes: model.AdminScopes(model.ScopeAll),
 		ExpiresAt:   time.Now().Add(time.Hour),
 	}
@@ -82,7 +82,7 @@ func TestSessionListIncludesRoleAndScopes(t *testing.T) {
 		t.Fatalf("save session: %v", err)
 	}
 
-	sessions, _, err := repo.List(context.Background(), 0, 0)
+	sessions, _, err := repo.List(context.Background(), 50, 0)
 	if err != nil {
 		t.Fatalf("list sessions: %v", err)
 	}

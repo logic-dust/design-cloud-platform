@@ -1,5 +1,4 @@
-// connection_linux.go collects remote-desktop sessions on Linux by scanning
-// /proc for VNC (Xvnc/Xtigervnc) and XRDP (xorgxrdp) processes.
+// connection_linux.go collects VNC and XRDP connection seats on Linux by scanning /proc.
 //
 // Collect does NOT perform business-logic reconciliation (that belongs in
 // service/connection). It is the agent's "self-awareness" layer, analogous
@@ -12,14 +11,17 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/user"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var procFSRoot = "/proc"
+
+const uidCacheMaxEntries = 4096
 
 var (
 	uidCacheMu sync.RWMutex
@@ -36,13 +38,46 @@ func lookupUsernameByUID(uid string) string {
 	if ok {
 		return name
 	}
-	if u, err := user.LookupId(uid); err == nil && u.Username != "" {
+
+	// Always resolve via system `id -un <uid>` (NSS / SSSD / LDAP compatible)
+	if resolved := lookupUsernameViaID(uid); resolved != "" {
 		uidCacheMu.Lock()
-		uidCache[uid] = u.Username
+		if len(uidCache) >= uidCacheMaxEntries {
+			// Bound growth under long-lived agents; NSS lookup is cheap enough to refill.
+			clear(uidCache)
+		}
+		uidCache[uid] = resolved
 		uidCacheMu.Unlock()
-		return u.Username
+		return resolved
 	}
+
 	return uid
+}
+
+func lookupUsernameViaID(uid string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	idPath := "/usr/bin/id"
+	if _, err := os.Stat(idPath); err != nil {
+		idPath = "/bin/id"
+		if _, err := os.Stat(idPath); err != nil {
+			idPath = "id"
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, idPath, "-un", uid)
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	name := strings.TrimSpace(string(out))
+	if name != "" && !strings.ContainsAny(name, " \t\r\n") {
+		return name
+	}
+	return ""
 }
 
 func readUIDFromStatus(statusPath string) string {
@@ -61,16 +96,17 @@ func readUIDFromStatus(statusPath string) string {
 	return ""
 }
 
-// CollectRemoteConnections 获取当前节点上所有活跃的远程桌面（VNC / RDP）连接信息。
-// 纯 Go 直接遍历 /proc 读取 cmdline 与 status（零子进程 Fork，耗时 1~2ms）。
-// （参考等价命令：ps -C Xvnc,Xtigervnc,xorgxrdp -o pid= -o user:24= -o args=）
-func CollectRemoteConnections(ctx context.Context) ([]ConnectionSnapshot, error) {
+// CollectConnectionRuntime traverses /proc once to collect active VNC desktops
+// and XRDP X seats.
+func CollectConnectionRuntime(ctx context.Context) (ConnectionSnapshot, error) {
 	entries, err := os.ReadDir(procFSRoot)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", procFSRoot, err)
+		return ConnectionSnapshot{}, fmt.Errorf("read %s: %w", procFSRoot, err)
 	}
 
-	connections := make([]ConnectionSnapshot, 0)
+	vncSeats := make([]VNCSeatSnapshot, 0)
+	xrdpSeats := make([]XRDPSeatSnapshot, 0)
+
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -108,50 +144,110 @@ func CollectRemoteConnections(ctx context.Context) ([]ConnectionSnapshot, error)
 		}
 
 		argsStr := strings.Join(args, " ")
-		isVNC := strings.Contains(argsStr, "Xvnc") || strings.Contains(argsStr, "Xtigervnc")
-		isXRDP := strings.Contains(argsStr, "xorgxrdp")
-		if !isVNC && !isXRDP {
-			continue
-		}
-
 		uid := readUIDFromStatus(filepath.Join(pidDir, "status"))
 		username := lookupUsernameByUID(uid)
 
-		connSnapshot := parseVNCConnectionDetails(pid, username, argsStr, isXRDP)
-		// 过滤由作业包装脚本启动的临时 GUI 仿真会话（以 dce-job 开头），
-		// 该类会话生命周期随 Job 结束自动清理，不作为常驻桌面录入 Connections 库。
-		if strings.HasPrefix(connSnapshot.ConnectionName, "dce-job") {
+		if isVNCProcess(argsStr) {
+			vncSnapshot, ok := parseVNCSeatDetails(pid, username, argsStr)
+			if !ok {
+				continue
+			}
+			if shouldSkipConnectionSeat(pid, vncSnapshot.ConnectionName) {
+				continue
+			}
+			vncSeats = append(vncSeats, vncSnapshot)
 			continue
 		}
-		connections = append(connections, connSnapshot)
+
+		if isXRDPProcess(argsStr) {
+			xrdpSnapshot, ok := parseXRDPSeatDetails(pid, username, argsStr)
+			if !ok {
+				continue
+			}
+			if shouldSkipConnectionSeat(pid, xrdpSnapshot.ConnectionName) {
+				continue
+			}
+			xrdpSeats = append(xrdpSeats, xrdpSnapshot)
+		}
 	}
-	return connections, nil
+
+	xrdpSeats = enrichXRDPSeatsSessionEnding(ctx, xrdpSeats)
+
+	return ConnectionSnapshot{
+		VNCSeats:    vncSeats,
+		XRDPSeats:   xrdpSeats,
+		RDPSessions: collectRDPDesktopSessions(ctx),
+	}, nil
 }
 
-func parseVNCConnectionDetails(pid, username, args string, isXRDP bool) ConnectionSnapshot {
-	connSnapshot := ConnectionSnapshot{
-		PID:      pid,
-		Username: username,
-		Protocol: "VNC",
-	}
-	if isXRDP {
-		connSnapshot.Protocol = "RDP"
-	}
-	connSnapshot.Display = parseDisplayNumber(args)
-	connSnapshot.Port = parseVNCPort(args, connSnapshot.Display)
+func isVNCProcess(argsStr string) bool {
+	return strings.Contains(argsStr, "Xvnc") || strings.Contains(argsStr, "Xtigervnc")
+}
 
-	// Fallback to environ for missing fields (when available).
-	env := readProcEnvironFn(connSnapshot.PID)
+// isXRDPProcess detects xrdp-managed X servers. Never matches the system
+// xrdp/xrdp-sesman daemons — only the per-user Xorg/xorgxrdp seat.
+func isXRDPProcess(argsStr string) bool {
+	lower := strings.ToLower(argsStr)
+	if strings.Contains(lower, "xorgxrdp") {
+		return true
+	}
+	// Typical: /usr/libexec/Xorg :10 -config xrdp/xorg.conf ...
+	if (strings.Contains(argsStr, "Xorg") || strings.Contains(lower, "/xorg ")) && strings.Contains(lower, "xrdp") {
+		return true
+	}
+	return false
+}
+
+func parseXRDPSeatDetails(pid, username, args string) (XRDPSeatSnapshot, bool) {
+	display, ok := parseDisplayNumber(args)
+	if !ok {
+		return XRDPSeatSnapshot{}, false
+	}
+	return XRDPSeatSnapshot{
+		PID:            pid,
+		Username:       username,
+		ConnectionName: generatedXRDPConnectionName(username, display),
+		Display:        display,
+		StartedAt:      readProcessStartTime(pid),
+	}, true
+}
+
+func readProcessStartTime(pid string) int64 {
+	fi, err := os.Stat(filepath.Join(procFSRoot, pid))
+	if err != nil {
+		return 0
+	}
+	return fi.ModTime().Unix()
+}
+
+func generatedXRDPConnectionName(username string, display int) string {
+	username = strings.TrimSpace(username)
+	if username == "" || display < 0 {
+		return ""
+	}
+	return fmt.Sprintf("xrdp-%s-%d", username, display)
+}
+
+func parseVNCSeatDetails(pid, username, args string) (VNCSeatSnapshot, bool) {
+	connSnapshot := VNCSeatSnapshot{
+		PID:       pid,
+		Username:  username,
+		StartedAt: readProcessStartTime(pid),
+	}
+	display, ok := parseDisplayNumber(args)
+	if !ok {
+		return VNCSeatSnapshot{}, false
+	}
+	connSnapshot.Display = display
+	connSnapshot.Port = parseVNCPort(args, connSnapshot.Display)
 	connSnapshot.ConnectionName = cmp.Or(
 		parseConnectionNameFromArgs(args),
-		env["DCE_CONNECTION_NAME"],
 		generatedVNCConnectionName(connSnapshot.Username, connSnapshot.Display),
 	)
-	return connSnapshot
+	return connSnapshot, true
 }
 
-// parseVNCPort 提取 VNC 会话的 TCP 端口。
-// 优先解析 "-rfbport" 覆盖参数，无此参数时才 fallback 到 (5900 + Display)。
+// parseVNCPort 优先解析命令行上的 -rfbport；未显式携带时按 5900+display 计算。
 func parseVNCPort(args string, display int) int {
 	fields := strings.Fields(args)
 	for idx, token := range fields {
@@ -168,10 +264,69 @@ func parseVNCPort(args string, display int) int {
 			}
 		}
 	}
-	if display > 0 {
+	if display >= 0 {
 		return 5900 + display
 	}
 	return 0
+}
+
+// shouldSkipConnectionSeat excludes seats that must not enter connections:
+// - dce-app* name (VNC -desktop) — app / job GUI seats
+// plus heuristic job runtime markers (Slurm/LSF env/cgroup) when the process is
+// clearly under a batch step even without the name prefix.
+func shouldSkipConnectionSeat(pid, connectionName string) bool {
+	if isSkippedConnectionName(connectionName) {
+		return true
+	}
+	env := readProcEnviron(pid)
+	if strings.TrimSpace(env["LSB_JOBID"]) != "" || strings.TrimSpace(env["SLURM_JOB_ID"]) != "" {
+		return true
+	}
+	switch readParentComm(pid) {
+	case "slurmstepd", "slurmd", "slurmctld", "sbatchd", "mbatchd", "pim":
+		return true
+	}
+	cg := strings.ToLower(readCgroup(pid))
+	return strings.Contains(cg, "slurm") || strings.Contains(cg, "lsf")
+}
+
+// isSkippedConnectionName is the explicit naming contract: desktop / connection
+// name starting with dce-app is never adopted into portal connections.
+func isSkippedConnectionName(name string) bool {
+	return strings.HasPrefix(name, "dce-app")
+}
+
+func readParentComm(pid string) string {
+	data, err := os.ReadFile(filepath.Join(procFSRoot, pid, "status"))
+	if err != nil {
+		return ""
+	}
+	ppid := ""
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if strings.HasPrefix(line, "PPid:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				ppid = fields[1]
+			}
+			break
+		}
+	}
+	if ppid == "" || ppid == "0" {
+		return ""
+	}
+	comm, err := os.ReadFile(filepath.Join(procFSRoot, ppid, "comm"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(comm))
+}
+
+func readCgroup(pid string) string {
+	data, err := os.ReadFile(filepath.Join(procFSRoot, pid, "cgroup"))
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func parseTCPPort(raw string) int {
@@ -182,26 +337,27 @@ func parseTCPPort(raw string) int {
 	return port
 }
 
-// parseDisplayNumber extracts the X display number from a Xvnc/Xtigervnc
-// command-line string. It only inspects the token immediately following the
-// binary name (e.g. ":1" in "Xvnc :1 ...") to avoid false positives from
-// host:display strings that may appear in -desktop or other arguments.
-func parseDisplayNumber(args string) int {
+// parseDisplayNumber extracts the X display number from a Xvnc/Xtigervnc/Xorg/xorgxrdp command line.
+func parseDisplayNumber(args string) (int, bool) {
 	fields := strings.Fields(args)
 	for i, f := range fields {
-		if !strings.HasSuffix(f, "Xvnc") && !strings.HasSuffix(f, "Xtigervnc") && !strings.HasSuffix(f, "Xorg") {
+		if !strings.HasSuffix(f, "Xvnc") && !strings.HasSuffix(f, "Xtigervnc") && !strings.HasSuffix(f, "Xorg") && !strings.HasSuffix(f, "xorgxrdp") {
 			continue
 		}
 		if i+1 >= len(fields) {
-			return 0
+			return 0, false
 		}
 		raw := strings.TrimPrefix(fields[i+1], ":")
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 0 {
-			return parsed
+		if raw == "" {
+			return 0, false
 		}
-		return 0
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			return 0, false
+		}
+		return parsed, true
 	}
-	return 0
+	return 0, false
 }
 
 func parseConnectionNameFromArgs(args string) string {
@@ -245,24 +401,16 @@ func parseDesktopName(args string) string {
 
 func generatedVNCConnectionName(username string, display int) string {
 	username = strings.TrimSpace(username)
-	if username == "" || display <= 0 {
+	if username == "" || display < 0 {
 		return ""
 	}
 	return fmt.Sprintf("vnc-%s-%d", username, display)
 }
 
-var readProcEnvironFn = readProcEnviron
-
-// readProcEnviron 读取进程的环境变量。
-// 在direct模式下，如果当前进程没有足够权限读取其他用户的/proc/{pid}/environ，
-// 将返回空map（这是正常情况，metadata收集使用分层fallback机制）。
-// 注意：要获取完整的跨用户环境变量信息，需要以更高权限（root）执行。
 func readProcEnviron(pid string) map[string]string {
-	path := filepath.Join("/proc", pid, "environ")
+	path := filepath.Join(procFSRoot, pid, "environ")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		// 权限不足（direct模式）或文件不存在时返回空map
-		// 不需要记录错误，这是预期的fallback行为
 		return map[string]string{}
 	}
 
@@ -278,11 +426,4 @@ func readProcEnviron(pid string) map[string]string {
 		env[string(key)] = string(value)
 	}
 	return env
-}
-
-// CollectRDPReadiness on Linux always reports an indeterminate probe: remote desktops
-// surface as VNC/xrdp connections (see CollectRemoteConnections), so there is no
-// RDP-specific readiness state to report.
-func CollectRDPReadiness() RDPReadiness {
-	return RDPReadiness{Reason: "RDP readiness probe is not applicable on linux"}
 }

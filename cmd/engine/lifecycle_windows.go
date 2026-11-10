@@ -10,8 +10,8 @@ import (
 	"strconv"
 
 	"design-cloud-engine/cmd/engine/command"
-	fsutil "design-cloud-engine/internal/common/fs"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/platform/config"
+	fsutil "design-cloud-engine/internal/platform/fs"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"

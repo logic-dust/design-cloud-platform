@@ -4,19 +4,15 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/common"
-	fsutil "design-cloud-engine/internal/common/fs"
-	"design-cloud-engine/internal/config"
-	"design-cloud-engine/internal/db"
+	"design-cloud-engine/cmd/engine/console"
+	"design-cloud-engine/internal/platform/config"
+	fsutil "design-cloud-engine/internal/platform/fs"
 	nodeService "design-cloud-engine/internal/server/service/node"
-	"design-cloud-engine/internal/server/service/push"
 )
 
 func runIssueCertCommand(flags *Flags, args []string) error {
@@ -37,9 +33,9 @@ func runIssueCertCommand(flags *Flags, args []string) error {
 	fs.BoolVar(&force, "force", false, "Force overwrite and rotate fingerprint if node already has an active certificate")
 
 	fs.Usage = func() {
-		common.PrintStderr("Usage: %s node issue-cert --hostname <nodeID> [options]\n\n", config.AppName)
-		common.PrintStderr("Offline issue cluster certificate materials for a node directly using the local CA.\n")
-		common.PrintStderr("Must run on a server node with access to the database and cluster CA key.\n\n")
+		console.PrintStderr("Usage: %s node issue-cert --hostname <nodeID> [options]\n\n", config.AppName)
+		console.PrintStderr("Offline issue cluster certificate materials for a node directly using the local CA.\n")
+		console.PrintStderr("Must run on a server node with access to the database and cluster CA key.\n\n")
 		fs.PrintDefaults()
 	}
 
@@ -69,30 +65,13 @@ func runIssueCertCommand(flags *Flags, args []string) error {
 		return err
 	}
 
-	store, err := db.NewStore(cfg.Database, slog.Default())
+	nodeSvc, _, cleanup, err := newNodeOfflineService(cfg)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return err
 	}
-	defer func() { _ = store.Close() }()
-
-	repos := db.NewRepos(store)
-
-	auditSvc, err := audit.NewService(audit.Config{
-		PrimaryLogPath:  cfg.AuditLogPath(),
-		SecurityLogPath: cfg.SecurityLogPath(),
-		NodeID:          cfg.Runtime.NodeID,
-		Version:         config.VERSION,
-	})
-	if err != nil {
-		return fmt.Errorf("init audit service: %w", err)
-	}
-	defer func() { _ = auditSvc.Close() }()
+	defer cleanup()
 
 	certDir := filepath.Join(cfg.Runtime.DataDir, "certs", "cluster")
-	nodeSvc := nodeService.NewService(repos.Node, slog.Default(), nodeService.Config{
-		NodeID:  cfg.Runtime.NodeID,
-		CertDir: certDir,
-	}, auditSvc, push.NoopPublisher{}, nil, nil)
 
 	ctx := context.Background()
 	req := nodeService.OfflineIssueCertRequest{
@@ -183,17 +162,17 @@ func runIssueCertCommand(flags *Flags, args []string) error {
 		role = "server (composite node)"
 	}
 
-	common.PrintlnStdout("Successfully issued offline certificate:")
-	common.PrintStdout("   Node ID     : %s\n", hostname)
-	common.PrintStdout("   Role        : %s\n", role)
-	common.PrintStdout("   Fingerprint : %s\n", result.Fingerprint)
-	common.PrintStdout("   Subject     : %s\n", result.Subject)
-	common.PrintStdout("   Expires At  : %s\n", result.ExpiresAt.UTC().Format(time.RFC3339))
-	common.PrintStdout("   Destination : %s\n", destinationDesc)
+	console.PrintlnStdout("Successfully issued offline certificate:")
+	console.PrintStdout("   Node ID     : %s\n", hostname)
+	console.PrintStdout("   Role        : %s\n", role)
+	console.PrintStdout("   Fingerprint : %s\n", result.Fingerprint)
+	console.PrintStdout("   Subject     : %s\n", result.Subject)
+	console.PrintStdout("   Expires At  : %s\n", result.ExpiresAt.UTC().Format(time.RFC3339))
+	console.PrintStdout("   Destination : %s\n", destinationDesc)
 	if result.IsNewNode {
-		common.PrintStdout("   DB Status   : Created new node record (status: provisioned)\n")
+		console.PrintStdout("   DB Status   : Created new node record (runtime status unset until first connect)\n")
 	} else {
-		common.PrintStdout("   DB Status   : Updated certificate binding on existing node\n")
+		console.PrintStdout("   DB Status   : Updated certificate binding on existing node\n")
 	}
 
 	return nil

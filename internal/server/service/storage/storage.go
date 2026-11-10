@@ -10,6 +10,13 @@ import (
 	"design-cloud-engine/internal/model"
 )
 
+const (
+	// DefaultStorageHistoryDays is the history window when the API omits days.
+	DefaultStorageHistoryDays = 7
+	// MaxStorageHistoryDays caps admin storage history queries (aligned with retention).
+	MaxStorageHistoryDays = 90
+)
+
 // Service provides shared storage monitoring data.
 type Service struct {
 	storageRepo    *db.StorageRepo

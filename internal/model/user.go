@@ -2,10 +2,12 @@
 package model
 
 import (
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"fmt"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 type UserStatusCode int
@@ -130,11 +132,10 @@ type User struct {
 	Password       string         `json:"-" gorm:"type:varchar(128)"`
 	Status         UserStatusCode `json:"status" gorm:"default:1;index"`
 	Type           UserType       `json:"type" gorm:"default:1;index"`
-	LastOnlineIP   string         `json:"lastOnlineIP" gorm:"type:varchar(45)"`
-	LastOnlineTime time.Time      `json:"lastOnlineTime"`
+	LastLoginIP    string         `json:"lastLoginIP" gorm:"type:varchar(45)"`
+	LastLoginAt    time.Time      `json:"lastLoginAt"`
 	DownloadAccess bool           `json:"downloadAccess" gorm:"default:true"`
 	UploadAccess   bool           `json:"uploadAccess" gorm:"default:true"`
-	TerminalAccess bool           `json:"terminalAccess" gorm:"default:true"`
 	Role           Role           `json:"role" gorm:"default:0;index"`
 	AdminScopes    AdminScopes    `json:"-" gorm:"default:0"`
 	Preference     UserPreference `json:"preference" gorm:"type:text;serializer:json"`
@@ -142,4 +143,24 @@ type User struct {
 	Apps           []App          `json:"-" gorm:"many2many:user_apps;"`
 	CreatedAt      time.Time      `json:"createdAt"`
 	UpdatedAt      time.Time      `json:"updatedAt"`
+}
+
+// BeforeDelete removes connection rows for this portal username.
+// Authorization mappings cascade through the user foreign key.
+func (u *User) BeforeDelete(tx *gorm.DB) error {
+	if tx == nil {
+		return nil
+	}
+	username := u.Username
+	if username == "" && u.ID != 0 {
+		var row User
+		if err := tx.Select("username").First(&row, u.ID).Error; err != nil {
+			return err
+		}
+		username = row.Username
+	}
+	if username == "" {
+		return nil
+	}
+	return tx.Where("username = ?", username).Delete(&Connection{}).Error
 }

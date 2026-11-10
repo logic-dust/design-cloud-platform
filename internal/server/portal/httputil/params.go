@@ -2,7 +2,7 @@ package httputil
 
 import (
 	"cmp"
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +10,17 @@ import (
 	"strings"
 
 	"github.com/labstack/echo/v5"
+)
+
+// DefaultPageLimit / MaxPageLimit 是 HTTP 分页参数的默认值与上限。
+//
+// 数值必须与 db.DefaultListLimit / db.MaxListLimit 保持一致：前者决定「未传 limit
+// 时请求多少」，后者决定「仓储最多返回多少」，两者不一致会出现请求值永远取不到的情形。
+// 此处刻意不 import db —— 传输层不应为两个常量耦合持久层；一致性由 params_test.go
+// 断言，漂移会在测试里立即失败。
+const (
+	DefaultPageLimit = 500
+	MaxPageLimit     = 2000
 )
 
 // Pagination holds limit and offset parameters for paginated requests.

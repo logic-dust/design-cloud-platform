@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/cmd/engine/console"
+	"design-cloud-engine/internal/platform/config"
 )
 
 func runGenConfigCommand(_ *Flags, _ []string) error {
@@ -19,6 +19,6 @@ func runGenConfigCommand(_ *Flags, _ []string) error {
 		return fmt.Errorf("failed to write %s: %w", filename, err)
 	}
 
-	common.PrintStdout("Generated example config at: %s\n", filename)
+	console.PrintStdout("Generated example config at: %s\n", filename)
 	return nil
 }

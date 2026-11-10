@@ -3,14 +3,14 @@ package db
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"log/slog"
 	"path/filepath"
 	"testing"
 
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/settings/schema"
+	"design-cloud-engine/internal/platform/config"
 )
 
 func TestMigrateSeedsDefaultSettings(t *testing.T) {

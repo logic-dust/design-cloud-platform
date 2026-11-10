@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"design-cloud-engine/internal/contract"
 	pb "design-cloud-engine/internal/contract/proto"
 	"design-cloud-engine/internal/execution"
 
@@ -33,10 +34,29 @@ func (s *fakeSyncClient) Recv() (*pb.ServerCommand, error) {
 	return nil, io.EOF
 }
 
+func TestAgentConnectLoopStopsWithParentContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	agent := NewAgent(ctx, nil, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
+	agent.Start()
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		agent.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("agent connect loop did not stop after parent context cancellation")
+	}
+	agent.Stop()
+}
+
 func TestSendCommandResultQueuesUntilAck(t *testing.T) {
 	t.Parallel()
 
-	agent := NewAgent(nil, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
+	agent := NewAgent(context.Background(), nil, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
 	stream := &fakeSyncClient{}
 
 	agent.sendCommandResult(stream, &pb.CommandResult{TraceId: "trace-1", Success: true})
@@ -58,7 +78,7 @@ func TestSendCommandResultQueuesUntilAck(t *testing.T) {
 func TestSendCommandResultKeepsResultWhenSendFails(t *testing.T) {
 	t.Parallel()
 
-	agent := NewAgent(nil, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
+	agent := NewAgent(context.Background(), nil, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
 	stream := &fakeSyncClient{sendErr: fmt.Errorf("stream closed")}
 
 	agent.sendCommandResult(stream, &pb.CommandResult{TraceId: "trace-1", Success: true})
@@ -74,7 +94,7 @@ func TestSendCommandResultKeepsResultWhenSendFails(t *testing.T) {
 func TestReplayPendingResultsResendsQueuedResults(t *testing.T) {
 	t.Parallel()
 
-	agent := NewAgent(nil, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
+	agent := NewAgent(context.Background(), nil, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
 	agent.storePendingResult(&pb.CommandResult{TraceId: "trace-1", Success: true})
 	agent.storePendingResult(&pb.CommandResult{TraceId: "trace-2", Success: false})
 	stream := &fakeSyncClient{}
@@ -102,7 +122,7 @@ func TestReplayPendingResultsResendsQueuedResults(t *testing.T) {
 func TestReplayPendingResultsPrunesExpiredResults(t *testing.T) {
 	t.Parallel()
 
-	agent := NewAgent(nil, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
+	agent := NewAgent(context.Background(), nil, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
 	now := time.Now()
 	agent.pendingResults = map[string]pendingCommandResult{
 		"expired": {
@@ -135,7 +155,7 @@ func TestReplayPendingResultsPrunesExpiredResults(t *testing.T) {
 func TestStorePendingResultDropsOldestWhenCapReached(t *testing.T) {
 	t.Parallel()
 
-	agent := NewAgent(nil, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
+	agent := NewAgent(context.Background(), nil, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
 	base := time.Now().Add(-time.Minute)
 	agent.pendingResults = make(map[string]pendingCommandResult, maxPendingCommandResults)
 	for i := range maxPendingCommandResults {
@@ -185,7 +205,7 @@ func TestHandleCommandRequest_ResultMapping(t *testing.T) {
 		},
 	}
 	execSvc := newTestExecutorService(mock)
-	agent := NewAgent(execSvc, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
+	agent := NewAgent(context.Background(), execSvc, Config{NodeID: "node-a"}, slog.Default(), NewSettingsManager())
 	stream := &fakeSyncClient{}
 
 	cmd := &pb.CommandRequest{
@@ -214,5 +234,32 @@ func TestHandleCommandRequest_ResultMapping(t *testing.T) {
 	}
 	if res.SystemError != "seccomp violation" {
 		t.Errorf("expected SystemError %q, got %q", "seccomp violation", res.SystemError)
+	}
+}
+
+func TestNewSettingsManagerBootstrapDefaultsMatchContract(t *testing.T) {
+	t.Parallel()
+
+	got := NewSettingsManager().Get()
+	if got.GetExecBinPath() != contract.DefaultExecBinPath {
+		t.Errorf("execBinPath: got %q", got.GetExecBinPath())
+	}
+	if got.GetVnc().GetBinDir() != contract.DefaultVNCBinDir {
+		t.Errorf("vnc.binDir: got %q", got.GetVnc().GetBinDir())
+	}
+	if got.GetVnc().GetScanInterval() != contract.DefaultVNCScanInterval {
+		t.Errorf("vnc.scanInterval: got %d", got.GetVnc().GetScanInterval())
+	}
+	if !got.GetVnc().GetScanEnabled() {
+		t.Error("expected vnc.scanEnabled true")
+	}
+	if !got.GetMonitor().GetMetricsEnabled() {
+		t.Error("expected metricsEnabled true")
+	}
+	if got.GetMonitor().GetMetricsInterval() != contract.DefaultMetricsInterval {
+		t.Errorf("metricsInterval: got %d", got.GetMonitor().GetMetricsInterval())
+	}
+	if got.GetProbeInterval() != contract.DefaultStorageProbeInterval {
+		t.Errorf("probeInterval: got %d", got.GetProbeInterval())
 	}
 }

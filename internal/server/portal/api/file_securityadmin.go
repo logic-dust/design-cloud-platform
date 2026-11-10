@@ -17,9 +17,9 @@ func (h *fileHandler) adminFilesAPI(g *echo.Group) {
 }
 
 func (h *fileHandler) adminListDownloadRequests(c *echo.Context) error {
-	var status model.DownloadStatus
+	var status model.DownloadRequestStatus
 	if s := c.QueryParam("status"); s != "" {
-		parsed, err := model.ParseDownloadStatus(s)
+		parsed, err := model.ParseDownloadRequestStatus(s)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
 		}
@@ -57,7 +57,7 @@ func (h *fileHandler) adminReviewDownloadRequest(c *echo.Context) error {
 		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
 	}
 	var (
-		download  model.Download
+		download  model.DownloadRequest
 		reviewErr error
 	)
 	switch body.Decision {

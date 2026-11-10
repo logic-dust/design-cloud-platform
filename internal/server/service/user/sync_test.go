@@ -2,14 +2,15 @@ package user
 
 import (
 	"context"
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"log/slog"
 	"testing"
 	"time"
 
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract/schema"
+	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/settings/schema"
+	"design-cloud-engine/internal/platform/config"
 	userprovider "design-cloud-engine/internal/server/service/user/provider"
 
 	"github.com/stretchr/testify/assert"
@@ -24,7 +25,7 @@ func TestSyncUsers_FreezeAndRestore(t *testing.T) {
 	core.provider = mockProv
 	core.leaseRepo = repos.TaskLease
 	core.cfg = Config{AuthMode: config.UserAuthModeLDAP}
-	core.settingsSvc = settingsSvc
+	core.authSettings = settingsSvc
 
 	ctx := context.Background()
 
@@ -83,7 +84,7 @@ func TestSyncUsers_AbortOnEmptySystemUsers(t *testing.T) {
 	core.provider = mockProv
 	core.leaseRepo = repos.TaskLease
 	core.cfg = Config{AuthMode: config.UserAuthModeLDAP}
-	core.settingsSvc = settingsSvc
+	core.authSettings = settingsSvc
 
 	ctx := context.Background()
 
@@ -106,6 +107,51 @@ func TestSyncUsers_AbortOnEmptySystemUsers(t *testing.T) {
 	assert.Equal(t, model.UserActive, dbUser1.Status)
 }
 
+func TestSyncUsers_BumpsIdentity(t *testing.T) {
+	t.Parallel()
+	core, _, _, _ := setupTestCore(t)
+	ctx := context.Background()
+
+	core.provider = &mockProvider{
+		listUsersFunc: func(context.Context) ([]userprovider.SystemUser, error) {
+			return []userprovider.SystemUser{{Username: "u", Uid: "1000", Gid: "2000"}}, nil
+		},
+	}
+	core.idMappingCache.userCache.SetWithTTL(1000, IDMapping{Name: "old", Found: true}, time.Hour)
+
+	before, err := core.cacheVersion.GetAll(ctx)
+	require.NoError(t, err)
+
+	core.SyncUsers(ctx, slog.Default())
+
+	after, err := core.cacheVersion.GetAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before[db.CacheVersionTopicIdentity]+1, after[db.CacheVersionTopicIdentity])
+	_, ok := core.idMappingCache.userCache.GetIfPresent(1000)
+	require.False(t, ok, "completed sync invalidates listed uid locally")
+}
+
+func TestSyncUsers_AbortDoesNotBumpIdentity(t *testing.T) {
+	t.Parallel()
+	core, _, _, _ := setupTestCore(t)
+	ctx := context.Background()
+
+	core.provider = &mockProvider{
+		listUsersFunc: func(context.Context) ([]userprovider.SystemUser, error) {
+			return nil, nil
+		},
+	}
+
+	before, err := core.cacheVersion.GetAll(ctx)
+	require.NoError(t, err)
+
+	core.SyncUsers(ctx, slog.Default())
+
+	after, err := core.cacheVersion.GetAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before[db.CacheVersionTopicIdentity], after[db.CacheVersionTopicIdentity])
+}
+
 func TestSyncInterval(t *testing.T) {
 	t.Parallel()
 	core, _, settingsSvc, _ := setupTestCore(t)
@@ -115,10 +161,10 @@ func TestSyncInterval(t *testing.T) {
 	// 1. Set interval to 300 seconds
 	authSettings := schema.AuthSettings{
 		SessionTTL:                86400,
-		MaxLoginSessionsPerUser:   3,
+		MaxSessionsPerUser:        3,
 		SessionCleanupInterval:    600,
-		MaxUserLoginAttempts:      5,
-		MaxIPLoginAttempts:        20,
+		MaxUserLoginAttempts:      7,
+		MaxIPLoginAttempts:        15,
 		UserBanDuration:           300,
 		IPBanDuration:             86400,
 		UserSyncInterval:          300,

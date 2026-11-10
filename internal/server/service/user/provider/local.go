@@ -124,7 +124,7 @@ func (p *localProvider) ListUsers(ctx context.Context) ([]SystemUser, error) {
 		}
 		usersMap[u.Username] = u
 	}
-	if dbUsers, _, err := p.db.List(ctx, 0, 0); err == nil {
+	if dbUsers, err := p.db.ListAll(ctx); err == nil {
 		for _, u := range dbUsers {
 			if info, ok := usersMap[u.Username]; ok {
 				info.ID = u.ID

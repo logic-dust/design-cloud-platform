@@ -2,35 +2,24 @@ package file
 
 import (
 	"context"
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
+	"errors"
 	"fmt"
-	"io/fs"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
-	"design-cloud-engine/internal/execution/payload"
-
-	"design-cloud-engine/internal/common/crypto"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/execution"
+	"design-cloud-engine/internal/execution/payload"
 	"design-cloud-engine/internal/model"
 )
 
 const (
-	maxDownloadSizeBytes         int64 = 100 * 1024 * 1024 * 1024
-	maxDownloadTokens                  = 4096
-	downloadTokenCleanupInterval       = 30 * time.Second
-	downloadTicketTTL                  = 30 * time.Second
+	maxDownloadSizeBytes int64 = 100 * 1024 * 1024 * 1024
+	downloadListLimit          = 500
 )
-
-type downloadTokenEntry struct {
-	Requester       string
-	Path            string
-	FileFingerprint string
-	CreatedAt       time.Time
-	ExpiresAt       time.Time
-	ApprovalExpires time.Time
-}
 
 // CheckDownloadPermission returns the effective download permission for the given user,
 // enforcing both the global policy and the per-user DownloadAccess override.
@@ -59,278 +48,186 @@ func (s *Service) CheckDownloadPermission(ctx context.Context, requestUser strin
 // ResolveDownloadPath validates download inputs and resolves the location-scoped path.
 func (s *Service) ResolveDownloadPath(ctx context.Context, locationName, relPath, requestUser string) (string, error) {
 	if locationName == "" {
-		return "", fmt.Errorf("%w: location is required", fs.ErrInvalid)
+		return "", contract.NewInvalidParamError("location is required")
 	}
 	cleanRel, err := normalizeLocationPath(relPath)
 	if err != nil {
 		return "", err
 	}
 	if cleanRel == "" {
-		return "", fmt.Errorf("%w: path is required", fs.ErrInvalid)
+		return "", contract.NewInvalidParamError("path is required")
 	}
 	return s.ResolveLocationPath(ctx, locationName, cleanRel, requestUser)
 }
 
-// CreateAllowedDownloadToken creates a short-lived one-time in-memory download token.
-func (s *Service) CreateAllowedDownloadToken(ctx context.Context, filePath, requestUser string) (DownloadToken, error) {
+// OpenAllowedLocationDownload validates permission and returns the resolved file path and size.
+func (s *Service) OpenAllowedLocationDownload(ctx context.Context, locationName, relPath, requestUser string) (string, int64, error) {
+	filePath, err := s.ResolveDownloadPath(ctx, locationName, relPath, requestUser)
+	if err != nil {
+		return "", 0, err
+	}
+	return s.openAllowedDownloadFile(ctx, filePath, requestUser)
+}
+
+func (s *Service) openAllowedDownloadFile(ctx context.Context, filePath, requestUser string) (string, int64, error) {
 	permission := s.CheckDownloadPermission(ctx, requestUser)
 	if permission == DownloadPermissionDeny {
-		return DownloadToken{}, ErrNoDownloadPermission
+		return "", 0, ErrNoDownloadPermission
 	}
 	if permission == DownloadPermissionRequest {
-		return DownloadToken{}, ErrDownloadApprovalRequired
+		return "", 0, ErrDownloadApprovalRequired
 	}
 
 	snapshot, err := s.downloadFileSnapshot(ctx, filePath, requestUser)
 	if err != nil {
-		return DownloadToken{}, err
+		return "", 0, err
 	}
 	if err := s.ensureDownloadSnapshotWithinAllowedRoots(ctx, &snapshot, requestUser); err != nil {
-		return DownloadToken{}, err
+		return "", 0, err
 	}
-	return s.createDownloadToken(ctx, downloadTokenEntry{
-		Path:            filePath,
-		FileFingerprint: fileSnapshotFingerprint(&snapshot),
-		Requester:       requestUser,
-	})
+	return filePath, snapshot.Size, nil
 }
 
-func (s *Service) CreateAllowedLocationDownloadToken(ctx context.Context, locationName, relPath, requestUser string) (DownloadToken, error) {
-	filePath, err := s.ResolveDownloadPath(ctx, locationName, relPath, requestUser)
-	if err != nil {
-		return DownloadToken{}, err
-	}
-	return s.CreateAllowedDownloadToken(ctx, filePath, requestUser)
-}
-
-func (s *Service) createDownloadToken(ctx context.Context, entry downloadTokenEntry) (DownloadToken, error) {
-	now := time.Now()
-	expiresAt := now.Add(downloadTicketTTL)
-	tokenStr := "dl_" + crypto.GenSecret(32)
-	entry.CreatedAt = now
-	entry.ExpiresAt = expiresAt
-	s.downloadTokensMu.Lock()
-	if now.Sub(s.lastTokenCleanup) > downloadTokenCleanupInterval || len(s.downloadTokens) >= maxDownloadTokens {
-		s.cleanupExpiredDownloadTokensLocked(now)
-		s.lastTokenCleanup = now
-	}
-	for len(s.downloadTokens) >= maxDownloadTokens {
-		if !s.dropOldestDownloadTokenLocked() {
-			break
-		}
-	}
-	s.downloadTokens[tokenStr] = entry
-	s.downloadTokensMu.Unlock()
-	return DownloadToken{Token: tokenStr, ExpiresAt: expiresAt}, nil
-}
-
-func (s *Service) consumeDownloadToken(token, requester string) (downloadTokenEntry, bool) {
-	now := time.Now()
-	s.downloadTokensMu.Lock()
-	defer s.downloadTokensMu.Unlock()
-	entry, ok := s.downloadTokens[token]
-	if !ok {
-		return downloadTokenEntry{}, false
-	}
-	if now.After(entry.ExpiresAt) {
-		delete(s.downloadTokens, token)
-		return downloadTokenEntry{}, false
-	}
-	if entry.Requester != requester {
-		return downloadTokenEntry{}, false
-	}
-	delete(s.downloadTokens, token)
-	return entry, true
-}
-
-func (s *Service) cleanupExpiredDownloadTokensLocked(now time.Time) {
-	for token, entry := range s.downloadTokens {
-		if now.After(entry.ExpiresAt) {
-			delete(s.downloadTokens, token)
-		}
-	}
-}
-
-func (s *Service) dropOldestDownloadTokenLocked() bool {
-	var oldestToken string
-	var oldestTime time.Time
-	found := false
-	for token, entry := range s.downloadTokens {
-		if !found || entry.CreatedAt.Before(oldestTime) {
-			oldestToken = token
-			oldestTime = entry.CreatedAt
-			found = true
-		}
-	}
-	if oldestToken == "" {
-		return false
-	}
-	delete(s.downloadTokens, oldestToken)
-	return true
-}
-
-// GetAllowedDownloadFile consumes a short-lived in-memory download token and returns the file path and size.
-func (s *Service) GetAllowedDownloadFile(ctx context.Context, token, downloadUser string) (string, int64, error) {
-	entry, ok := s.consumeDownloadToken(token, downloadUser)
-	if !ok {
-		return "", 0, ErrInvalidDownloadToken
-	}
-	if s.CheckDownloadPermission(ctx, downloadUser) == DownloadPermissionDeny {
+// OpenApprovedDownloadRequest validates an approved download request and returns file path and size.
+func (s *Service) OpenApprovedDownloadRequest(ctx context.Context, id int, requestUser string) (string, int64, error) {
+	if s.CheckDownloadPermission(ctx, requestUser) == DownloadPermissionDeny {
 		return "", 0, ErrNoDownloadPermission
 	}
-	if !entry.ApprovalExpires.IsZero() && time.Now().After(entry.ApprovalExpires) {
-		return "", 0, ErrDownloadRequestExpired
-	}
-	snapshot, err := s.downloadFileSnapshot(ctx, entry.Path, downloadUser)
+
+	downloadInfo, err := s.GetDownloadRequest(ctx, id, requestUser)
 	if err != nil {
 		return "", 0, err
 	}
-	if err := s.ensureDownloadSnapshotWithinAllowedRoots(ctx, &snapshot, downloadUser); err != nil {
+	if downloadInfo.Status == model.DownloadRequestStatusRejected {
+		return "", 0, ErrDownloadRequestRejected
+	}
+	if downloadInfo.Status != model.DownloadRequestStatusApproved {
+		return "", 0, ErrDownloadRequestNotApproved
+	}
+	if downloadInfo.ExpiresAt != nil && time.Now().After(*downloadInfo.ExpiresAt) {
+		return "", 0, ErrDownloadRequestExpired
+	}
+	snapshot, err := s.downloadFileSnapshot(ctx, downloadInfo.Path, requestUser)
+	if err != nil {
 		return "", 0, err
 	}
-	// Reject tickets whose target was replaced or modified after ticket creation.
-	if entry.FileFingerprint == "" || entry.FileFingerprint != fileSnapshotFingerprint(&snapshot) {
+	if err := s.ensureDownloadSnapshotWithinAllowedRoots(ctx, &snapshot, requestUser); err != nil {
+		return "", 0, err
+	}
+	if downloadInfo.FileFingerprint == "" || downloadInfo.FileFingerprint != fileSnapshotFingerprint(&snapshot) {
 		return "", 0, ErrDownloadFileChanged
 	}
-	return entry.Path, snapshot.Size, nil
+	return downloadInfo.Path, snapshot.Size, nil
 }
 
 // SubmitDownloadRequest creates a pending download request and pins the current file fingerprint.
-func (s *Service) SubmitDownloadRequest(ctx context.Context, filePath, requestUser string) (model.Download, error) {
+func (s *Service) SubmitDownloadRequest(ctx context.Context, filePath, requestUser string) (model.DownloadRequest, error) {
 	permission := s.CheckDownloadPermission(ctx, requestUser)
 	if permission == DownloadPermissionDeny {
-		return model.Download{}, ErrNoDownloadPermission
+		return model.DownloadRequest{}, ErrNoDownloadPermission
 	}
 	if permission == DownloadPermissionAllow {
-		return model.Download{}, ErrDownloadApprovalNotNeeded
+		return model.DownloadRequest{}, ErrDownloadApprovalNotNeeded
 	}
 
 	snapshot, err := s.downloadFileSnapshot(ctx, filePath, requestUser)
 	if err != nil {
-		return model.Download{}, err
+		return model.DownloadRequest{}, err
 	}
 	if err := s.ensureDownloadSnapshotWithinAllowedRoots(ctx, &snapshot, requestUser); err != nil {
-		return model.Download{}, err
+		return model.DownloadRequest{}, err
 	}
 
 	// Approval records pin the current file identity without reading the whole file.
-	download := model.Download{
+	download := model.DownloadRequest{
 		Path:            filePath,
 		FileFingerprint: fileSnapshotFingerprint(&snapshot),
 		Size:            snapshot.Size,
 		Requester:       requestUser,
-		Status:          model.DownloadStatusPending,
+		Status:          model.DownloadRequestStatusPending,
 	}
-	if err := s.fileRepo.AddDownloadInfo(ctx, &download); err != nil {
-		return model.Download{}, err
+	if err := s.downloadRepo.Create(ctx, &download); err != nil {
+		return model.DownloadRequest{}, err
 	}
 	return download, nil
 }
 
-func (s *Service) SubmitLocationDownloadRequest(ctx context.Context, locationName, relPath, requestUser string) (model.Download, error) {
+func (s *Service) SubmitLocationDownloadRequest(ctx context.Context, locationName, relPath, requestUser string) (model.DownloadRequest, error) {
 	filePath, err := s.ResolveDownloadPath(ctx, locationName, relPath, requestUser)
 	if err != nil {
-		return model.Download{}, err
+		return model.DownloadRequest{}, err
 	}
 	return s.SubmitDownloadRequest(ctx, filePath, requestUser)
 }
 
-func (s *Service) ListDownloadRequests(ctx context.Context, status model.DownloadStatus, requester string) ([]model.Download, error) {
+func (s *Service) ListDownloadRequests(ctx context.Context, status model.DownloadRequestStatus, requester string) ([]model.DownloadRequest, error) {
 	if status != 0 && !validDownloadStatus(status) {
 		return nil, ErrInvalidDownloadStatus
 	}
-	return s.fileRepo.ListDownloadRequests(ctx, status, requester)
+	return s.downloadRepo.List(ctx, status, requester, downloadListLimit)
 }
 
-func (s *Service) GetDownloadRequest(ctx context.Context, id int, requester string) (model.Download, error) {
-	downloadInfo, err := s.fileRepo.GetDownloadByID(ctx, id)
+func (s *Service) GetDownloadRequest(ctx context.Context, id int, requester string) (model.DownloadRequest, error) {
+	downloadInfo, err := s.downloadRepo.GetByID(ctx, uint(id))
 	if err != nil {
-		return model.Download{}, ErrDownloadRequestNotFound
+		if errors.Is(err, contract.ErrNotFound) {
+			return model.DownloadRequest{}, ErrDownloadRequestNotFound
+		}
+		return model.DownloadRequest{}, fmt.Errorf("load download request: %w", err)
 	}
 	if requester != "" && downloadInfo.Requester != requester {
-		return model.Download{}, ErrNoDownloadPermission
+		return model.DownloadRequest{}, ErrNoDownloadPermission
 	}
 	return downloadInfo, nil
 }
 
-func (s *Service) ApproveDownloadRequest(ctx context.Context, id int, approver string) (model.Download, error) {
+func (s *Service) ApproveDownloadRequest(ctx context.Context, id int, approver string) (model.DownloadRequest, error) {
 	downloadInfo, err := s.GetDownloadRequest(ctx, id, "")
 	if err != nil {
-		return model.Download{}, err
+		return model.DownloadRequest{}, err
 	}
-	if downloadInfo.Status != model.DownloadStatusPending {
-		return model.Download{}, ErrDownloadRequestConflict
+	if downloadInfo.Status != model.DownloadRequestStatusPending {
+		return model.DownloadRequest{}, ErrDownloadRequestConflict
 	}
 	now := time.Now()
-	downloadInfo.Status = model.DownloadStatusApproved
+	expiresAt := now.Add(s.downloadApprovalTTL(ctx))
+	updated, err := s.downloadRepo.ApprovePending(ctx, downloadInfo.ID, approver, now, expiresAt)
+	if err != nil {
+		return model.DownloadRequest{}, err
+	}
+	if !updated {
+		return model.DownloadRequest{}, ErrDownloadRequestConflict
+	}
+	downloadInfo.Status = model.DownloadRequestStatusApproved
 	downloadInfo.Approver = approver
 	downloadInfo.ReviewedAt = &now
-	downloadInfo.ExpiresAt = new(now.Add(s.downloadApprovalTTL(ctx)))
+	downloadInfo.ExpiresAt = &expiresAt
 	downloadInfo.Reason = ""
-	if err := s.fileRepo.SaveDownloadRequest(ctx, &downloadInfo); err != nil {
-		return model.Download{}, err
-	}
 	return downloadInfo, nil
 }
 
-func (s *Service) RejectDownloadRequest(ctx context.Context, id int, approver, reason string) (model.Download, error) {
+func (s *Service) RejectDownloadRequest(ctx context.Context, id int, approver, reason string) (model.DownloadRequest, error) {
 	downloadInfo, err := s.GetDownloadRequest(ctx, id, "")
 	if err != nil {
-		return model.Download{}, err
+		return model.DownloadRequest{}, err
 	}
-	if downloadInfo.Status != model.DownloadStatusPending {
-		return model.Download{}, ErrDownloadRequestConflict
+	if downloadInfo.Status != model.DownloadRequestStatusPending {
+		return model.DownloadRequest{}, ErrDownloadRequestConflict
 	}
-	downloadInfo.Status = model.DownloadStatusRejected
+	now := time.Now()
+	updated, err := s.downloadRepo.RejectPending(ctx, downloadInfo.ID, approver, now, reason)
+	if err != nil {
+		return model.DownloadRequest{}, err
+	}
+	if !updated {
+		return model.DownloadRequest{}, ErrDownloadRequestConflict
+	}
+	downloadInfo.Status = model.DownloadRequestStatusRejected
 	downloadInfo.Approver = approver
-	downloadInfo.ReviewedAt = new(time.Now())
+	downloadInfo.ReviewedAt = &now
 	downloadInfo.ExpiresAt = nil
 	downloadInfo.Reason = reason
-	if err := s.fileRepo.SaveDownloadRequest(ctx, &downloadInfo); err != nil {
-		return model.Download{}, err
-	}
 	return downloadInfo, nil
-}
-
-func (s *Service) CreateApprovedDownloadToken(ctx context.Context, id int, requester string) (DownloadToken, error) {
-	if s.CheckDownloadPermission(ctx, requester) == DownloadPermissionDeny {
-		return DownloadToken{}, ErrNoDownloadPermission
-	}
-
-	downloadInfo, err := s.GetDownloadRequest(ctx, id, requester)
-	if err != nil {
-		return DownloadToken{}, err
-	}
-	if downloadInfo.Status == model.DownloadStatusRejected {
-		return DownloadToken{}, ErrDownloadRequestRejected
-	}
-	if downloadInfo.Status != model.DownloadStatusApproved {
-		return DownloadToken{}, ErrDownloadRequestNotApproved
-	}
-	if downloadInfo.ExpiresAt != nil && time.Now().After(*downloadInfo.ExpiresAt) {
-		return DownloadToken{}, ErrDownloadRequestExpired
-	}
-	snapshot, err := s.downloadFileSnapshot(ctx, downloadInfo.Path, requester)
-	if err != nil {
-		return DownloadToken{}, err
-	}
-	if err := s.ensureDownloadSnapshotWithinAllowedRoots(ctx, &snapshot, requester); err != nil {
-		return DownloadToken{}, err
-	}
-	// Token issuance is bound to the original request fingerprint, not the post-approval file state.
-	if downloadInfo.FileFingerprint == "" || downloadInfo.FileFingerprint != fileSnapshotFingerprint(&snapshot) {
-		return DownloadToken{}, ErrDownloadFileChanged
-	}
-	var approvalExpires time.Time
-	if downloadInfo.ExpiresAt != nil {
-		approvalExpires = *downloadInfo.ExpiresAt
-	}
-	return s.createDownloadToken(ctx, downloadTokenEntry{
-		Requester:       requester,
-		Path:            downloadInfo.Path,
-		FileFingerprint: downloadInfo.FileFingerprint,
-		ApprovalExpires: approvalExpires,
-	})
 }
 
 func (s *Service) ensureDownloadSnapshotWithinAllowedRoots(ctx context.Context, snapshot *payload.FileCheckResult, requestUser string) error {
@@ -414,12 +311,9 @@ func downloadResolvedPathWithinRoots(realPath string, roots []string) bool {
 	}
 	realPath = filepath.Clean(realPath)
 
-	for _, root := range roots {
-		if pathWithinRoot(realPath, root) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(roots, func(root string) bool {
+		return pathWithinRoot(realPath, root)
+	})
 }
 
 func pathWithinRoot(target, root string) bool {
@@ -442,7 +336,7 @@ func (s *Service) downloadPathSnapshot(ctx context.Context, filePath, requestUse
 	}
 	var snapshot payload.FileCheckResult
 	if err := json.Unmarshal([]byte(result), &snapshot); err != nil {
-		return payload.FileCheckResult{}, fmt.Errorf("invalid file check response from launcher: %w", err)
+		return payload.FileCheckResult{}, fmt.Errorf("invalid file check response from PrivilegedExec: %w", err)
 	}
 	return snapshot, nil
 }
@@ -461,9 +355,9 @@ func (s *Service) downloadFileSnapshot(ctx context.Context, filePath, requestUse
 	return snapshot, nil
 }
 
-func validDownloadStatus(status model.DownloadStatus) bool {
+func validDownloadStatus(status model.DownloadRequestStatus) bool {
 	switch status {
-	case model.DownloadStatusPending, model.DownloadStatusApproved, model.DownloadStatusRejected:
+	case model.DownloadRequestStatusPending, model.DownloadRequestStatusApproved, model.DownloadRequestStatusRejected:
 		return true
 	default:
 		return false

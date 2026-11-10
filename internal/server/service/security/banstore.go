@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/concurrency"
 	"design-cloud-engine/internal/server/cache"
 
 	"gorm.io/gorm"
@@ -17,32 +17,45 @@ import (
 
 const (
 	flushInterval                = 30 * time.Second
+	pruneInterval                = 15 * time.Minute
 	authFailureUnbannedRetention = 24 * time.Hour
 	authFailurePruneBatchSize    = 1000
-	// flushDirtyThreshold triggers an immediate flush when this many new dirty
-	// entries have accumulated, without waiting for the next timer tick.
+	// flushDirtyThreshold triggers an immediate flush after this many new dirty
+	// writes, without waiting for the next timer tick. The same key counts each time.
 	flushDirtyThreshold = 10
+	// maxBanRecords 限制内存中的失败计数记录总数（key 为 IP 或 IP:username，攻击者可构造大量新 key）。
+	// 约 300–500 B/条，上限约 50 MB。达到上限后只拒绝新增“未封禁的失败计数”记录；
+	// 已有记录照常更新，封禁记录（ApplyBan）不受限制且永不因容量被淘汰。
+	maxBanRecords = 100_000
+	// banCapacityWarnInterval 是容量告警日志的最小间隔。
+	banCapacityWarnInterval = time.Minute
 )
 
 type entry struct {
-	record  model.BanRecord
+	record  model.Ban
 	dirty   bool
 	version uint64 // incremented on every write; used to detect concurrent updates during flush
 }
 
 type BanCache struct {
-	mu          sync.RWMutex
-	records     map[string]*entry
-	dirtyCount  int // number of entries marked dirty since last flush; guarded by mu
-	db          *db.BanRepo
-	logger      *slog.Logger
-	ctx         context.Context
-	cancel      context.CancelFunc
-	stopChan    chan struct{}
-	stopOnce    sync.Once
-	wg          sync.WaitGroup // tracks the flushLoop goroutine so Stop can wait for it
-	flushNow    chan struct{}  // buffered(1): signals flushLoop to flush immediately
-	invalidator *cache.Invalidator
+	mu           sync.RWMutex
+	records      map[string]*entry
+	dirtyCount   int // number of entries marked dirty since last flush; guarded by mu
+	db           *db.BanRepo
+	logger       *slog.Logger
+	ctx          context.Context
+	cancel       context.CancelFunc
+	stopChan     chan struct{}
+	stopOnce     sync.Once
+	wg           sync.WaitGroup // tracks background goroutines so Stop can wait for them
+	flushNow     chan struct{}  // buffered(1): signals flushLoop to flush immediately
+	flushTimerMu sync.Mutex
+	flushTimer   *time.Timer // delayed flush when dirty; nil when idle or after Stop
+	invalidator  *cache.Invalidator
+	maxRecords   int       // 0 = maxBanRecords；测试可调小
+	lastCapWarn  time.Time // guarded by mu
+	// flushDelay: when > 0, override flushInterval (tests).
+	flushDelay time.Duration
 }
 
 func NewBanCache(banRepo *db.BanRepo, logger *slog.Logger, invalidator *cache.Invalidator) (*BanCache, error) {
@@ -64,10 +77,11 @@ func NewBanCache(banRepo *db.BanRepo, logger *slog.Logger, invalidator *cache.In
 		invalidator: invalidator,
 	}
 	s.loadFromDB()
-	s.wg.Add(1)
+	s.wg.Add(2)
 	go s.flushLoop()
+	go s.pruneLoop()
 	if invalidator != nil {
-		invalidator.Register("ban", func() {
+		invalidator.Register(db.CacheVersionTopicBans, func() {
 			s.logger.Info("invalidating all active ban caches from broadcast")
 			s.reloadFromDB()
 		})
@@ -78,6 +92,7 @@ func NewBanCache(banRepo *db.BanRepo, logger *slog.Logger, invalidator *cache.In
 func (s *BanCache) Stop() {
 	s.stopOnce.Do(func() {
 		s.cancel()
+		s.cancelDelayedFlush()
 		close(s.stopChan)
 	})
 	s.flush()
@@ -111,22 +126,12 @@ func (s *BanCache) loadFromDB() {
 
 func (s *BanCache) flushLoop() {
 	defer s.wg.Done()
-	ticker := time.NewTicker(flushInterval)
-	defer ticker.Stop()
 	for {
 		select {
-		case <-ticker.C:
-			func() {
-				defer common.SafeRecover(s.logger, "ban-cache-flush-tick")()
-				s.flush()
-				if deleted := s.pruneExpired(s.ctx, time.Now()); deleted > 0 {
-					s.logger.Debug("auth failure store: pruned expired records", "count", deleted)
-				}
-			}()
 		case <-s.flushNow:
 			func() {
-				defer common.SafeRecover(s.logger, "ban-cache-flush-now")()
-				s.flush()
+				defer concurrency.SafeRecover(s.logger, "ban-cache-flush-now")()
+				s.runFlushCycle()
 			}()
 		case <-s.stopChan:
 			return
@@ -134,24 +139,124 @@ func (s *BanCache) flushLoop() {
 	}
 }
 
+func (s *BanCache) pruneLoop() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(pruneInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			func() {
+				defer concurrency.SafeRecover(s.logger, "ban-cache-prune-tick")()
+				if deleted := s.pruneExpired(s.ctx, time.Now()); deleted > 0 {
+					s.logger.Debug("auth failure store: pruned expired records", "count", deleted)
+				}
+			}()
+		case <-s.stopChan:
+			return
+		}
+	}
+}
+
+func (s *BanCache) flushDelayDuration() time.Duration {
+	if s.flushDelay > 0 {
+		return s.flushDelay
+	}
+	return flushInterval
+}
+
+func (s *BanCache) hasDirty() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, e := range s.records {
+		if e.dirty {
+			return true
+		}
+	}
+	return false
+}
+
+// scheduleDelayedFlush arms the delayed flush timer unless one is already pending.
+func (s *BanCache) scheduleDelayedFlush() {
+	s.flushTimerMu.Lock()
+	defer s.flushTimerMu.Unlock()
+	s.scheduleDelayedFlushLocked()
+}
+
+// scheduleDelayedFlushLocked must be called with flushTimerMu held.
+func (s *BanCache) scheduleDelayedFlushLocked() {
+	if s.flushTimer != nil {
+		return
+	}
+	s.flushTimer = time.AfterFunc(s.flushDelayDuration(), func() {
+		s.flushTimerMu.Lock()
+		s.flushTimer = nil
+		s.flushTimerMu.Unlock()
+		select {
+		case s.flushNow <- struct{}{}:
+		default:
+		}
+	})
+}
+
+func (s *BanCache) cancelDelayedFlush() {
+	s.flushTimerMu.Lock()
+	defer s.flushTimerMu.Unlock()
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
+}
+
+// settleDelayedFlush reconciles the delayed flush timer with the dirty state after
+// a flush cycle. The dirty check and the timer mutation must share flushTimerMu:
+// otherwise AddBanRecord could mark an entry dirty and arm a timer between the
+// check and the cancellation, leaving the entry dirty with no flush scheduled.
+// Lock order: flushTimerMu -> mu (AddBanRecord drops mu before arming).
+func (s *BanCache) settleDelayedFlush() {
+	s.flushTimerMu.Lock()
+	defer s.flushTimerMu.Unlock()
+	if s.hasDirty() {
+		s.scheduleDelayedFlushLocked()
+		return
+	}
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
+}
+
+func (s *BanCache) runFlushCycle() {
+	s.flush()
+	if deleted := s.pruneExpired(s.ctx, time.Now()); deleted > 0 {
+		s.logger.Debug("auth failure store: pruned expired records on flush", "count", deleted)
+	}
+	s.settleDelayedFlush()
+}
+
 // shouldPruneBanRecord returns true if the record is safe to remove from memory and DB.
-func shouldPruneBanRecord(record model.BanRecord, now time.Time) bool {
+func shouldPruneBanRecord(record model.Ban, now time.Time) bool {
 	if record.BannedUntil != nil {
 		return now.After(*record.BannedUntil)
 	}
-	if record.UpdatedAt.IsZero() {
+	if record.LastFailedAt.IsZero() {
 		return true
 	}
-	return now.Sub(record.UpdatedAt) > authFailureUnbannedRetention
+	return now.Sub(record.LastFailedAt) > authFailureUnbannedRetention
 }
 
 // pruneExpired removes entries that are safe to discard (expired bans or old unbanned failures).
 // It deletes from DB first; on success it removes from the in-memory map.
+// Dirty entries are skipped: an expired ban that just received another failure is
+// still pending its write-back, and deleting it would silently drop that count.
 // At most authFailurePruneBatchSize entries are pruned per call to bound latency.
 func (s *BanCache) pruneExpired(ctx context.Context, now time.Time) int {
 	keys := make([]string, 0)
 	s.mu.RLock()
 	for key, e := range s.records {
+		if e.dirty {
+			continue
+		}
 		if shouldPruneBanRecord(e.record, now) {
 			keys = append(keys, key)
 			if len(keys) >= authFailurePruneBatchSize {
@@ -173,7 +278,7 @@ func (s *BanCache) pruneExpired(ctx context.Context, now time.Time) int {
 	deleted := 0
 	s.mu.Lock()
 	for _, key := range keys {
-		if e, ok := s.records[key]; ok && shouldPruneBanRecord(e.record, now) {
+		if e, ok := s.records[key]; ok && !e.dirty && shouldPruneBanRecord(e.record, now) {
 			delete(s.records, key)
 			deleted++
 		}
@@ -184,7 +289,7 @@ func (s *BanCache) pruneExpired(ctx context.Context, now time.Time) int {
 
 func (s *BanCache) flush() {
 	type snapshot struct {
-		record  model.BanRecord
+		record  model.Ban
 		version uint64
 	}
 
@@ -223,24 +328,47 @@ func (s *BanCache) flush() {
 	}
 }
 
-func (s *BanCache) AddBanRecord(record model.BanRecord) (model.BanRecord, error) {
+func (s *BanCache) AddBanRecord(record model.Ban) (model.Ban, error) {
 	s.mu.Lock()
 	e, ok := s.records[record.Key]
+	if !ok && len(s.records) >= s.recordLimit() {
+		now := time.Now()
+		warn := now.Sub(s.lastCapWarn) >= banCapacityWarnInterval
+		if warn {
+			s.lastCapWarn = now
+		}
+		s.mu.Unlock()
+		if warn {
+			s.logger.Warn("auth failure store: record capacity reached, dropping new failure record",
+				"limit", s.recordLimit(), "key", record.Key)
+		}
+		record.Count = 1
+		return record, nil
+	}
 	if !ok {
-		e = &entry{record: model.BanRecord{
-			Key:       record.Key,
-			IP:        record.IP,
-			Username:  record.Username,
-			Type:      record.Type,
-			CreatedAt: time.Now(), // 首次失败/封禁时间
+		e = &entry{record: model.Ban{
+			Key:           record.Key,
+			IP:            record.IP,
+			Username:      record.Username,
+			Subject:       record.Subject,
+			Source:        record.Source,
+			FirstFailedAt: time.Now(), // 首次失败/封禁时间
 		}}
 		s.records[record.Key] = e
+	} else if e.record.BannedUntil != nil && !e.record.BannedUntil.After(time.Now()) {
+		// 上一个封禁窗口已经结束：从本窗口重新计数。否则旧 Count 会让解封后的
+		// 第一次失败立即再次触发封禁（15m 的 prune 间隔会放大这个窗口）。
+		e.record.Count = 0
+		e.record.BannedUntil = nil
+		e.record.Reason = ""
+		e.record.FirstFailedAt = time.Now()
 	}
 	e.record.Count++
-	e.record.UpdatedAt = time.Now()
+	e.record.LastFailedAt = time.Now()
 	e.record.IP = record.IP
 	e.record.Username = record.Username
-	e.record.Type = record.Type
+	e.record.Subject = record.Subject
+	e.record.Source = record.Source
 	e.dirty = true
 	e.version++
 	s.dirtyCount++
@@ -254,24 +382,33 @@ func (s *BanCache) AddBanRecord(record model.BanRecord) (model.BanRecord, error)
 		case s.flushNow <- struct{}{}:
 		default:
 		}
+	} else {
+		s.scheduleDelayedFlush()
 	}
 	return result, nil
 }
 
-func (s *BanCache) GetBanRecord(key string) (model.BanRecord, bool) {
+func (s *BanCache) recordLimit() int {
+	if s.maxRecords > 0 {
+		return s.maxRecords
+	}
+	return maxBanRecords
+}
+
+func (s *BanCache) GetBanRecord(key string) (model.Ban, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	e, ok := s.records[key]
 	if !ok {
-		return model.BanRecord{}, false
+		return model.Ban{}, false
 	}
 	return e.record, true
 }
 
-func (s *BanCache) List() []model.BanRecord {
+func (s *BanCache) List() []model.Ban {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]model.BanRecord, 0, len(s.records))
+	out := make([]model.Ban, 0, len(s.records))
 	for _, e := range s.records {
 		out = append(out, e.record)
 	}
@@ -284,7 +421,7 @@ func (s *BanCache) DeleteByKey(ctx context.Context, key string) error {
 	s.mu.Unlock()
 	return s.db.DeleteByKey(ctx, key, func(tx *gorm.DB) error {
 		if s.invalidator != nil {
-			return s.invalidator.BumpTx(ctx, tx, "ban")
+			return s.invalidator.BumpTx(ctx, tx, db.CacheVersionTopicBans)
 		}
 		return nil
 	})
@@ -297,35 +434,42 @@ func (s *BanCache) DeleteAll(ctx context.Context) error {
 	s.mu.Unlock()
 	return s.db.DeleteAll(ctx, func(tx *gorm.DB) error {
 		if s.invalidator != nil {
-			return s.invalidator.BumpTx(ctx, tx, "ban")
+			return s.invalidator.BumpTx(ctx, tx, db.CacheVersionTopicBans)
 		}
 		return nil
 	})
 }
 
-func (s *BanCache) SetBannedUntil(ctx context.Context, key string, until *time.Time) error {
-	if err := s.db.SetBannedUntil(ctx, key, until, func(tx *gorm.DB) error {
+// ApplyBan upserts a complete ban record (expiry + reason + metadata) without
+// touching Count. Used by both auto-triggered and manual bans. DB first,
+// memory after, so memory never leads the DB.
+func (s *BanCache) ApplyBan(ctx context.Context, record model.Ban) error {
+	record.LastFailedAt = time.Now()
+	if record.FirstFailedAt.IsZero() {
+		record.FirstFailedAt = record.LastFailedAt
+	}
+	if err := s.db.UpsertFull(ctx, record, func(tx *gorm.DB) error {
 		if s.invalidator != nil {
-			return s.invalidator.BumpTx(ctx, tx, "ban")
+			return s.invalidator.BumpTx(ctx, tx, db.CacheVersionTopicBans)
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
 
-	// DB 成功后更新内存：保证内存最多滞后，绝不超前产生脏数据
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, ok := s.records[key]; ok {
-		e.record.BannedUntil = until
-		e.record.UpdatedAt = time.Now()
+	if e, ok := s.records[record.Key]; ok {
+		e.record.Subject = record.Subject
+		e.record.Source = record.Source
+		e.record.IP = record.IP
+		e.record.Username = record.Username
+		e.record.BannedUntil = record.BannedUntil
+		e.record.Reason = record.Reason
+		e.record.LastFailedAt = record.LastFailedAt
+		e.version++
 	} else {
-		s.records[key] = &entry{record: model.BanRecord{
-			Key:         key,
-			BannedUntil: until,
-			CreatedAt:   time.Now(),
-			UpdatedAt:   time.Now(),
-		}}
+		s.records[record.Key] = &entry{record: record}
 	}
 	return nil
 }

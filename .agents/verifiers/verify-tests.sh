@@ -60,7 +60,7 @@ run_tests() {
   fi
 
   # 用 Go 原生 ./... 直接跑（一次编译 + 并行执行，最快）。
-  # 需要覆盖率/集成测试时手动执行: bash test/run_all.sh --unit-only
+  # 本地节点/dcexec（test/node）与实验室场景（test/lab）不在本脚本内: make test-e2e / test/lab/*
   go test ${RACE_FLAG} -v "${target}"
 }
 

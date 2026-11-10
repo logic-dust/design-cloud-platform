@@ -1,44 +1,51 @@
 package node
 
 import (
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"time"
+	"unicode/utf8"
 
-	"design-cloud-engine/internal/common/format"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/format"
 )
 
-// TokenExpiry is the lifetime of a bootstrap token.
+// TokenExpiry is the lifetime of an enrollment token.
 const TokenExpiry = 24 * time.Hour
 
-// UpdateNodeRequest holds the mutable fields for a node update.
-// All fields are optional; zero values mean "not provided".
-// IsServer uses a pointer to distinguish zero from unset.
-type UpdateNodeRequest struct {
-	IsServer         *bool             // optional; true = server-plane role
-	Status           model.NodeStatus  // optional; use NodeStatusMaintenance to set/clear maintenance mode
-	ClientHost       *string           // optional; host/IP/FQDN used by direct clients
-	Labels           map[string]string // optional; if provided (not nil), overwrites current labels
-	AllowConnections *bool             // optional; true = allow new connections on this node
-	MaxConnections   *uint             // optional; connection capacity limit (0 = unlimited)
+// EnrollmentTokenResponse is returned once when a plaintext enrollment token is issued.
+type EnrollmentTokenResponse struct {
+	NodeID    string    `json:"nodeId"`
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-// ReqCreateNodeForm defines the writable fields accepted when creating/registering a node.
+// UpdateNodeRequest holds mutable admin fields for PUT /api/admin/system/nodes/:id.
+type UpdateNodeRequest struct {
+	IsServer         *bool
+	Maintenance      *bool // true → maintenance; false → exit maintenance (runtime status derived)
+	DialHost         *string
+	Groups           []string // nil = omit; non-nil replaces entire list
+	Description      *string  // nil = omit; pointer to "" clears
+	AllowConnections *bool
+	MaxConnections   *uint
+}
+
+// ReqCreateNodeForm defines writable fields for POST /api/admin/system/nodes.
 type ReqCreateNodeForm struct {
-	NodeID           string            `json:"nodeId"`
-	IsServer         bool              `json:"isServer"`
-	Status           model.NodeStatus  `json:"status"`
-	ClientHost       string            `json:"clientHost"`
-	Labels           map[string]string `json:"labels"`
-	AllowConnections *bool             `json:"allowConnections,omitempty"`
-	MaxConnections   uint              `json:"maxConnections,omitempty"`
+	NodeID           string   `json:"nodeId"`
+	IsServer         bool     `json:"isServer"`
+	DialHost         string   `json:"dialHost"`
+	Description      string   `json:"description"`
+	Groups           []string `json:"groups"`
+	AllowConnections *bool    `json:"allowConnections,omitempty"`
+	MaxConnections   uint     `json:"maxConnections,omitempty"`
 }
 
 // AgentConfig holds the configuration required to start a cluster agent node.
 type AgentConfig struct {
 	ServerAddr string `json:"serverAddr"`
 	NodeID     string `json:"nodeId"`
-	Token      string `json:"token"`
 	CertPath   string `json:"certPath"`
 	KeyPath    string `json:"keyPath"`
 	CAPath     string `json:"caPath"`
@@ -51,20 +58,18 @@ type CreateClusterCertRequest struct {
 	SyncNode  bool
 }
 
-// OfflineIssueCertRequest defines the parameters for offline certificate issuance.
 type OfflineIssueCertRequest struct {
 	NodeID    string
 	IsServer  bool
 	Hosts     []string
 	ValidDays int
-	CSRPEM    []byte // Optional: if provided, signs this CSR; if empty, generates a new private key
-	Force     bool   // Force overwrite if node already has an active certificate
+	CSRPEM    []byte
+	Force     bool
 }
 
-// OfflineIssueCertResult holds the generated materials and metadata.
 type OfflineIssueCertResult struct {
 	CertPEM     []byte
-	KeyPEM      []byte // empty when CSRPEM was provided
+	KeyPEM      []byte
 	CAPEM       []byte
 	Fingerprint string
 	Subject     string
@@ -72,34 +77,29 @@ type OfflineIssueCertResult struct {
 	IsNewNode   bool
 }
 
-// StatusCPU describes current CPU utilization.
 type StatusCPU struct {
-	Utilization float64 `json:"utilization"` // CPU 使用率比例 (0.0000 - 1.0000)
+	Utilization float64 `json:"utilization"`
 	Cores       int64   `json:"cores"`
 }
 
-// StatusMemory describes current memory usage (values in KB / KiB from /proc/meminfo).
 type StatusMemory struct {
-	Total     int64 `json:"total"`     // 总内存，单位 KB (KiB)
-	Used      int64 `json:"used"`      // 已用内存，单位 KB (KiB)
-	SwapTotal int64 `json:"swapTotal"` // Swap 总量，单位 KB (KiB)
-	SwapFree  int64 `json:"swapFree"`  // Swap 剩余，单位 KB (KiB)
+	Total     int64 `json:"total"`
+	Used      int64 `json:"used"`
+	SwapTotal int64 `json:"swapTotal"`
+	SwapFree  int64 `json:"swapFree"`
 }
 
-// StatusLoad describes current load averages.
 type StatusLoad struct {
 	Load1  float64 `json:"load1"`
 	Load5  float64 `json:"load5"`
 	Load15 float64 `json:"load15"`
 }
 
-// StatusGPU describes current GPU summary metrics.
 type StatusGPU struct {
 	Count       int64   `json:"count"`
-	Utilization float64 `json:"utilization"` // GPU 使用率比例 (0.0000 - 1.0000)
+	Utilization float64 `json:"utilization"`
 }
 
-// ReqNodeStatusView is the runtime status payload exposed by /api/nodes/{id}/status.
 type ReqNodeStatusView struct {
 	NodeID        string       `json:"nodeId"`
 	ReportedAt    time.Time    `json:"reportedAt"`
@@ -112,46 +112,42 @@ type ReqNodeStatusView struct {
 	Disk          []StatusDisk `json:"disk,omitempty"`
 }
 
-// StatusDisk describes disk usage for a monitored mount point (values in KB / KiB from statfs).
 type StatusDisk struct {
 	MountPoint  string `json:"mountPoint"`
-	Total       int64  `json:"total"` // 磁盘总容量，单位 KB (KiB)
-	Used        int64  `json:"used"`  // 磁盘已用容量，单位 KB (KiB)
+	Total       int64  `json:"total"`
+	Used        int64  `json:"used"`
 	MonitorName string `json:"monitorName,omitempty"`
 }
 
-// BuildNodeStatusView maps a resource snapshot into the public runtime status payload.
-// Disk data is read from the embedded report.DiskUsages JSON column.
-func BuildNodeStatusView(report model.NodeResourceReport) ReqNodeStatusView {
+func BuildNodeStatusView(metrics model.NodeRuntime) ReqNodeStatusView {
 	view := ReqNodeStatusView{
-		NodeID:        report.NodeID,
-		ReportedAt:    report.ReportedAt,
-		UptimeSeconds: report.Uptime,
-		ActiveTasks:   report.ActiveTasks,
+		NodeID:        metrics.NodeID,
+		ReportedAt:    metrics.ReportedAt,
+		UptimeSeconds: metrics.Uptime,
+		ActiveTasks:   metrics.ActiveTasks,
 		CPU: StatusCPU{
-			Utilization: format.RoundTo(report.CPUUtil, 4),
-			Cores:       report.CPUCores,
+			Utilization: format.RoundTo(metrics.CPUUtil, 4),
+			Cores:       metrics.CPUCores,
 		},
 		Memory: StatusMemory{
-			Total:     report.MemTotal,
-			Used:      report.MemUsed,
-			SwapTotal: report.SwapTotal,
-			SwapFree:  report.SwapFree,
+			Total:     metrics.MemTotal,
+			Used:      metrics.MemUsed,
+			SwapTotal: metrics.SwapTotal,
+			SwapFree:  metrics.SwapFree,
 		},
 		Load: StatusLoad{
-			Load1:  report.Load1,
-			Load5:  report.Load5,
-			Load15: report.Load15,
+			Load1:  metrics.Load1,
+			Load5:  metrics.Load5,
+			Load15: metrics.Load15,
 		},
 		GPU: StatusGPU{
-			Count:       report.GPUCount,
-			Utilization: format.RoundTo(report.GPUUtil, 4),
+			Count:       metrics.GPUCount,
+			Utilization: format.RoundTo(metrics.GPUUtil, 4),
 		},
 	}
-
-	if len(report.DiskUsages) > 0 {
-		view.Disk = make([]StatusDisk, 0, len(report.DiskUsages))
-		for _, d := range report.DiskUsages {
+	if len(metrics.DiskUsages) > 0 {
+		view.Disk = make([]StatusDisk, 0, len(metrics.DiskUsages))
+		for _, d := range metrics.DiskUsages {
 			view.Disk = append(view.Disk, StatusDisk{
 				MountPoint:  d.MountPoint,
 				Total:       d.Total,
@@ -163,40 +159,166 @@ func BuildNodeStatusView(report model.NodeResourceReport) ReqNodeStatusView {
 	return view
 }
 
-// NodeSettingsBatchSelector defines search criteria for selecting nodes to apply batch settings updates.
-type NodeSettingsBatchSelector struct {
-	NodeIDs []string          `json:"nodeIds,omitempty"`
-	Labels  map[string]string `json:"labels,omitempty"`
-	OS      []string          `json:"os,omitempty"`
-	Status  []string          `json:"status,omitempty"`
+// NodeAdminView is the admin JSON projection for node records.
+type NodeAdminView struct {
+	ID                 uint           `json:"id"`
+	NodeID             string         `json:"nodeId"`
+	Groups             []string       `json:"groups"`
+	IsServer           bool           `json:"isServer"`
+	DialHost           string         `json:"dialHost,omitempty"`
+	OS                 string         `json:"os,omitempty"`
+	Arch               string         `json:"arch,omitempty"`
+	OSName             string         `json:"osName,omitempty"`
+	OSVersion          string         `json:"osVersion,omitempty"`
+	KernelVersion      string         `json:"kernelVersion,omitempty"`
+	Description        string         `json:"description,omitempty"`
+	Settings           map[string]any `json:"settings,omitempty"`
+	CertFingerprint    string         `json:"certFingerprint,omitempty"`
+	CertSubject        string         `json:"certSubject,omitempty"`
+	CertExpiresAt      time.Time      `json:"certExpiresAt"`
+	CertAutoRenew      bool           `json:"certAutoRenew"`
+	AllowConnections   bool           `json:"allowConnections"`
+	MaxConnections     uint           `json:"maxConnections"`
+	LastHeartbeatAt    time.Time      `json:"lastHeartbeatAt"`
+	LastConnectedAt    time.Time      `json:"lastConnectedAt"`
+	LastDisconnectedAt time.Time      `json:"lastDisconnectedAt"`
+	CreatedAt          time.Time      `json:"createdAt"`
+	UpdatedAt          time.Time      `json:"updatedAt"`
+	EnrollmentStage    string         `json:"enrollmentStage"`
+	Status             *string        `json:"status,omitempty"`
 }
 
-// IsEmpty returns true if no filtering criteria are specified.
+func BuildNodeAdminView(node model.Node) NodeAdminView {
+	groups := node.Groups
+	if groups == nil {
+		groups = []string{}
+	}
+	view := NodeAdminView{
+		ID:                 node.ID,
+		NodeID:             node.NodeID,
+		Groups:             groups,
+		IsServer:           node.IsServer,
+		DialHost:           node.DialHost,
+		OS:                 node.OS,
+		Arch:               node.Arch,
+		OSName:             node.OSName,
+		OSVersion:          node.OSVersion,
+		KernelVersion:      node.KernelVersion,
+		Description:        node.Description,
+		Settings:           node.Settings,
+		CertFingerprint:    node.CertFingerprint,
+		CertSubject:        node.CertSubject,
+		CertExpiresAt:      node.CertExpiresAt,
+		CertAutoRenew:      node.CertAutoRenew,
+		AllowConnections:   node.AllowConnections,
+		MaxConnections:     node.MaxConnections,
+		LastHeartbeatAt:    node.LastHeartbeatAt,
+		LastConnectedAt:    node.LastConnectedAt,
+		LastDisconnectedAt: node.LastDisconnectedAt,
+		CreatedAt:          node.CreatedAt,
+		UpdatedAt:          node.UpdatedAt,
+		EnrollmentStage:    node.EnrollmentStage(),
+	}
+	if node.HasEnrolled() && node.Status.IsRuntimeStatus() {
+		st := node.Status.String()
+		view.Status = &st
+	}
+	return view
+}
+
+func validateDescription(desc string) error {
+	if utf8.RuneCountInString(desc) > 512 {
+		return contract.NewValidationError("description exceeds 512 characters")
+	}
+	return nil
+}
+
+// NodeSettingsBatchSelector defines search criteria for batch settings updates.
+type NodeSettingsBatchSelector struct {
+	NodeIDs []string `json:"nodeIds,omitempty"`
+	Groups  []string `json:"groups,omitempty"`
+	OS      []string `json:"os,omitempty"`
+	Arch    []string `json:"arch,omitempty"`
+	Status  []string `json:"status,omitempty"`
+}
+
 func (s *NodeSettingsBatchSelector) IsEmpty() bool {
 	if s == nil {
 		return true
 	}
-	return len(s.NodeIDs) == 0 && len(s.Labels) == 0 && len(s.OS) == 0 && len(s.Status) == 0
+	return len(s.NodeIDs) == 0 && len(s.Groups) == 0 && len(s.OS) == 0 && len(s.Arch) == 0 && len(s.Status) == 0
 }
 
-// BatchUpdateNodeSettingsRequest is the payload for POST /api/admin/system/nodes/settings/batch.
 type BatchUpdateNodeSettingsRequest struct {
 	Selector *NodeSettingsBatchSelector `json:"selector"`
 	Patch    json.RawMessage            `json:"patch"`
 	DryRun   bool                       `json:"dryRun"`
 }
 
-// BatchNodeFailure records a failure for a specific node during batch update.
 type BatchNodeFailure struct {
 	NodeID  string `json:"nodeId"`
 	Message string `json:"message"`
 }
 
-// BatchNodeSettingsResponse is the result returned by POST /api/admin/system/nodes/settings/batch.
 type BatchNodeSettingsResponse struct {
 	Matched   int                `json:"matched"`
 	Updated   int                `json:"updated"`
 	Unchanged int                `json:"unchanged"`
 	DryRun    bool               `json:"dryRun"`
 	Failures  []BatchNodeFailure `json:"failures,omitempty"`
+}
+
+const maxNodeBatchItems = 100
+
+// BatchNodeUpdateItem is one sparse update in POST /api/admin/system/nodes/batch-update.
+// Omitted pointer/nil slice fields are left unchanged (same as PUT /nodes/:id).
+type BatchNodeUpdateItem struct {
+	NodeID           string   `json:"nodeId"`
+	IsServer         *bool    `json:"isServer"`
+	Maintenance      *bool    `json:"maintenance"`
+	DialHost         *string  `json:"dialHost"`
+	Groups           []string `json:"groups"`
+	Description      *string  `json:"description"`
+	AllowConnections *bool    `json:"allowConnections"`
+	MaxConnections   *uint    `json:"maxConnections"`
+}
+
+func (item BatchNodeUpdateItem) hasFields() bool {
+	return item.IsServer != nil ||
+		item.Maintenance != nil ||
+		item.DialHost != nil ||
+		item.Groups != nil ||
+		item.Description != nil ||
+		item.AllowConnections != nil ||
+		item.MaxConnections != nil
+}
+
+func (item BatchNodeUpdateItem) toUpdateRequest() UpdateNodeRequest {
+	req := UpdateNodeRequest{
+		IsServer:         item.IsServer,
+		Maintenance:      item.Maintenance,
+		DialHost:         item.DialHost,
+		AllowConnections: item.AllowConnections,
+		MaxConnections:   item.MaxConnections,
+	}
+	if item.Groups != nil {
+		req.Groups = item.Groups
+	}
+	if item.Description != nil {
+		req.Description = item.Description
+	}
+	return req
+}
+
+// BatchNodeUpdateFailure records one item that did not update.
+type BatchNodeUpdateFailure struct {
+	Index   int    `json:"index"`
+	NodeID  string `json:"nodeId"`
+	Message string `json:"message"`
+}
+
+// BatchNodeUpdateResponse is the partial-success result of AdminBatchUpdate.
+type BatchNodeUpdateResponse struct {
+	Updated  int                      `json:"updated"`
+	Failures []BatchNodeUpdateFailure `json:"failures,omitempty"`
 }

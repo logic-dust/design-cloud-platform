@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"design-cloud-engine/internal/common"
-	fsutil "design-cloud-engine/internal/common/fs"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/cmd/engine/console"
+	"design-cloud-engine/internal/platform/config"
+	fsutil "design-cloud-engine/internal/platform/fs"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
@@ -44,13 +44,13 @@ func runServiceCommand(flags *Flags, args []string) error {
 }
 
 func printServiceUsage() {
-	common.PrintStderr("Usage: %s service <status|stop|install|uninstall|start>\n\n", config.AppName)
-	common.PrintStderr("Subcommands:\n")
-	common.PrintStderr("  status                   Check if local engine process is running\n")
-	common.PrintStderr("  stop                     Gracefully stop local engine process\n")
-	common.PrintStderr("  install                  Install as Windows Service (Windows only)\n")
-	common.PrintStderr("  uninstall                Uninstall Windows Service (Windows only)\n")
-	common.PrintStderr("  start                    Start Windows Service (Windows only)\n")
+	console.PrintStderr("Usage: %s service <status|stop|install|uninstall|start>\n\n", config.AppName)
+	console.PrintStderr("Subcommands:\n")
+	console.PrintStderr("  status                   Check if local engine process is running\n")
+	console.PrintStderr("  stop                     Gracefully stop local engine process\n")
+	console.PrintStderr("  install                  Install as Windows Service (Windows only)\n")
+	console.PrintStderr("  uninstall                Uninstall Windows Service (Windows only)\n")
+	console.PrintStderr("  start                    Start Windows Service (Windows only)\n")
 }
 
 func runWindowsServiceInstall(parent *Flags, args []string) error {
@@ -108,10 +108,10 @@ func runWindowsServiceInstall(parent *Flags, args []string) error {
 		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
 	}
 	if err := s.SetRecoveryActions(recoveryActions, 86400); err != nil {
-		common.PrintStderr("Warning: failed to set service recovery actions: %v\n", err)
+		console.PrintStderr("Warning: failed to set service recovery actions: %v\n", err)
 	}
 
-	common.PrintStdout("Service %s installed successfully (auto-start configured)\n", WindowsServiceName)
+	console.PrintStdout("Service %s installed successfully (auto-start configured)\n", WindowsServiceName)
 	return nil
 }
 
@@ -138,7 +138,7 @@ func runWindowsServiceUninstall() error {
 		return fmt.Errorf("delete service %s: %w", WindowsServiceName, err)
 	}
 
-	common.PrintStdout("Service %s uninstalled successfully\n", WindowsServiceName)
+	console.PrintStdout("Service %s uninstalled successfully\n", WindowsServiceName)
 	return nil
 }
 
@@ -157,7 +157,7 @@ func runWindowsServiceStart() error {
 
 	status, err := s.Query()
 	if err == nil && status.State == svc.Running {
-		common.PrintStdout("Service %s is already running\n", WindowsServiceName)
+		console.PrintStdout("Service %s is already running\n", WindowsServiceName)
 		return nil
 	}
 
@@ -165,7 +165,7 @@ func runWindowsServiceStart() error {
 		return fmt.Errorf("start service %s: %w", WindowsServiceName, err)
 	}
 
-	common.PrintStdout("Service %s started successfully\n", WindowsServiceName)
+	console.PrintStdout("Service %s started successfully\n", WindowsServiceName)
 	return nil
 }
 
@@ -218,16 +218,16 @@ func runWindowsServiceStatus() error {
 			if st, err := s.Query(); err == nil {
 				switch st.State {
 				case svc.Running:
-					common.PrintStdout("Engine is RUNNING (Windows Service %s)\n", WindowsServiceName)
+					console.PrintStdout("Engine is RUNNING (Windows Service %s)\n", WindowsServiceName)
 					return nil
 				case svc.StartPending:
-					common.PrintStdout("Engine is STARTING (Windows Service %s)\n", WindowsServiceName)
+					console.PrintStdout("Engine is STARTING (Windows Service %s)\n", WindowsServiceName)
 					return nil
 				case svc.StopPending:
-					common.PrintStdout("Engine is STOPPING (Windows Service %s)\n", WindowsServiceName)
+					console.PrintStdout("Engine is STOPPING (Windows Service %s)\n", WindowsServiceName)
 					return nil
 				case svc.Stopped:
-					common.PrintlnStdout("Engine is NOT running (Service stopped)")
+					console.PrintlnStdout("Engine is NOT running (Service stopped)")
 					return fmt.Errorf("service stopped")
 				}
 			}
@@ -241,38 +241,38 @@ func runWindowsServiceStatus() error {
 		return fmt.Errorf("service status error: %w", err)
 	}
 	if !locked {
-		common.PrintlnStdout("Engine is NOT running")
+		console.PrintlnStdout("Engine is NOT running")
 		return fmt.Errorf("process not running")
 	}
 
 	pid, starttime, err := readPIDRecord()
 	if err != nil {
-		common.PrintStdout("Engine is RUNNING (active exclusive lock held)\n")
+		console.PrintStdout("Engine is RUNNING (active exclusive lock held)\n")
 		return nil
 	}
 
 	if starttime > 0 {
 		st, err := ProcessStartTime(pid)
 		if err == nil && st != starttime {
-			common.PrintlnStdout("Engine is NOT running (PID was reused)")
+			console.PrintlnStdout("Engine is NOT running (PID was reused)")
 			return fmt.Errorf("process not running")
 		}
 	}
 
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
-		common.PrintStdout("Engine is RUNNING (PID %d, active exclusive lock held)\n", pid)
+		console.PrintStdout("Engine is RUNNING (PID %d, active exclusive lock held)\n", pid)
 		return nil
 	}
 	defer windows.CloseHandle(h)
 
 	var exitCode uint32
 	if err := windows.GetExitCodeProcess(h, &exitCode); err == nil && exitCode == stillActive {
-		common.PrintStdout("Engine is RUNNING (PID %d)\n", pid)
+		console.PrintStdout("Engine is RUNNING (PID %d)\n", pid)
 		return nil
 	}
 
-	common.PrintlnStdout("Engine is NOT running")
+	console.PrintlnStdout("Engine is NOT running")
 	return fmt.Errorf("process not running")
 }
 
@@ -283,7 +283,7 @@ func runWindowsServiceStop() error {
 		if s, err := m.OpenService(WindowsServiceName); err == nil {
 			defer s.Close()
 			if st, err := s.Control(svc.Stop); err == nil && (st.State == svc.StopPending || st.State == svc.Stopped) {
-				common.PrintStdout("Sent stop command to Windows Service %s\n", WindowsServiceName)
+				console.PrintStdout("Sent stop command to Windows Service %s\n", WindowsServiceName)
 				return nil
 			}
 		}
@@ -292,26 +292,26 @@ func runWindowsServiceStop() error {
 	// Fallback to PID file termination
 	pid, starttime, err := readPIDRecord()
 	if err != nil {
-		common.PrintStdout("Engine is not running\n")
+		console.PrintStdout("Engine is not running\n")
 		return nil
 	}
 
 	if starttime > 0 {
 		st, err := ProcessStartTime(pid)
 		if err == nil && st != starttime {
-			common.PrintStdout("Engine is not running (PID was reused by another process)\n")
+			console.PrintStdout("Engine is not running (PID was reused by another process)\n")
 			return nil
 		}
 	}
 
 	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
 	if err != nil {
-		common.PrintStdout("Engine is not running\n")
+		console.PrintStdout("Engine is not running\n")
 		return nil
 	}
 	defer windows.CloseHandle(h)
 
 	_ = windows.TerminateProcess(h, 1)
-	common.PrintStdout("Stopped process %d\n", pid)
+	console.PrintStdout("Stopped process %d\n", pid)
 	return nil
 }

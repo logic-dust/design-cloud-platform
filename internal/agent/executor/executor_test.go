@@ -2,11 +2,13 @@ package executor
 
 import (
 	"context"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"log/slog"
 	"os"
 	"testing"
 
 	"design-cloud-engine/internal/execution"
+	"design-cloud-engine/internal/execution/payload"
 )
 
 // mockExecutor records which executor was used and returns a controlled response.
@@ -26,16 +28,16 @@ func noopLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1}))
 }
 
-func newMockService(launcher, direct *mockExecutor) *Service {
+func newMockService(dcexecExec, direct *mockExecutor) *Service {
 	return &Service{
-		launcherExec: launcher,
-		directExec:   direct,
-		logger:       noopLogger(),
+		dcexecExec: dcexecExec,
+		directExec: direct,
+		logger:     noopLogger(),
 	}
 }
 
 // pickAction returns a registered action with the requested routing kind.
-// Windows builds register Direct actions only (no dc-launcher), so launcher-routing cases
+// Windows builds register Direct actions only (no PrivilegedExec), so dc-exec-routing cases
 // skip there: the contract does not exist on that platform, and skipping says so explicitly
 // instead of failing on a Linux-only action name.
 func pickAction(t *testing.T, direct bool) execution.ActionName {
@@ -47,7 +49,7 @@ func pickAction(t *testing.T, direct bool) execution.ActionName {
 		}
 	}
 
-	kind := "launcher"
+	kind := "dcexec"
 	if direct {
 		kind = "direct"
 	}
@@ -59,10 +61,23 @@ func pickAction(t *testing.T, direct bool) execution.ActionName {
 // Request Validation
 // ============================================================================
 
+func TestExecute_NilRequest(t *testing.T) {
+	t.Parallel()
+
+	svc := newMockService(&mockExecutor{name: "dcexec"}, &mockExecutor{name: "direct"})
+	resp, err := svc.Execute(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Success || resp.TraceID != "" || resp.Stderr == "" {
+		t.Fatalf("invalid nil-request response: %+v", resp)
+	}
+}
+
 func TestExecute_MissingActionName(t *testing.T) {
 	t.Parallel()
 
-	svc := newMockService(&mockExecutor{name: "launcher"}, &mockExecutor{name: "direct"})
+	svc := newMockService(&mockExecutor{name: "dcexec"}, &mockExecutor{name: "direct"})
 	req := &execution.ExecuteRequest{
 		TraceID: "trace-1",
 	}
@@ -79,7 +94,7 @@ func TestExecute_MissingActionName(t *testing.T) {
 func TestExecute_MissingTraceID(t *testing.T) {
 	t.Parallel()
 
-	svc := newMockService(&mockExecutor{name: "launcher"}, &mockExecutor{name: "direct"})
+	svc := newMockService(&mockExecutor{name: "dcexec"}, &mockExecutor{name: "direct"})
 	req := &execution.ExecuteRequest{
 		ActionName: "some-action",
 	}
@@ -100,9 +115,9 @@ func TestExecute_MissingTraceID(t *testing.T) {
 func TestExecute_UnknownAction(t *testing.T) {
 	t.Parallel()
 
-	launcher := &mockExecutor{name: "launcher"}
+	dcexecExec := &mockExecutor{name: "dcexec"}
 	direct := &mockExecutor{name: "direct"}
-	svc := newMockService(launcher, direct)
+	svc := newMockService(dcexecExec, direct)
 
 	req := &execution.ExecuteRequest{
 		TraceID:    "trace-1",
@@ -116,7 +131,7 @@ func TestExecute_UnknownAction(t *testing.T) {
 	if resp.Success {
 		t.Error("expected failure for unknown action")
 	}
-	if launcher.executed || direct.executed {
+	if dcexecExec.executed || direct.executed {
 		t.Error("neither executor should have been called for unknown action")
 	}
 }
@@ -128,13 +143,13 @@ func TestExecute_UnknownAction(t *testing.T) {
 func TestExecute_RoutesToDirect(t *testing.T) {
 	t.Parallel()
 
-	launcher := &mockExecutor{name: "launcher"}
+	dcexecExec := &mockExecutor{name: "dcexec"}
 	direct := &mockExecutor{
 		name: "direct",
 		resp: &execution.ExecuteResponse{TraceID: "trace-1", Success: true},
 	}
 
-	svc := newMockService(launcher, direct)
+	svc := newMockService(dcexecExec, direct)
 
 	action := pickAction(t, true) // direct action → routes to direct executor
 	req := &execution.ExecuteRequest{
@@ -152,23 +167,23 @@ func TestExecute_RoutesToDirect(t *testing.T) {
 	if !direct.executed {
 		t.Errorf("expected direct executor to be called for %s", action)
 	}
-	if launcher.executed {
-		t.Error("launcher should NOT be called for direct action")
+	if dcexecExec.executed {
+		t.Error("dc-exec executor should NOT be called for direct action")
 	}
 }
 
-func TestExecute_RoutesToLauncher(t *testing.T) {
+func TestExecute_RoutesToDcExec(t *testing.T) {
 	t.Parallel()
 
-	launcher := &mockExecutor{
-		name: "launcher",
+	dcexecExec := &mockExecutor{
+		name: "dcexec",
 		resp: &execution.ExecuteResponse{TraceID: "trace-2", Success: true},
 	}
 	direct := &mockExecutor{name: "direct"}
 
-	svc := newMockService(launcher, direct)
+	svc := newMockService(dcexecExec, direct)
 
-	action := pickAction(t, false) // launcher action → routes to launcher executor
+	action := pickAction(t, false) // PrivilegedExec action → routes to PrivilegedExec executor
 	req := &execution.ExecuteRequest{
 		TraceID:    "trace-2",
 		ActionName: action,
@@ -181,11 +196,11 @@ func TestExecute_RoutesToLauncher(t *testing.T) {
 	if !resp.Success {
 		t.Error("expected success")
 	}
-	if !launcher.executed {
-		t.Errorf("expected launcher executor to be called for %s", action)
+	if !dcexecExec.executed {
+		t.Errorf("expected dc-exec executor to be called for %s", action)
 	}
 	if direct.executed {
-		t.Error("direct should NOT be called for launcher action")
+		t.Error("direct should NOT be called for PrivilegedExec action")
 	}
 }
 
@@ -193,20 +208,20 @@ func TestExecute_RoutesToLauncher(t *testing.T) {
 // Executor Error Propagation
 // ============================================================================
 
-func TestExecute_PropagatesLauncherError(t *testing.T) {
+func TestExecute_PropagatesDcExecError(t *testing.T) {
 	t.Parallel()
 
-	launcher := &mockExecutor{
-		name: "launcher",
+	dcexecExec := &mockExecutor{
+		name: "dcexec",
 		resp: &execution.ExecuteResponse{Success: false, ExitCode: 1, Stderr: "file operation failed"},
 	}
 	direct := &mockExecutor{name: "direct"}
 
-	svc := newMockService(launcher, direct)
+	svc := newMockService(dcexecExec, direct)
 
 	req := &execution.ExecuteRequest{
 		TraceID:    "trace-3",
-		ActionName: pickAction(t, false), // routes to launcher
+		ActionName: pickAction(t, false), // routes to PrivilegedExec
 	}
 
 	resp, err := svc.Execute(context.Background(), req)
@@ -214,23 +229,23 @@ func TestExecute_PropagatesLauncherError(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if resp.Success {
-		t.Error("expected failure from launcher")
+		t.Error("expected failure from dc-exec")
 	}
-	if !launcher.executed {
-		t.Error("launcher should have been called")
+	if !dcexecExec.executed {
+		t.Error("dc-exec executor should have been called")
 	}
 }
 
 func TestExecute_PropagatesDirectError(t *testing.T) {
 	t.Parallel()
 
-	launcher := &mockExecutor{name: "launcher"}
+	dcexecExec := &mockExecutor{name: "dcexec"}
 	direct := &mockExecutor{
 		name: "direct",
 		resp: &execution.ExecuteResponse{Success: false, ExitCode: 2, Stderr: "direct exec failed"},
 	}
 
-	svc := newMockService(launcher, direct)
+	svc := newMockService(dcexecExec, direct)
 
 	req := &execution.ExecuteRequest{
 		TraceID:    "trace-4",
@@ -293,18 +308,52 @@ func TestExecuteRequestValidate(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// Response defaults
-// ============================================================================
-
-func TestExecuteResponseDefaults(t *testing.T) {
-	t.Parallel()
-
-	resp := &execution.ExecuteResponse{}
-	if resp.Success {
-		t.Error("zero-value response should not be successful")
+func TestExecute_InjectsSchedulerEnvScript(t *testing.T) {
+	cases := []struct {
+		action  execution.ActionName
+		payload any
+		read    func(req *execution.ExecuteRequest) string
+	}{
+		{execution.ActionJobQuery, &payload.JobQuery{}, func(r *execution.ExecuteRequest) string { return r.Payload.(*payload.JobQuery).EnvScript }},
+		{execution.ActionJobSubmit, &payload.JobSubmit{}, func(r *execution.ExecuteRequest) string { return r.Payload.(*payload.JobSubmit).EnvScript }},
+		{execution.ActionJobControl, &payload.JobControl{}, func(r *execution.ExecuteRequest) string { return r.Payload.(*payload.JobControl).EnvScript }},
+		{execution.ActionJobModify, &payload.JobModify{}, func(r *execution.ExecuteRequest) string { return r.Payload.(*payload.JobModify).EnvScript }},
 	}
-	if resp.ExitCode != 0 {
-		t.Errorf("zero-value ExitCode = %d, want 0", resp.ExitCode)
+	for _, tc := range cases {
+		t.Run(string(tc.action), func(t *testing.T) {
+			svc := newMockService(&mockExecutor{}, &mockExecutor{})
+			svc.SetSchedulerEnvScript(func() string { return "/node/local/env.sh" })
+
+			// Server-supplied value must be replaced by the node-local one;
+			// raw JSON payloads (as received over gRPC) must be decoded first.
+			req := &execution.ExecuteRequest{ActionName: tc.action, Payload: json.RawMessage(`{"envScript":"/server/side.sh"}`)}
+			if err := svc.injectJobEnvScript(req); err != nil {
+				t.Fatalf("injectJobEnvScript: %v", err)
+			}
+			if got := tc.read(req); got != "/node/local/env.sh" {
+				t.Errorf("EnvScript = %q, want node-local value", got)
+			}
+
+			// No provider or an empty provider value: no script is sourced.
+			svc.SetSchedulerEnvScript(nil)
+			req = &execution.ExecuteRequest{ActionName: tc.action, Payload: tc.payload}
+			if err := svc.injectJobEnvScript(req); err != nil {
+				t.Fatalf("injectJobEnvScript(nil provider): %v", err)
+			}
+			if got := tc.read(req); got != "" {
+				t.Errorf("EnvScript = %q, want empty", got)
+			}
+		})
+	}
+
+	// Non-job actions are left untouched.
+	svc := newMockService(&mockExecutor{}, &mockExecutor{})
+	svc.SetSchedulerEnvScript(func() string { return "/node/local/env.sh" })
+	req := &execution.ExecuteRequest{ActionName: execution.ActionFileList, Payload: json.RawMessage(`{}`)}
+	if err := svc.injectJobEnvScript(req); err != nil {
+		t.Fatalf("non-job action: %v", err)
+	}
+	if _, ok := req.Payload.(json.RawMessage); !ok {
+		t.Errorf("non-job payload was rewritten: %T", req.Payload)
 	}
 }

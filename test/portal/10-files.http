@@ -1,0 +1,232 @@
+# ========================================
+# ===== FILES Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+# ----- 路径统一 dc_http_*，开头 batch-delete 保证重复跑不触发 dc-exec 冲突（避免 500） -----
+
+
+### 列出可用文件位置
+GET {{addr}}/api/files/locations
+Authorization: Bearer {{accessToken}}
+
+### 列出预定义目录 HOME
+GET {{addr}}/api/files/locations/home/contents
+Authorization: Bearer {{accessToken}}
+
+### 列出HOME下相对路径.config
+GET {{addr}}/api/files/locations/home/contents/.config
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,404
+### 列出预定义目录 Public
+GET {{addr}}/api/files/locations/public/contents
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,204,404
+### 清理套件遗留路径（幂等）
+POST {{addr}}/api/files/locations/home/contents/batch-delete
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "paths": [
+    "dc_http_upload.txt",
+    "dc_http_parent",
+    "dc_http_renamed",
+    "upload.txt",
+    "old_dir",
+    "new_dir"
+  ]
+}
+
+# @expect 200,201,204,400,403,404,422
+### 上传文件到 HOME（dc_http_upload.txt）
+PUT {{addr}}/api/files/locations/home/contents/dc_http_upload.txt
+Authorization: Bearer {{accessToken}}
+Content-Type: text/plain
+
+hello world
+
+
+### 直接下载模式：一次 POST 流式下载（downloadAccess=allow）
+POST {{addr}}/api/files/downloads
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "location": "home",
+  "path": "dc_http_upload.txt"
+}
+
+# @expect 202,409
+# 202 = 已创建待审批申请；409 = downloadAccess=allow 时审批非必需（ErrDownloadApprovalNotNeeded）
+### 审批下载模式：创建下载审批申请（downloadAccess=request）
+POST {{addr}}/api/files/download-requests
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "location": "home",
+  "path": "dc_http_upload.txt"
+}
+
+> {%
+
+
+
+const payload = response.body;
+if (payload?.data?.downloadRequestId) {
+  client.global.set("testDownloadRequestId", String(payload.data.downloadRequestId));
+}
+
+
+
+%}
+
+### 查看我的下载申请
+GET {{addr}}/api/files/download-requests
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,404
+### 查看我的下载申请详情
+GET {{addr}}/api/files/download-requests/{{testDownloadRequestId}}
+Authorization: Bearer {{accessToken}}
+
+# ----- 审批同意与 POST .../content 流式下载见 10-files-security-admin.http（须在同意之后执行） -----
+
+### 创建目录 dc_http_parent
+POST {{addr}}/api/files/locations/home/contents
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "dc_http_parent"
+}
+
+### 创建子目录 dc_http_sub
+POST {{addr}}/api/files/locations/home/contents
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "path": "dc_http_parent",
+  "name": "dc_http_sub"
+}
+
+### 重命名 dc_http_parent → dc_http_renamed
+POST {{addr}}/api/files/locations/home/contents/rename
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "path": "dc_http_parent",
+  "name": "dc_http_renamed"
+}
+
+# @expect 200,204,404
+### 删除上传的 dc_http_upload.txt
+POST {{addr}}/api/files/locations/home/contents/batch-delete
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "paths": [
+    "dc_http_upload.txt"
+  ]
+}
+
+### 移至回收站（dc_http_renamed）
+POST {{addr}}/api/files/trash/items
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "location": "home",
+  "paths": [
+    "dc_http_renamed"
+  ]
+}
+
+### 列出回收站项目
+GET {{addr}}/api/files/trash/contents
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,404
+### 列出回收站内 dc_http_renamed
+GET {{addr}}/api/files/trash/contents/dc_http_renamed
+Authorization: Bearer {{accessToken}}
+
+# @manual
+### 还原回收站项目（dc_http_renamed）
+POST {{addr}}/api/files/trash/items/restore
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "trashNames": [
+    "dc_http_renamed"
+  ]
+}
+
+# @expect 200,204,404
+### 删除回收站单个项目（dc_http_renamed）
+DELETE {{addr}}/api/files/trash/items/dc_http_renamed
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,204,404
+### 套件末尾清理 HOME 遗留路径（幂等）
+POST {{addr}}/api/files/locations/home/contents/batch-delete
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "paths": [
+    "dc_http_upload.txt",
+    "dc_http_parent",
+    "dc_http_renamed",
+    "dc_http_sub"
+  ]
+}
+
+# @manual
+### 批量删除回收站项目（示例：需真实 trashName，勿用占位 id）
+POST {{addr}}/api/files/trash/items/batch-delete
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "names": [
+    "1",
+    "2"
+  ]
+}
+
+# @manual
+### 清空回收站
+DELETE {{addr}}/api/files/trash/items
+Authorization: Bearer {{accessToken}}
+
+
+# ----------------------------------------------------------------------
+# ----- 可选示例：额外只读文件位置 shared-data -----
+# ----- 先在 16-settings-system-admin.http 中配置 shared-data，且确保 /tmp/design-cloud-shared/example.txt 存在。 -----
+# ----- 取消下面请求行前的 # 后单独执行。 -----
+# ----------------------------------------------------------------------
+
+# GET {{addr}}/api/files/locations/shared-data/contents
+# Authorization: Bearer {{accessToken}}
+
+# POST {{addr}}/api/files/downloads
+# Content-Type: application/json
+# Authorization: Bearer {{accessToken}}
+#
+# {
+#   "location": "shared-data",
+#   "path": "example.txt"
+# }
+
+# PUT {{addr}}/api/files/locations/shared-data/contents/should-not-upload.txt
+# Authorization: Bearer {{accessToken}}
+# Content-Type: text/plain
+#
+# should be rejected

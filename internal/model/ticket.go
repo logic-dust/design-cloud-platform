@@ -2,7 +2,7 @@
 package model
 
 import (
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"fmt"
 	"strings"
 	"time"
@@ -176,37 +176,107 @@ func (s *TicketStatus) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Ticket 工单数据模型
+// TicketAcceptanceCriteria 验收标准（以 JSON 存储在 text 列中）。
+type TicketAcceptanceCriteria struct {
+	Description string                `json:"description"`
+	Checklist   []TicketChecklistItem `json:"checklist"`
+}
+
+// TicketChecklistItem 验收清单中的一项。
+type TicketChecklistItem struct {
+	Text string `json:"text"`
+	Done bool   `json:"done"`
+}
+
+// TicketAttachment 工单附件：对文件服务中某个位置内文件的引用，不保存文件内容，
+// 也不授予访问权；下载时按查看者自己的文件权限判断。
+type TicketAttachment struct {
+	Location string `json:"location"`
+	Path     string `json:"path"`
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	MimeType string `json:"mimeType"`
+}
+
+// Ticket 工单数据模型。枚举字段在库中存整数，JSON 中为字符串。
 type Ticket struct {
-	ID          uint       `json:"id" gorm:"primarykey"`
-	ProjectID   uint       `json:"projectId" gorm:"not null;index"`
-	Type        TicketType `json:"type" gorm:"index"`
-	Title       string     `json:"title" gorm:"type:varchar(256);not null"`
-	Description string     `json:"description" gorm:"type:text"`
+	// id 纳入 board / sort_id 复合索引末列，支撑 sortOrder keyset（col,id）续页。
+	ID          uint       `gorm:"primarykey;index:idx_tickets_board,priority:4;index:idx_tickets_sort_id,priority:2"`
+	ProjectID   uint       `gorm:"not null;index:idx_tickets_board,priority:1"`
+	Type        TicketType `gorm:"not null"`
+	Title       string     `gorm:"type:varchar(256);not null"`
+	Description string     `gorm:"type:text"`
 
-	// 人员关联
-	ReporterID uint `json:"reporterId" gorm:"not null;index"`
-	AssigneeID uint `json:"assigneeId" gorm:"not null;index"`
+	ReporterID uint  `gorm:"not null;index:idx_tickets_reporter_status,priority:1"`
+	AssigneeID *uint `gorm:"index:idx_tickets_assignee_status,priority:1"`
 
-	// 时间与优先级
-	DueDate  *time.Time     `json:"dueDate,omitempty"`
-	Priority TicketPriority `json:"priority" gorm:"index"`
-	Status   TicketStatus   `json:"status" gorm:"default:0;index"`
+	DueDate  *time.Time
+	Priority TicketPriority `gorm:"not null"`
+	Status   TicketStatus   `gorm:"not null;default:0;index:idx_tickets_board,priority:2;index:idx_tickets_assignee_status,priority:2;index:idx_tickets_reporter_status,priority:2"`
 
-	// 扩展字段（JSON）
-	AcceptanceCriteria string `json:"acceptanceCriteria" gorm:"type:text"`
-	Attachments        string `json:"attachments" gorm:"type:text"`
+	AcceptanceCriteria *TicketAcceptanceCriteria `gorm:"type:text;serializer:json"`
+	Attachments        []TicketAttachment        `gorm:"type:text;serializer:json"`
 
-	// 看板排序
-	SortOrder float64 `json:"sortOrder" gorm:"default:0;index"`
+	// SortOrder 为看板列内的排序位置，由服务端计算。
+	SortOrder float64 `gorm:"not null;default:0;index:idx_tickets_board,priority:3;index:idx_tickets_sort_id,priority:1"`
+	// Version 为乐观锁版本号，每次修改加 1。
+	Version int `gorm:"not null;default:1"`
 
-	// 时间戳
-	CreatedAt time.Time      `json:"createdAt"`
-	UpdatedAt time.Time      `json:"updatedAt"`
-	DeletedAt gorm.DeletedAt `json:"deletedAt" gorm:"index"`
+	CompletedAt *time.Time `gorm:"index"`
+	CreatedAt   time.Time  `gorm:"index"`
+	UpdatedAt   time.Time
+	DeletedAt   gorm.DeletedAt `gorm:"index"`
 
-	// 关联对象
-	Project  TicketProject `json:"-" gorm:"foreignKey:ProjectID;constraint:false"`
-	Reporter User          `json:"-" gorm:"foreignKey:ReporterID;constraint:false"`
-	Assignee User          `json:"-" gorm:"foreignKey:AssigneeID;constraint:false"`
+	Project  TicketProject `gorm:"foreignKey:ProjectID;constraint:false"`
+	Reporter User          `gorm:"foreignKey:ReporterID;constraint:false"`
+	Assignee *User         `gorm:"foreignKey:AssigneeID;constraint:false"`
+}
+
+// TicketComment 工单评论。
+type TicketComment struct {
+	ID        uint   `gorm:"primarykey"`
+	TicketID  uint   `gorm:"not null;index:idx_ticket_comments_ticket,priority:1"`
+	AuthorID  uint   `gorm:"not null"`
+	Body      string `gorm:"type:text;not null"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+
+	Author User `gorm:"foreignKey:AuthorID;constraint:false"`
+}
+
+// TicketEventAction 变更记录动作。
+type TicketEventAction string
+
+const (
+	TicketEventCreated   TicketEventAction = "created"
+	TicketEventUpdated   TicketEventAction = "updated"
+	TicketEventMoved     TicketEventAction = "moved"
+	TicketEventDeleted   TicketEventAction = "deleted"
+	TicketEventRestored  TicketEventAction = "restored"
+	TicketEventCommented TicketEventAction = "commented"
+)
+
+// TicketEvent 工单变更记录。updated 动作按字段一行；长文本字段只记录字段名，不存值。
+type TicketEvent struct {
+	ID        uint              `gorm:"primarykey"`
+	TicketID  uint              `gorm:"not null;index:idx_ticket_events_ticket,priority:1"`
+	ActorID   uint              `gorm:"not null"`
+	Action    TicketEventAction `gorm:"type:varchar(32);not null"`
+	Field     string            `gorm:"type:varchar(64)"`
+	FromValue *string           `gorm:"type:text"`
+	ToValue   *string           `gorm:"type:text"`
+	CreatedAt time.Time
+
+	Actor User `gorm:"foreignKey:ActorID;constraint:false"`
+}
+
+// TicketProject 工单项目。名称在未删除的项目中唯一。
+type TicketProject struct {
+	ID          uint   `gorm:"primarykey"`
+	Name        string `gorm:"type:varchar(128);not null;uniqueIndex:idx_ticket_projects_name_active,where:deleted_at IS NULL"`
+	Description string `gorm:"type:text"`
+	IsArchived  bool   `gorm:"not null;default:false;index"`
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	DeletedAt   gorm.DeletedAt `gorm:"index"`
 }

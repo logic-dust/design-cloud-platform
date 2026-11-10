@@ -1,27 +1,23 @@
+// Package desktop 是桌面客户端资产分发域：Velopack 主程序发布与 sidecar 插件
+// （latest.zip + latest.version）。属于 L1 业务域，非客户端适配层。
 package desktop
 
 import (
 	"cmp"
 	"context"
-	"encoding/json"
+	"design-cloud-engine/internal/contract"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"design-cloud-engine/internal/server/cache"
-	"design-cloud-engine/internal/server/service/settings/schema"
 )
-
-// desktopSettingsProvider abstracts access to desktop-related settings so tests
-// can inject a fake without a database. *settings.Service satisfies it.
-type desktopSettingsProvider interface {
-	GetDesktopSettings(ctx context.Context) (schema.DesktopSettings, error)
-}
 
 // Asset describes an item in a Velopack release manifest (releases.{channel}.json).
 type Asset struct {
@@ -35,7 +31,7 @@ type Asset struct {
 }
 
 // DesktopReleaseResponse is the top-level API response payload returned for latest desktop release.
-// Download URLs are not included: clients derive them from FileName as /api/version/desktop/download/<FileName>.
+// Download URLs are not included: clients derive them from FileName as /api/desktop/releases/download/<FileName>.
 // PackageID is likewise omitted: each asset carries its own PackageId field.
 type DesktopReleaseResponse struct {
 	Version string  `json:"version"`
@@ -50,26 +46,47 @@ const CacheTTL = 2 * time.Hour
 // Service manages desktop release packages.
 type Service struct {
 	baseDir     string
-	settingsSvc desktopSettingsProvider
+	settingsSvc SettingsReader
 	logger      *slog.Logger
 
-	// cache 是解析结果的进程内缓存：键为 channel，值随文件替换在 CacheTTL 后过期。
+	// cache 是 Velopack 清单的进程内缓存：键为 channel，值随文件替换在 CacheTTL 后过期。
 	cache *cache.TTLCache[string, []Asset]
+	// pluginCache caches parsed plugin releases per plugin/platform key.
+	pluginCache *cache.TTLCache[string, PluginRelease]
+
+	// installerMu guards installerCache. Installer assets are fixed-name files that
+	// are replaced in place on release, so entries are invalidated by size + mtime
+	// rather than by TTL (a stale SHA256 would break installer verification).
+	installerMu    sync.Mutex
+	installerCache map[string]cachedInstallerAsset
+}
+
+// cachedInstallerAsset caches the SHA256/size of a first-run installer file.
+type cachedInstallerAsset struct {
+	modTime time.Time
+	size    int64
+	asset   InstallerAsset
 }
 
 // NewService creates a new desktop service instance.
-func NewService(baseDir string, settingsSvc desktopSettingsProvider, logger *slog.Logger) *Service {
+func NewService(baseDir string, settingsSvc SettingsReader, logger *slog.Logger) *Service {
 	baseDir = cmp.Or(baseDir, "data/releases/desktop")
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		if logger != nil {
 			logger.Warn("failed to create desktop release directory", "dir", baseDir, "error", err)
 		}
 	}
+	pluginsDir := filepath.Join(baseDir, "plugins")
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil && logger != nil {
+		logger.Warn("failed to create desktop plugins directory", "dir", pluginsDir, "error", err)
+	}
 	return &Service{
-		baseDir:     baseDir,
-		settingsSvc: settingsSvc,
-		logger:      logger,
-		cache:       cache.NewTTLCache[string, []Asset](CacheTTL),
+		baseDir:        baseDir,
+		settingsSvc:    settingsSvc,
+		logger:         logger,
+		cache:          cache.NewTTLCache[string, []Asset](CacheTTL),
+		pluginCache:    cache.NewTTLCache[string, PluginRelease](CacheTTL),
+		installerCache: make(map[string]cachedInstallerAsset),
 	}
 }
 
@@ -99,8 +116,8 @@ func capAssets(limit, maxAssets int) int {
 	if maxAssets <= 0 {
 		maxAssets = defaultMaxAssets
 	}
-	if limit > 0 && limit < maxAssets {
-		return limit
+	if limit > 0 {
+		return min(limit, maxAssets)
 	}
 	return maxAssets
 }
@@ -114,20 +131,18 @@ func (s *Service) checkAvailableAndGetMaxAssets(ctx context.Context, platform st
 		return 0, fmt.Errorf("failed to load desktop settings: %w", err)
 	}
 	if !dSettings.ReleasesEnabled {
-		return 0, fmt.Errorf("%w: desktop releases disabled by admin", fs.ErrNotExist)
+		return 0, contract.NewNotFoundError("desktop releases disabled by admin")
 	}
 	if platform != "" && !dSettings.IsPlatformAllowed(platform) {
-		return 0, fmt.Errorf("%w: release for platform %q disabled by admin", fs.ErrNotExist, platform)
+		return 0, contract.NewNotFoundError(fmt.Sprintf("release for platform %q disabled by admin", platform))
 	}
 	return capAssets(0, dSettings.MaxAssets), nil
 }
 
-// canonicalChannel maps a user-supplied platform hint to the manifest channel,
-// i.e. the middle segment of the on-disk manifest file name.
-// Velopack names manifests by channel; the default channel is the pack machine's
-// OS short name. Note macOS uses "osx", not "macos".
+// CanonicalChannel maps a user-supplied platform hint to the on-disk channel
+// (win|linux|osx). Velopack manifests use the same middle segment; macOS is "osx".
 // An empty hint defaults to "win"; unknown hints are rejected.
-func canonicalChannel(p string) (string, bool) {
+func CanonicalChannel(p string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(p)) {
 	case "", "win", "windows":
 		return "win", true
@@ -139,6 +154,9 @@ func canonicalChannel(p string) (string, bool) {
 		return "", false
 	}
 }
+
+// canonicalChannel is the unexported alias used inside this package.
+func canonicalChannel(p string) (string, bool) { return CanonicalChannel(p) }
 
 // manifestFile returns the on-disk manifest file name for a channel.
 func manifestFile(channel string) string {
@@ -153,7 +171,7 @@ func (s *Service) loadManifestAssets(_ context.Context, channel string) ([]Asset
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("%w: release manifest %s not found", fs.ErrNotExist, manifestFile(channel))
+			return nil, contract.NewNotFoundError(fmt.Sprintf("release manifest %s not found", manifestFile(channel)))
 		}
 		return nil, fmt.Errorf("failed to read release manifest: %w", err)
 	}
@@ -177,7 +195,7 @@ func (s *Service) getCachedAssets(ctx context.Context, channel string) ([]Asset,
 //   - platform "" / "win" / "windows"            → releases.win.json
 //   - platform "linux"                           → releases.linux.json
 //   - platform "macos" / "osx" / "darwin"        → releases.osx.json
-//   - any other value                            → 404 (fs.ErrNotExist)
+//   - any other value                            → 422 (contract.NewValidationError)
 //
 // Assets are parsed per channel and cached (TTL CacheTTL). The manifest's file
 // order is the contract (Velopack emits newest-first, Full before Delta), and
@@ -191,7 +209,7 @@ func (s *Service) GetDesktopManifest(ctx context.Context, limit int, platform st
 
 	channel, ok := canonicalChannel(platform)
 	if !ok {
-		return DesktopReleaseResponse{}, fmt.Errorf("%w: unsupported platform %q", fs.ErrNotExist, platform)
+		return DesktopReleaseResponse{}, contract.NewNotFoundError(fmt.Sprintf("unsupported platform %q", platform))
 	}
 
 	assets, err := s.getCachedAssets(ctx, channel)
@@ -199,7 +217,7 @@ func (s *Service) GetDesktopManifest(ctx context.Context, limit int, platform st
 		return DesktopReleaseResponse{}, err
 	}
 	if len(assets) == 0 {
-		return DesktopReleaseResponse{}, fmt.Errorf("%w: release manifest or assets not found", fs.ErrNotExist)
+		return DesktopReleaseResponse{}, contract.NewNotFoundError("release manifest or assets not found")
 	}
 
 	// Cap: client-supplied limit can only narrow, never exceed, the admin's maxAssets.
@@ -223,7 +241,7 @@ func (s *Service) GetLatestPackagePath(ctx context.Context, platform string) (st
 		return "", err
 	}
 	if len(manifest.Assets) == 0 || manifest.Assets[0].FileName == "" {
-		return "", fmt.Errorf("%w: no latest release package found", fs.ErrNotExist)
+		return "", contract.NewNotFoundError("no latest release package found")
 	}
 	return s.ResolveDownloadPath(ctx, manifest.Assets[0].FileName)
 }
@@ -235,13 +253,20 @@ func (s *Service) ResolveDownloadPath(ctx context.Context, fileName string) (str
 	}
 
 	cleanName := filepath.Base(fileName)
+	if cleanName == "" || cleanName == "." || cleanName == ".." {
+		return "", contract.NewValidationError("invalid filename")
+	}
 	if cleanName != fileName || strings.Contains(fileName, "..") || strings.ContainsAny(fileName, "/\\") {
-		return "", fmt.Errorf("%w: invalid filename", fs.ErrInvalid)
+		return "", contract.NewValidationError("invalid filename")
 	}
 
 	fullPath := filepath.Join(s.baseDir, cleanName)
-	if _, err := os.Stat(fullPath); err != nil {
-		return "", fmt.Errorf("%w: file not found", fs.ErrNotExist)
+	info, err := os.Lstat(fullPath)
+	if err != nil {
+		return "", contract.NewNotFoundError("file not found")
+	}
+	if info.IsDir() || !info.Mode().IsRegular() {
+		return "", contract.NewValidationError("invalid filename")
 	}
 	return fullPath, nil
 }

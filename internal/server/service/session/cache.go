@@ -12,15 +12,17 @@ import (
 const (
 	defaultSessionRateLimit = 50  // req/s per session
 	defaultSessionRateBurst = 150 // burst token capacity per session
+	// maxSessionCacheEntries bounds in-memory token maps between cleanup ticks.
+	maxSessionCacheEntries = 100_000
 )
 
 // sessionInfoCache is an in-memory token→model.Session cache that eliminates per-request DB lookups.
 //
 // Design:
 //   - byToken is the primary index (token → *model.Session), used on every authenticated request.
-//   - byUsername is a reverse index (username → []token) used to bulk-evict a user's sessions
+//   - byUsername is a reverse index (username → []token) used to bulk-invalidate a user's sessions
 //     when their role changes.
-//   - Same-server eviction (Delete/DeleteByID) is synchronous: the caller holds the write lock
+//   - Same-server invalidation (Delete/DeleteByID) is synchronous: the caller holds the write lock
 //     and removes the entry immediately, so there is no delay on the current server.
 type sessionInfoCache struct {
 	mu         sync.RWMutex
@@ -60,17 +62,37 @@ func (c *sessionInfoCache) put(info *model.Session) {
 		c.byUsername[info.Username] = make(map[string]struct{})
 	}
 	c.byUsername[info.Username][info.Token] = struct{}{}
+	c.enforceMaxEntriesLocked(time.Now())
 }
 
-// evictToken removes a single token from both indexes synchronously.
-func (c *sessionInfoCache) evictToken(token string) {
+// enforceMaxEntriesLocked drops expired entries first, then arbitrary extras
+// until len(byToken) <= maxSessionCacheEntries. Caller must hold write lock.
+func (c *sessionInfoCache) enforceMaxEntriesLocked(now time.Time) {
+	if len(c.byToken) <= maxSessionCacheEntries {
+		return
+	}
+	for token, info := range c.byToken {
+		if info == nil || !now.Before(info.ExpiresAt) {
+			c.removeToken(token)
+		}
+	}
+	for token := range c.byToken {
+		if len(c.byToken) <= maxSessionCacheEntries {
+			return
+		}
+		c.removeToken(token)
+	}
+}
+
+// invalidateToken removes a single token from both indexes synchronously.
+func (c *sessionInfoCache) invalidateToken(token string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.removeToken(token)
 }
 
-// evictByUsername removes all cached sessions for a user (e.g. after role change).
-func (c *sessionInfoCache) evictByUsername(username string) {
+// invalidateByUsername removes all cached sessions for a user (e.g. after role change).
+func (c *sessionInfoCache) invalidateByUsername(username string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for token := range c.byUsername[username] {
@@ -87,10 +109,10 @@ func (c *sessionInfoCache) clear() {
 	clear(c.byUsername)
 }
 
-// evictExpired removes all entries whose ExpiresAt <= now from both indexes.
+// invalidateExpired removes all entries whose ExpiresAt <= now from both indexes.
 // It is safe to call concurrently; it acquires the write lock internally.
 // Returns the number of entries removed.
-func (c *sessionInfoCache) evictExpired(now time.Time) int {
+func (c *sessionInfoCache) invalidateExpired(now time.Time) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

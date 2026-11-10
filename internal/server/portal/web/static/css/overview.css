@@ -1,0 +1,987 @@
+/* ============================================================
+   设计云平台 (Design Cloud Platform) — 运行态势感知大屏 CSS
+   包含: 屏幕网格、顶栏、指标卡片、作业调度、存储图表与数据表格
+   ============================================================ */
+
+/* ---------- 屏幕自适应容器 ---------- */
+.screen {
+  position: relative;
+  z-index: 1;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  padding: 0 clamp(1.5rem, 3.2vw, 4rem) clamp(0.6rem, 1.2vh, 1.2rem);
+  width: min(100%, 1920px);
+  margin: 0 auto;
+}
+
+/* ---------- 队列表空状态 ---------- */
+.queue-table-empty {
+  text-align: center;
+  padding: clamp(1rem, 2vh, 1.5rem);
+}
+
+/* ---------- Header 顶栏 ---------- */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: clamp(0.4rem, 0.8vh, 0.75rem) 0.25rem clamp(0.35rem, 0.7vh, 0.6rem);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-base);
+}
+
+header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--primary-cyan), var(--primary-blue), transparent);
+  opacity: 0.6;
+}
+
+.title-wrap {
+  display: flex;
+  align-items: center;
+  gap: clamp(0.5rem, 1vw, 0.85rem);
+}
+
+.title h1 {
+  font-size: clamp(1.15rem, 0.95rem + 0.8vw, 1.55rem);
+  font-weight: 800;
+  letter-spacing: 2px;
+  background: var(--grad-title);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  white-space: nowrap;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5em;
+}
+
+.title h1 .sub-title {
+  font-size: clamp(0.75rem, 0.65rem + 0.3vw, 0.95rem);
+  font-weight: 500;
+  letter-spacing: 1px;
+  color: var(--primary-cyan);
+  opacity: 0.9;
+}
+
+.title h1 .sys-clock {
+  font-size: clamp(0.75rem, 0.65rem + 0.3vw, 0.95rem);
+  font-weight: 600;
+  letter-spacing: 0;
+  white-space: nowrap;
+  min-width: 19ch;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-updated {
+  font-size: clamp(0.68rem, 0.6rem + 0.2vw, 0.75rem);
+  font-weight: 400;
+  letter-spacing: 0.5px;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: clamp(0.5rem, 0.9vw, 0.85rem);
+  font-size: clamp(0.75rem, 0.7rem + 0.2vw, 0.875rem);
+  color: var(--text-secondary);
+}
+
+/* ---------- 共享连接状态 Badge (Connection Status) ---------- */
+.conn-status {
+  display: flex;
+  align-items: center;
+  gap: 0.45em;
+  padding: 0.25em 0.85em;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-chip);
+  font-size: clamp(0.72rem, 0.68rem + 0.2vw, 0.8rem);
+  transition: all 0.3s;
+}
+
+.conn-status .dot {
+  width: 0.55em;
+  height: 0.55em;
+  border-radius: 50%;
+  background: var(--accent-emerald);
+  box-shadow: 0 0 6px var(--accent-emerald);
+  animation: pulse-ring 2s infinite ease-in-out;
+}
+
+.conn-status.offline {
+  border-color: color-mix(in srgb, var(--accent-rose) 40%, transparent);
+  background: color-mix(in srgb, var(--accent-rose) 10%, transparent);
+  color: var(--accent-rose);
+}
+
+.conn-status.offline .dot {
+  background: var(--accent-rose);
+  box-shadow: 0 0 6px var(--accent-rose);
+}
+
+@keyframes pulse-ring {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.85);
+  }
+}
+
+/* ---------- Main 布局 ---------- */
+main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding-top: 6px;
+  padding-bottom: 8px;
+}
+
+/* ================= Top Metric Cards Section ================= */
+/* 纯动态等宽栅格系统（第一行单卡宽度视觉绝对 1:1 等宽）：
+   - 有 GPU 时 (1fr : 2fr : 1fr)：
+     - 第 1 列 (集群节点)：1 张单卡 = 1fr
+     - 第 2 列 (中列)：第一行内嵌 2 张单卡 = 2fr / 2 = 1fr
+     - 第 3 列 (GPU 列)：单卡宽度 = 1fr
+     -> 顶排 4 张单卡完全同级别等宽（1 : 1 : 1 : 1）！
+   - 无 GPU 时 (1fr : 2fr)：
+     - 第 1 列 (集群节点)：1 张单卡 = 1fr
+     - 第 2 列 (中列)：第一行内嵌 2 张单卡 = 2fr / 2 = 1fr
+     -> 顶排 3 张单卡完全同级别等宽（1 : 1 : 1）！ */
+.top-cards-section {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1fr) minmax(28rem, 2fr) minmax(14rem, 1fr);
+  gap: var(--space-md);
+  align-items: stretch;
+  flex: none;
+}
+
+.top-cards-section.no-gpu {
+  grid-template-columns: minmax(14rem, 1fr) minmax(28rem, 2fr);
+}
+
+.top-cards-section.no-gpu .col-gpu-spec {
+  display: none;
+}
+
+.col-major {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+.col-config-spec {
+  display: flex;
+}
+
+.col-config-spec .node-overview-card {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: clamp(0.75rem, 1.2vw, 1.15rem) clamp(0.85rem, 1.4vw, 1.25rem);
+}
+
+.col-middle {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+.col-gpu-spec {
+  display: flex;
+}
+
+.gpu-dyn-cards-col {
+  width: 100%;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: var(--space-md);
+  height: 100%;
+  min-width: 0;
+}
+
+.middle-row-1 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-md);
+  align-items: stretch;
+}
+
+.middle-row-1 .metric-card {
+  height: 100%;
+}
+
+.middle-row-1 .metric-card .val-num {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.middle-row-1 .metric-card .val-denom {
+  font-size: 13px;
+}
+
+.middle-row-1 .metric-card .val-unit {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.metric-card-stack {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 利用率卡片（CPU / GPU）：大字 Display + 水平胶囊进度条，紧凑结构与沉底脚注 */
+.metric-card-util {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.metric-card-util .card-info {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+}
+
+.metric-card-util .util-value {
+  font-size: 29px;
+  line-height: 36px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+}
+
+.meter-pill-track {
+  width: 100%;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--track-bg);
+  overflow: hidden;
+  margin: 0;
+}
+
+.meter-pill-bar {
+  --bar-pct: 0%;
+  width: var(--bar-pct);
+  height: 100%;
+  border-radius: var(--radius-pill);
+  transition: width 0.5s ease;
+}
+
+.metric-card-stack .card-top-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+  width: 100%;
+  min-width: 0;
+}
+
+.metric-card-stack .card-top-row .card-info {
+  flex: 1;
+  max-width: 340px;
+  min-width: 0;
+}
+
+.metric-card-stack .card-top-row .card-ring {
+  margin-left: auto;
+  flex: none;
+}
+
+.spec-main-body .card-ring-nodes {
+  margin-left: auto;
+  flex: none;
+}
+
+.card-footnote {
+  margin-top: auto;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-secondary);
+  letter-spacing: 0;
+  white-space: normal;
+}
+
+.node-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  max-width: 260px;
+}
+
+.node-status-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.node-status-row .spec-label {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.node-status-row .val-num {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.usage-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  flex: 1;
+}
+
+.usage-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.usage-row .spec-label {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.usage-row .usage-val {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.usage-row .val-num {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.load-metric-card {
+  align-items: stretch;
+  height: 100%;
+}
+
+.load-card-info {
+  width: 100%;
+  height: 100%;
+  gap: 8px;
+}
+
+.load-cols {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin: 0;
+  width: 100%;
+}
+
+.load-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  cursor: default;
+}
+
+.load-col-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.load-col .val-num {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+/* 统一小卡基本规范 (Metric Card Layout) */
+.metric-card {
+  padding: clamp(0.75rem, 1.2vw, 1.15rem) clamp(0.85rem, 1.4vw, 1.25rem);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+  border-radius: var(--radius-md);
+}
+
+.metric-card .card-info {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.metric-card .card-label {
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  text-align: left;
+  font-size: clamp(0.85rem, 0.75rem + 0.3vw, 1rem);
+  line-height: 1.4;
+  font-weight: 600;
+  color: var(--text-main);
+  letter-spacing: 0.2px;
+  margin-bottom: 0;
+}
+
+.metric-card .card-label::before {
+  display: none;
+}
+
+.metric-card .card-ring {
+  width: clamp(4.5rem, 5vw, 5.5rem);
+  height: clamp(4.5rem, 5vw, 5.5rem);
+  flex: none;
+  align-self: flex-start;
+}
+
+.metric-card .card-ring text {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 环形进度弧线：统一过渡（提取自原内联样式；stroke 过渡供动态换色使用） */
+.ring-arc {
+  transition: stroke-dashoffset 0.8s ease, stroke 0.3s ease;
+}
+
+/* 集群节点大卡（置于 .col-config-spec flex 列内，勿再写旧网格 span） */
+.node-overview-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0;
+}
+
+.card-ring-nodes {
+  width: clamp(4.8rem, 5.5vw, 6rem);
+  height: clamp(4.8rem, 5.5vw, 6rem);
+}
+
+.spec-col-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 0;
+  width: 100%;
+  height: 100%;
+  flex: 1;
+}
+
+.spec-main-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.spec-divider-h {
+  height: 1px;
+  background: var(--border-subtle);
+  border: none;
+  margin: 12px 0;
+}
+
+.spec-sub-specs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: flex-start;
+  flex: 1;
+}
+
+.spec-sub-specs .card-footnote {
+  margin-top: auto;
+}
+
+.spec-sub-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 13px;
+  line-height: 20px;
+  padding: 0;
+}
+
+.spec-sub-item .spec-label {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.spec-sub-item .spec-val-box {
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+  white-space: nowrap;
+}
+
+.spec-sub-item .spec-val-box .val-num {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+.spec-sub-item .spec-val-box .val-denom {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--text-main);
+}
+
+.spec-sub-item .spec-val-box .val-denom.text-violet {
+  color: var(--primary-violet);
+}
+
+.spec-sub-item .spec-val-box .val-unit {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  margin-left: 2px;
+}
+
+.load-bar-lbl {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.load-bar-track {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--track-bg);
+  overflow: hidden;
+  width: 100%;
+}
+
+.load-bar-track i {
+  --bar-pct: 0%;
+  display: block;
+  width: var(--bar-pct);
+  height: 100%;
+  border-radius: var(--radius-pill);
+  transition: width 0.5s ease, background-color 0.3s ease;
+}
+
+.load-normal {
+  color: var(--text-main) !important;
+}
+
+.load-busy {
+  color: var(--accent-amber) !important;
+}
+
+.load-overload {
+  color: var(--accent-rose) !important;
+}
+
+.load-normal-bg {
+  background: var(--primary-cyan);
+}
+
+.load-busy-bg {
+  background: var(--accent-amber);
+}
+
+.load-overload-bg {
+  background: var(--accent-rose);
+}
+
+.sched-ring-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.sched-ring {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.val-num {
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+/* ================= Row 2 & 3: 作业调度 & 存储监控 (全宽独立行) ================= */
+.section-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: none;
+}
+
+.job-split-row {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) 2fr;
+  gap: var(--space-md);
+  align-items: stretch;
+}
+
+.job-status-card {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+.job-status-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  gap: 20px;
+  flex: 1;
+}
+
+.job-donut-wrap {
+  width: 140px;
+  height: 140px;
+  flex: none;
+}
+
+.job-donut-wrap svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* 图例：名称与数字共用一个固定宽度列区，行内 space-between（数字列按 9999+ 预留） */
+.job-legend-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-width: 8.5rem;
+  max-width: 11rem;
+}
+
+.job-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.job-legend-columns {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 1;
+  min-width: 0;
+  gap: 12px;
+}
+
+.job-legend-item .status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.status-dot.dot-success { background: var(--accent-emerald); }
+.status-dot.dot-accent { background: var(--primary-cyan); }
+.status-dot.dot-warning { background: var(--accent-amber); }
+.status-dot.dot-neutral { background: var(--text-muted); }
+.status-dot.dot-danger { background: var(--accent-rose); }
+
+.job-legend-item .legend-name {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.job-legend-item .legend-val {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+  min-width: 5.5ch;
+}
+
+.queue-table-card {
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+}
+
+.queue-table-card .table-wrapper {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: min(40vh, 20rem);
+}
+
+.storage-full-card {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.storage-table-wrapper {
+  max-height: 240px;
+}
+
+/* 存储 Donut Section */
+.storage-donut-section {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 12px 16px;
+  background: var(--bg-chip);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  flex: none;
+}
+
+.donut-svg-wrap {
+  width: 64px;
+  height: 64px;
+  position: relative;
+  flex: none;
+}
+
+.donut-svg-wrap svg {
+  width: 100%;
+  height: 100%;
+}
+
+.storage-cap-summary {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex: 1;
+}
+
+.storage-cap-summary .cap-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.storage-cap-summary .cap-label {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.storage-cap-summary .cap-value {
+  font-size: 21px;
+  line-height: 28px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.storage-summary-note {
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-secondary);
+  text-align: right;
+  margin-left: auto;
+}
+
+/* ---------- 共享存储/资源 Table 样式 ---------- */
+.table-wrapper {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+thead th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 6px 8px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border-subtle);
+  position: sticky;
+  top: 0;
+  background: var(--bg-canvas);
+  z-index: 2;
+}
+
+tbody td {
+  padding: 6px 8px;
+  color: var(--text-main);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  transition: background 0.2s;
+}
+
+tbody tr:hover {
+  background: rgba(56, 189, 248, 0.04);
+}
+
+.badge-type {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid;
+}
+
+.badge-type.nfs {
+  color: var(--primary-cyan);
+  border-color: rgba(56, 189, 248, 0.4);
+  background: rgba(56, 189, 248, 0.1);
+}
+
+.badge-type.lustre {
+  color: var(--primary-blue);
+  border-color: rgba(99, 102, 241, 0.4);
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.badge-type.ceph {
+  color: var(--accent-amber);
+  border-color: rgba(251, 191, 36, 0.4);
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.badge-type.gpfs {
+  color: var(--primary-violet);
+  border-color: rgba(168, 85, 247, 0.4);
+  background: rgba(168, 85, 247, 0.1);
+}
+
+.table-bar-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.table-bar {
+  width: 90px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--track-bg);
+  overflow: hidden;
+}
+
+.table-bar i {
+  --bar-pct: 0%;
+  display: block;
+  width: var(--bar-pct);
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(
+    90deg,
+    var(--accent-emerald),
+    color-mix(in srgb, var(--accent-emerald) 72%, #000)
+  );
+  transition: width 0.5s ease, background 0.3s;
+}
+
+.table-bar.warn i {
+  background: linear-gradient(
+    90deg,
+    var(--accent-amber),
+    color-mix(in srgb, var(--accent-amber) 72%, #000)
+  );
+}
+
+.table-bar.danger i {
+  background: linear-gradient(
+    90deg,
+    var(--accent-rose),
+    color-mix(in srgb, var(--accent-rose) 72%, #000)
+  );
+}
+
+.q-name-badge {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-main);
+  background: var(--bg-chip);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  display: inline-block;
+}
+
+/* 文本与状态高亮辅助类 */
+.text-bold { font-weight: 600; }
+.text-main { color: var(--text-main); }
+.text-muted { color: var(--text-muted); }
+.text-secondary { color: var(--text-secondary); }
+.text-emerald { color: var(--accent-emerald); }
+.text-teal { color: var(--accent-teal); }
+.text-cyan { color: var(--primary-cyan); }
+.text-violet { color: var(--primary-violet); }
+.text-amber { color: var(--accent-amber); }
+.text-rose { color: var(--accent-rose); }
+.bg-cyan { background: var(--primary-cyan); }
+.bg-teal { background: var(--accent-teal); }
+
+.queue-metric-alloc {
+  font-size: 13px;
+}
+
+.storage-sampled-at {
+  font-size: 11px;
+  white-space: nowrap;
+}

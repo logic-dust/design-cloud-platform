@@ -4,36 +4,38 @@
 #   install.sh server [选项]   # 读 config：物化二进制 + 拷贝 canonical unit + 生成配置
 #   install.sh agent  [选项]   # configless：物化二进制 + 领证 + canonical unit + drop-in
 #
-# 生产环境请用 RPM：make package && rpm -Uvh build/packages/design-cloud-engine-*.rpm
+# 生产环境请用 RPM：make package && rpm -Uvh build/design-cloud-engine-*.rpm
 # 本脚本只服务开发机 / 无包环境；有 RPM 的机器以包为准。
 #
 # 制品源与执行位分离：二进制从共享制品目录（可为 NFS）物化到本地盘，
-# ExecStart 只指向本地——systemd 不能从 NFS 执行；launcher capability 也不能落在 NFS。
+# ExecStart 只指向本地——systemd 不能从 NFS 执行；dc-exec capability 也不能落在 NFS。
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=lib/install-common.sh
+. "${SCRIPT_DIR}/lib/install-common.sh"
 
 # ============================================================
 # 配置（按需修改）
 # ============================================================
-SERVER_NAME="design-cloud-engine"
-LAUNCHER_NAME="dc-launcher"
-UNIT_TEMPLATE="${SCRIPT_DIR}/design-cloud-engine.service"
+SERVER_NAME="dc-engine"
+EXEC_BIN_NAME="dc-exec"
+UNIT_TEMPLATE="${SCRIPT_DIR}/systemd/design-cloud-engine.service"
 # 制品源与执行位分离（systemd 不得从 NFS 执行：挂载晚于启动、运行中缺页 SIGBUS、
 # hard mount 不可达时进程进入 D 状态连 SIGKILL 都杀不掉）：
 #   ARTIFACT_DIR 共享制品目录，一次上传、多节点取用（可为 NFS）
 #   INSTALL_DIR  本地执行位，ExecStart 只指向这里
 ARTIFACT_DIR="${DCE_ARTIFACT_DIR:-/share/apps/design-cloud}"
-INSTALL_DIR="${DCE_INSTALL_DIR:-/opt/design-cloud}"
+INSTALL_DIR="${DCE_INSTALL_DIR:-/opt/dce}"
 CONFIG_DIR="${DCE_CONFIG_DIR:-/etc/design-cloud}"
 LOG_DIR="${DCE_LOG_DIR:-/var/log/design-cloud}"
 SERVICE_DIR="${DCE_SERVICE_DIR:-/etc/systemd/system}"
 SERVICE_NAME="${DCE_SERVICE_NAME:-design-cloud-engine}"
 BUILD_DIR="${DCE_BUILD_DIR:-${PROJECT_ROOT}/build}"
-SERVICE_USER="${DCE_SERVICE_USER:-design-cloud}"
-SERVICE_GROUP="${DCE_SERVICE_GROUP:-design-cloud}"
+SERVICE_USER="${DCE_SERVICE_USER:-dce}"
+SERVICE_GROUP="${DCE_SERVICE_GROUP:-dce}"
 CONFIG_SAMPLE_NAME="config.example.toml"
 CONFIG_NAME="config.toml"
 
@@ -72,8 +74,8 @@ usage() {
 用法: install.sh <server|agent> [选项]
 
 角色（位置参数，必填；仅影响无包引导流程，RPM 安装不分角色）:
-  server   读 config.toml。流程：物化 engine+launcher → 生成配置 → 安装 unit。
-  agent    configless。流程：物化 engine+launcher → node register →
+  server   读 config.toml。流程：物化 engine+dc-exec → 生成配置 → 安装 unit。
+  agent    configless。流程：物化 engine+dc-exec → node register →
            安装 canonical unit + configless drop-in 并启动。
            NodeID 取 os.Hostname()；--servers 缺省取 --portal-url 的主机名。
 
@@ -89,7 +91,7 @@ agent 选项:
   --insecure-http      允许明文 HTTP Portal URL 注册（高危：明文传输 Token 与密钥）
 
 通用选项:
-  --install-dir <dir>   本地执行位（ExecStart 指向此处，默认 /opt/design-cloud）
+  --install-dir <dir>   本地执行位（ExecStart 指向此处，默认 /opt/dce）
   --artifact-dir <dir>  共享制品源（一次上传多处取用，默认 /share/apps/design-cloud）
   --service-user/-group/-name/-dir <v>  -h|--help
 
@@ -199,9 +201,9 @@ check_binaries() {
     exit 1
   fi
 
-  if [[ ! -f "${src}/${LAUNCHER_NAME}" ]]; then
-    log_error "未找到 Launcher 二进制: ${src}/${LAUNCHER_NAME}"
-    log_info "请先执行: make launcher"
+  if [[ ! -f "${src}/${EXEC_BIN_NAME}" ]]; then
+    log_error "未找到 dc-exec 二进制: ${src}/${EXEC_BIN_NAME}"
+    log_info "请先执行: make dcexec"
     exit 1
   fi
 
@@ -213,22 +215,8 @@ check_binaries() {
 # ============================================================
 ensure_service_user() {
   log_info "确保服务用户存在..."
-
-  if ! getent group "${SERVICE_GROUP}" >/dev/null; then
-    groupadd --system "${SERVICE_GROUP}"
-    log_success "创建组: ${SERVICE_GROUP}"
-  fi
-
-  if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
-    useradd --system \
-      --gid "${SERVICE_GROUP}" \
-      --home-dir "${INSTALL_DIR}" \
-      --shell /usr/sbin/nologin \
-      "${SERVICE_USER}"
-    log_success "创建用户: ${SERVICE_USER}"
-  else
-    log_success "用户已存在: ${SERVICE_USER}"
-  fi
+  dce_ensure_service_user "${SERVICE_USER}" "${SERVICE_GROUP}"
+  log_success "服务用户: ${SERVICE_USER}:${SERVICE_GROUP}"
 }
 
 # ============================================================
@@ -298,21 +286,17 @@ install_engine() {
 }
 
 # ============================================================
-# 安装 Launcher（含 setcap；RPM 路径由 %post 负责）
+# 安装 DcExec（含 setcap；RPM 路径由 %post 负责）
 # ============================================================
-install_launcher() {
-  log_info "物化 Launcher 到本地执行位..."
-  materialize_binary "${LAUNCHER_NAME}" 0700 "$(artifact_src)"
-  if command -v setcap >/dev/null 2>&1; then
-    setcap cap_setuid,cap_setgid+ep "${INSTALL_DIR}/${LAUNCHER_NAME}"
-  elif [[ -x /sbin/setcap ]]; then
-    /sbin/setcap cap_setuid,cap_setgid+ep "${INSTALL_DIR}/${LAUNCHER_NAME}"
-  elif [[ -x /usr/sbin/setcap ]]; then
-    /usr/sbin/setcap cap_setuid,cap_setgid+ep "${INSTALL_DIR}/${LAUNCHER_NAME}"
+install_dcexec() {
+  log_info "物化 dc-exec 到本地执行位..."
+  materialize_binary "${EXEC_BIN_NAME}" 0700 "$(artifact_src)"
+  if dce_apply_exec_setcap "${INSTALL_DIR}/${EXEC_BIN_NAME}"; then
+    :
   else
-    log_warning "setcap 不可用；launcher 启动时 L0 能力位自检会失败"
+    log_warning "setcap 不可用；dc-exec 启动时 L0 能力位自检会失败"
   fi
-  log_success "Launcher 已安装: ${INSTALL_DIR}/${LAUNCHER_NAME}"
+  log_success "dc-exec 已安装: ${INSTALL_DIR}/${EXEC_BIN_NAME}"
 }
 
 # ============================================================
@@ -329,11 +313,11 @@ create_systemd_service() {
   local unit_dst="${SERVICE_DIR}/${SERVICE_NAME}.service"
   # 非默认 INSTALL_DIR / 用户时做路径与身份替换；默认布局与包内 unit 一致。
   sed \
-    -e "s|/opt/design-cloud|${INSTALL_DIR}|g" \
+    -e "s|/opt/dce|${INSTALL_DIR}|g" \
     -e "s|/etc/design-cloud|${CONFIG_DIR}|g" \
     -e "s|/var/log/design-cloud|${LOG_DIR}|g" \
-    -e "s|^User=design-cloud|User=${SERVICE_USER}|" \
-    -e "s|^Group=design-cloud|Group=${SERVICE_GROUP}|" \
+    -e "s|^User=dce$|User=${SERVICE_USER}|" \
+    -e "s|^Group=dce$|Group=${SERVICE_GROUP}|" \
     "${UNIT_TEMPLATE}" >"${unit_dst}"
 
   if [[ "${MODE}" == "agent" ]]; then
@@ -351,6 +335,7 @@ EOF
   if [[ "${EUID}" -eq 0 ]] && command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
   fi
+  dce_systemd_tmpfiles_create
   log_success "systemd 服务已安装: ${unit_dst}"
 }
 
@@ -440,9 +425,11 @@ apply_permissions() {
   # 对它整体 chown 会波及无关文件。
   chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/${SERVER_NAME}"
   chmod 0755 "${INSTALL_DIR}/${SERVER_NAME}"
-  if [[ -f "${INSTALL_DIR}/${LAUNCHER_NAME}" ]]; then
-    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/${LAUNCHER_NAME}"
-    chmod 0700 "${INSTALL_DIR}/${LAUNCHER_NAME}"
+  if [[ -f "${INSTALL_DIR}/${EXEC_BIN_NAME}" ]]; then
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/${EXEC_BIN_NAME}"
+    chmod 0700 "${INSTALL_DIR}/${EXEC_BIN_NAME}"
+    # Linux kernel clears security.capability on chown; always re-apply after ownership change.
+    dce_apply_exec_setcap "${INSTALL_DIR}/${EXEC_BIN_NAME}" || true
   fi
   mkdir -p "${LOG_DIR}"
   chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${LOG_DIR}"
@@ -514,7 +501,7 @@ show_summary() {
     echo "  journalctl -u ${SERVICE_NAME} | grep -E 'Starting AGENT|Successfully registered'"
     echo "  控制节点侧应出现: Certificate fingerprint verified → Node marked online in DB"
   else
-    echo "  • Launcher: ${INSTALL_DIR}/${LAUNCHER_NAME}"
+    echo "  • dc-exec: ${INSTALL_DIR}/${EXEC_BIN_NAME}"
     echo "  • 配置:    ${CONFIG_DIR}/${CONFIG_NAME}"
     echo ""
     log_info "下一步:"
@@ -548,7 +535,7 @@ main() {
   create_directories
   stop_existing_service
   install_engine
-  install_launcher
+  install_dcexec
   create_systemd_service
   if [[ "${MODE}" == "server" ]]; then
     create_config

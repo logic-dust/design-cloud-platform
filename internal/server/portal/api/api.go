@@ -4,35 +4,35 @@ import (
 	"context"
 	"log/slog"
 
-	"design-cloud-engine/internal/config"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 	"design-cloud-engine/internal/server/portal/middleware"
-	"design-cloud-engine/internal/server/service"
 
 	"github.com/labstack/echo/v5"
 )
 
 type Handler struct {
-	policies          map[middleware.APIPolicy][]echo.MiddlewareFunc
-	dashboard         *dashboardHandler
-	sessionHandler    *sessionHandler
-	userHandler       *userHandler
-	appHandler        *appHandler
-	nodeHandler       *nodeHandler
-	settingsHandler   *settingsHandler
-	licenseHandler    *licenseHandler
-	schedulerHandler  *schedulerHandler
-	connectionHandler *connectionHandler
-	fileHandler       *fileHandler
-	ticketHandler     *ticketHandler
-	auditHandler      *auditHandler
-	connProxyHandler  *connProxyHandler
-	systemHandler     *systemHandler
-	storageHandler    *storageHandler
-	banHandler        *banHandler
-	versionHandler    *versionHandler
-	alertHandler      *alertHandler
-	eventsHandler     *eventsHandler
+	policies             map[middleware.APIPolicy][]echo.MiddlewareFunc
+	overviewHandler      *overviewHandler
+	sessionHandler       *sessionHandler
+	userHandler          *userHandler
+	appHandler           *appHandler
+	nodeHandler          *nodeHandler
+	settingsHandler      *settingsHandler
+	licenseHandler       *licenseHandler
+	schedulerHandler     *schedulerHandler
+	connectionHandler    *connectionHandler
+	fileHandler          *fileHandler
+	ticketHandler        *ticketHandler
+	auditHandler         *auditHandler
+	connProxyHandler     *connProxyHandler
+	systemHandler        *systemHandler
+	storageHandler       *storageHandler
+	banHandler           *banHandler
+	versionHandler       *versionHandler
+	desktopClientHandler *desktopClientHandler
+	alertHandler         *alertHandler
+	eventsHandler        *eventsHandler
 }
 
 // defaultRestrictedSessionAllowedPaths 定义密码已过期受限会话允许放行的 API 路由白名单。
@@ -44,18 +44,21 @@ var defaultRestrictedSessionAllowedPaths = []string{
 	"/api/sessions",
 }
 
-// NewHandler receives the full service container ONLY for top-level assembly.
+// NewHandler assembles all API handlers from an explicit dependency set.
 // Sub-handlers MUST receive narrow dependencies via factory functions.
-// DO NOT pass *service.Container into individual business handlers.
-func NewHandler(svc *service.Container, cfg *config.Config, logger *slog.Logger) *Handler {
-	var isDashboardEnabled func(ctx context.Context) bool
-	if svc.Settings != nil {
-		isDashboardEnabled = svc.Settings.IsDashboardEnabled
+// DO NOT pass Dependencies into individual business handlers.
+func NewHandler(deps Dependencies, cfg *config.Config, logger *slog.Logger) *Handler {
+	desktopClientHandler := newDesktopClientHandler(deps.Desktop)
+	var isOverviewEnabled func(ctx context.Context) bool
+	var allowUserCluster func(ctx context.Context) bool
+	if deps.Settings != nil {
+		isOverviewEnabled = deps.Settings.IsOverviewEnabled
+		allowUserCluster = deps.Settings.IsAllowUserClusterOverview
 	}
 	return &Handler{
-		policies: middleware.BuildRoutePolicies(svc.Session, svc.Security, middleware.PolicyConfig{
+		policies: middleware.BuildRoutePolicies(deps.Session, deps.Security, middleware.PolicyConfig{
 			EnableThreeRoles:              cfg.Admin.EnableThreeRoles,
-			IsDashboardEnabled:            isDashboardEnabled,
+			IsOverviewEnabled:             isOverviewEnabled,
 			RestrictedSessionAllowedPaths: defaultRestrictedSessionAllowedPaths,
 			RateLimit:                     cfg.Portal.RateLimit,
 			RateBurst:                     cfg.Portal.RateBurst,
@@ -64,25 +67,26 @@ func NewHandler(svc *service.Container, cfg *config.Config, logger *slog.Logger)
 			WSRateLimit:                   cfg.Portal.WSRateLimit,
 			WSRateBurst:                   cfg.Portal.WSRateBurst,
 		}),
-		dashboard:         newDashboardHandler(svc.Dashboard, isDashboardEnabled),
-		sessionHandler:    newSessionHandler(svc, cfg),
-		userHandler:       newUserHandler(svc, cfg, logger),
-		appHandler:        newAppHandler(svc.App),
-		nodeHandler:       newNodeHandler(svc.Node, cfg),
-		settingsHandler:   newSettingsHandler(svc),
-		licenseHandler:    newLicenseHandler(svc),
-		schedulerHandler:  newSchedulerHandler(svc),
-		connectionHandler: newConnectionHandler(svc, logger),
-		fileHandler:       newFileHandler(svc),
-		ticketHandler:     newTicketHandler(svc.Ticket, svc.User),
-		auditHandler:      newAuditHandler(svc.Audit),
-		connProxyHandler:  newConnProxyHandler(svc, logger, cfg.Portal.WebSocketHost),
-		systemHandler:     newSystemHandler(svc),
-		storageHandler:    newStorageHandler(svc),
-		banHandler:        newBanHandler(svc.Security),
-		versionHandler:    newVersionHandler(svc.Desktop),
-		alertHandler:      newAlertHandler(svc.Alert),
-		eventsHandler:     &eventsHandler{hub: svc.Push, logger: logger},
+		overviewHandler:      newOverviewHandler(deps.Overview, allowUserCluster),
+		sessionHandler:       newSessionHandler(deps.Session, deps.File, cfg),
+		userHandler:          newUserHandler(deps.User, deps.Role, deps.Identity, cfg, logger),
+		appHandler:           newAppHandler(deps.App),
+		nodeHandler:          newNodeHandler(deps.Node, cfg),
+		settingsHandler:      newSettingsHandler(deps.Settings),
+		licenseHandler:       newLicenseHandler(deps.License),
+		schedulerHandler:     newSchedulerHandler(deps.Scheduler),
+		connectionHandler:    newConnectionHandler(deps.Connection, logger),
+		fileHandler:          newFileHandler(deps.File),
+		ticketHandler:        newTicketHandler(deps.Ticket, deps.User),
+		auditHandler:         newAuditHandler(deps.Audit),
+		connProxyHandler:     newConnProxyHandler(deps.Proxy, deps.Connection, logger, cfg.Portal.WebSocketHost),
+		systemHandler:        newSystemHandler(deps.System),
+		storageHandler:       newStorageHandler(deps.Storage, deps.Settings),
+		banHandler:           newBanHandler(deps.Security, deps.Settings),
+		desktopClientHandler: desktopClientHandler,
+		versionHandler:       newVersionHandler(deps.Desktop, deps.Settings),
+		alertHandler:         newAlertHandler(deps.Alert),
+		eventsHandler:        &eventsHandler{hub: deps.Push, logger: logger},
 	}
 }
 
@@ -102,17 +106,20 @@ func (h *Handler) InitRouter(e *echo.Echo) {
 	userPolicy := h.policies[middleware.PolicyUser]
 	h.authRequiredAPI(apiGroup.Group("", userPolicy...))
 
-	// Dashboard API: PolicyDashboard 链（支持登录用户及开启时的免登大屏）
-	dashboardPolicy := h.policies[middleware.PolicyDashboard]
-	h.dashboard.dashboardAPI(apiGroup.Group("/dashboard", dashboardPolicy...))
+	// Overview API: /me 与 /cluster 快照走常规 PolicyUser 链（仅登录会话）；
+	// /cluster/stream 走 PolicyOverviewClusterStream 链（登录会话 + 开启时的网页大屏访客 Token）。
+	// 裸 GET /api/overview 不注册。
+	h.overviewHandler.overviewUserAPI(apiGroup.Group("/overview", userPolicy...))
+	clusterStreamPolicy := h.policies[middleware.PolicyOverviewClusterStream]
+	h.overviewHandler.overviewClusterStreamAPI(apiGroup.Group("/overview/cluster/stream", clusterStreamPolicy...))
 
 	// 文件传输域： PolicyFileTransfer 链（大文件禁用读超时 + 传输限流）
 	fileTransferPolicy := h.policies[middleware.PolicyFileTransfer]
 	h.fileHandler.fileTransferAPI(apiGroup.Group("/files", fileTransferPolicy...))
 
-	// WebSocket 代理域： PolicyWebSocket 链（OTP 鉴权，无 session cookie）
-	proxyWsPolicy := h.policies[middleware.PolicyWebSocket]
-	h.connProxyHandler.proxyAccessAPI(apiGroup.Group("/connection-proxy", proxyWsPolicy...))
+	// 协议代理隧道：长连接 + 登录 Session + WS 握手限流（无 60s 请求超时）
+	proxyTunnelPolicy := h.policies[middleware.PolicyProxyTunnel]
+	h.connProxyHandler.proxyConnectionAPI(apiGroup.Group("/connections", proxyTunnelPolicy...))
 
 	// SSE 全局通知流：专用 PolicySSE 链（无 60s 请求超时）
 	ssePolicy := h.policies[middleware.PolicySSE]
@@ -140,6 +147,7 @@ func (h *Handler) publicAPI(g *echo.Group) {
 	}{
 		{"/sessions", h.sessionHandler.loginAPI},
 		{"/version", h.versionHandler.versionAPI},
+		{"/desktop", h.desktopClientHandler.desktopAPI},
 		{"/nodes", h.nodeHandler.nodeRegistrationAPI},
 	}
 
@@ -158,7 +166,6 @@ func (h *Handler) authRequiredAPI(g *echo.Group) {
 		{"/apps", h.appHandler.appsAPI},
 		{"/scheduler", h.schedulerHandler.schedulerAPI},
 		{"/connections", h.connectionHandler.connectionsAPI},
-		{"/connections", h.connProxyHandler.proxySessionAPI},
 		{"/users", h.userHandler.usersAPI},
 		{"/licenses", h.licenseHandler.licensesAPI},
 		{"/settings", h.settingsHandler.settingsAPI},

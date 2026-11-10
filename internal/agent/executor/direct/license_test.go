@@ -22,7 +22,7 @@ func TestResolveLmutilPath(t *testing.T) {
 		exec := NewExecutor(Config{
 			GetLmutilPath: func() string { return "bin/lmutil" },
 		}, logger)
-		_, err := exec.resolveLmutilPath()
+		_, err := exec.resolveLmutilPath("")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "must be an absolute path")
 	})
@@ -36,12 +36,12 @@ func TestResolveLmutilPath(t *testing.T) {
 				return "/nonexistent/lmutil"
 			},
 		}, logger)
-		_, err := exec.resolveLmutilPath()
+		_, err := exec.resolveLmutilPath("")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "configured lmutil not found")
 	})
 
-	t.Run("valid configured file accepted", func(t *testing.T) {
+	t.Run("valid settings path accepted", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		fakeLmutil := filepath.Join(tmpDir, "lmutil")
 		if runtime.GOOS == "windows" {
@@ -52,23 +52,36 @@ func TestResolveLmutilPath(t *testing.T) {
 		exec := NewExecutor(Config{
 			GetLmutilPath: func() string { return fakeLmutil },
 		}, logger)
-		path, err := exec.resolveLmutilPath()
+		path, err := exec.resolveLmutilPath("")
 		require.NoError(t, err)
 		assert.Equal(t, fakeLmutil, path)
 	})
 
-	t.Run("empty path falls back to candidates or fails without PATH search", func(t *testing.T) {
+	t.Run("empty settings and override fails without sniffing", func(t *testing.T) {
 		exec := NewExecutor(Config{
 			GetLmutilPath: func() string { return "" },
 		}, logger)
-		// Unless one of the standard candidates actually exists on the host, this should fail with errLmutilNotFound
-		path, err := exec.resolveLmutilPath()
-		if err != nil {
-			assert.ErrorIs(t, err, errLmutilNotFound)
-		} else {
-			assert.NotEmpty(t, path)
-			assert.True(t, filepath.IsAbs(path))
+		_, err := exec.resolveLmutilPath("")
+		require.ErrorIs(t, err, errLmutilPathNotConfigured)
+	})
+
+	t.Run("service override wins over settings", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		settingsPath := filepath.Join(tmpDir, "settings-lmutil")
+		overridePath := filepath.Join(tmpDir, "service-lmutil")
+		if runtime.GOOS == "windows" {
+			settingsPath += ".exe"
+			overridePath += ".exe"
 		}
+		require.NoError(t, os.WriteFile(settingsPath, []byte("#!/bin/sh\nexit 0\n"), 0755))
+		require.NoError(t, os.WriteFile(overridePath, []byte("#!/bin/sh\nexit 0\n"), 0755))
+
+		exec := NewExecutor(Config{
+			GetLmutilPath: func() string { return settingsPath },
+		}, logger)
+		path, err := exec.resolveLmutilPath(overridePath)
+		require.NoError(t, err)
+		assert.Equal(t, overridePath, path)
 	})
 }
 
@@ -81,13 +94,17 @@ func TestExecuteLicenseCommand(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	fakeLmutil := filepath.Join(tmpDir, "fake_lmutil")
+	overrideLmutil := filepath.Join(tmpDir, "override_lmutil")
 	if runtime.GOOS == "windows" {
 		fakeLmutil += ".bat"
+		overrideLmutil += ".bat"
 		script := "@echo off\necho args: %*\n"
 		require.NoError(t, os.WriteFile(fakeLmutil, []byte(script), 0755))
+		require.NoError(t, os.WriteFile(overrideLmutil, []byte(script), 0755))
 	} else {
 		script := "#!/bin/sh\necho \"args: $@\"\n"
 		require.NoError(t, os.WriteFile(fakeLmutil, []byte(script), 0755))
+		require.NoError(t, os.WriteFile(overrideLmutil, []byte(script), 0755))
 	}
 
 	exec := NewExecutor(Config{
@@ -114,5 +131,17 @@ func TestExecuteLicenseCommand(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, resp.Success)
 		assert.Contains(t, resp.Stdout, "args: lmstat -t 5 -i -a -c 27000@localhost")
+	})
+
+	t.Run("status uses per-service lmutilPath override", func(t *testing.T) {
+		req := execution.NewExecuteRequest(execution.ActionLicenseStatus, "", execution.WithPayload(payload.LicenseStatus{
+			LicensePath: "27000@localhost",
+			LmutilPath:  overrideLmutil,
+		}))
+
+		resp, err := exec.Execute(context.Background(), req)
+		require.NoError(t, err)
+		assert.True(t, resp.Success)
+		assert.Contains(t, resp.Stdout, "args: lmstat -c 27000@localhost")
 	})
 }

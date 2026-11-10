@@ -2,8 +2,9 @@
 package model
 
 import (
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -11,16 +12,14 @@ import (
 type NodeStatus int
 
 const (
-	// NodeStatusOnline --- 运行时实时状态 ---
-	NodeStatusOnline  NodeStatus = 1 // online: 在线（正常运行中，gRPC 长连接保持）
-	NodeStatusOffline NodeStatus = 2 // offline: 离线（断连或心跳超时）
-
-	// NodeStatusPending --- 部署引导阶段状态 ---
-	NodeStatusPending     NodeStatus = 3 // pending: 待引导（仅添加白名单，未领证书）
-	NodeStatusProvisioned NodeStatus = 4 // provisioned: 已配置/已领证（证书下发完成，等待 Agent 首次上线）
-
-	// NodeStatusMaintenance --- 管理员控制态 ---
-	NodeStatusMaintenance NodeStatus = 5 // maintenance: 维护中（管理员手动下线/挂起，不参与调度）
+	// NodeStatusUnset — no runtime status (node has not completed first connect).
+	NodeStatusUnset NodeStatus = 0
+	// NodeStatusOnline — connected; eligible for dispatch when registry agrees.
+	NodeStatusOnline NodeStatus = 1
+	// NodeStatusOffline — enrolled but not currently connected / heartbeat stale.
+	NodeStatusOffline NodeStatus = 2
+	// NodeStatusMaintenance — admin suspended; heartbeat/disconnect must not change status.
+	NodeStatusMaintenance NodeStatus = 3
 )
 
 func (s NodeStatus) String() string {
@@ -29,27 +28,27 @@ func (s NodeStatus) String() string {
 		return "online"
 	case NodeStatusOffline:
 		return "offline"
-	case NodeStatusPending:
-		return "pending"
-	case NodeStatusProvisioned:
-		return "provisioned"
 	case NodeStatusMaintenance:
 		return "maintenance"
+	case NodeStatusUnset:
+		return ""
 	default:
 		return fmt.Sprintf("nodeStatus(%d)", s)
 	}
 }
 
+func (s NodeStatus) IsRuntimeStatus() bool {
+	return s == NodeStatusOnline || s == NodeStatusOffline || s == NodeStatusMaintenance
+}
+
 func ParseNodeStatus(s string) (NodeStatus, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "unset":
+		return NodeStatusUnset, nil
 	case "online":
 		return NodeStatusOnline, nil
 	case "offline":
 		return NodeStatusOffline, nil
-	case "pending":
-		return NodeStatusPending, nil
-	case "provisioned":
-		return NodeStatusProvisioned, nil
 	case "maintenance":
 		return NodeStatusMaintenance, nil
 	default:
@@ -58,15 +57,22 @@ func ParseNodeStatus(s string) (NodeStatus, error) {
 }
 
 func (s NodeStatus) MarshalJSON() ([]byte, error) {
+	if !s.IsRuntimeStatus() {
+		return json.Marshal(nil)
+	}
 	return json.Marshal(s.String())
 }
 
 func (s *NodeStatus) UnmarshalJSON(data []byte) error {
-	var strVal string
+	var strVal *string
 	if err := json.Unmarshal(data, &strVal); err != nil {
 		return fmt.Errorf("invalid NodeStatus: %s", string(data))
 	}
-	parsed, err := ParseNodeStatus(strVal)
+	if strVal == nil || *strVal == "" {
+		*s = NodeStatusUnset
+		return nil
+	}
+	parsed, err := ParseNodeStatus(*strVal)
 	if err != nil {
 		return err
 	}
@@ -75,17 +81,22 @@ func (s *NodeStatus) UnmarshalJSON(data []byte) error {
 }
 
 type Node struct {
-	ID              uint              `json:"id" gorm:"primarykey"`
-	NodeID          string            `json:"nodeId" gorm:"unique;not null;type:varchar(64)"`
-	IsServer        bool              `json:"isServer" gorm:"not null;default:false"`
-	Status          NodeStatus        `json:"status" gorm:"not null;index"`
-	ClientHost      string            `json:"clientHost" gorm:"type:varchar(255)"`
-	OS              string            `json:"os" gorm:"type:varchar(32)"` // 操作系统（由 Agent 注册时上报，如 windows/linux）
-	Labels          map[string]string `json:"labels" gorm:"serializer:json"`
-	Settings        map[string]any    `json:"settings" gorm:"column:node_settings;serializer:json"`
-	Token           string            `json:"-" gorm:"type:varchar(64)"`
-	TokenCreatedAt  time.Time         `json:"tokenCreatedAt"`
-	CertFingerprint string            `json:"certFingerprint" gorm:"type:varchar(128)"`
+	ID                       uint           `json:"id" gorm:"primarykey"`
+	NodeID                   string         `json:"nodeId" gorm:"unique;not null;type:varchar(64)"`
+	Groups                   []string       `json:"groups" gorm:"serializer:json"`
+	IsServer                 bool           `json:"isServer" gorm:"not null;default:false"`
+	Status                   NodeStatus     `json:"status" gorm:"index"`
+	DialHost                 string         `json:"dialHost" gorm:"type:varchar(255)"`
+	OS                       string         `json:"os" gorm:"type:varchar(32)"`
+	Arch                     string         `json:"arch" gorm:"type:varchar(32)"`
+	OSName                   string         `json:"osName" gorm:"type:varchar(128)"`
+	OSVersion                string         `json:"osVersion" gorm:"type:varchar(64)"`
+	KernelVersion            string         `json:"kernelVersion" gorm:"type:varchar(128)"`
+	Description              string         `json:"description,omitempty" gorm:"type:varchar(512);not null;default:''"`
+	Settings                 map[string]any `json:"settings" gorm:"serializer:json"`
+	EnrollmentTokenHash      string         `json:"-" gorm:"type:varchar(64)"`
+	EnrollmentTokenExpiresAt time.Time      `json:"-"`
+	CertFingerprint          string         `json:"certFingerprint" gorm:"type:varchar(128)"`
 	// CertFingerprintPrev keeps the previous fingerprint so the renewal switch
 	// window and .prev rollback remain authenticatable (dual fingerprint).
 	CertFingerprintPrev string    `json:"-" gorm:"type:varchar(128)"`
@@ -99,18 +110,85 @@ type Node struct {
 	MaxConnections uint `json:"maxConnections" gorm:"not null;default:0"`
 	// CertAlertStage records the highest emitted expiry alert stage (0=none,
 	// 90/30/7 days) to suppress duplicate alerts; reset on renewal.
-	CertAlertStage  int16     `json:"certAlertStage" gorm:"not null;default:0;type:smallint"`
-	LastHeartbeatAt time.Time `json:"lastHeartbeatAt"`
-	LastSeenServer  string    `json:"lastSeenServer" gorm:"type:varchar(64)"`
-	ConnectedAt     time.Time `json:"connectedAt"`
-	DisconnectedAt  time.Time `json:"disconnectedAt"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	CertAlertStage     int16     `json:"certAlertStage" gorm:"not null;default:0;type:smallint"`
+	LastHeartbeatAt    time.Time `json:"lastHeartbeatAt"`
+	LastConnectedAt    time.Time `json:"lastConnectedAt"`
+	LastDisconnectedAt time.Time `json:"lastDisconnectedAt"`
+	CreatedAt          time.Time `json:"createdAt"`
+	UpdatedAt          time.Time `json:"updatedAt"`
 }
 
-type NodeResourceReport struct {
-	ID          uint           `gorm:"primarykey"`
-	NodeID      string         `gorm:"uniqueIndex;not null;type:varchar(64)"`
+// EnrollmentStage derives bootstrap phase from persisted facts (not stored as status).
+func (n Node) EnrollmentStage() string {
+	if n.CertFingerprint == "" {
+		return "awaiting_certificate"
+	}
+	if n.LastConnectedAt.IsZero() {
+		return "awaiting_connect"
+	}
+	return "enrolled"
+}
+
+// HasEnrolled reports whether the node completed at least one successful connect.
+func (n Node) HasEnrolled() bool {
+	return !n.LastConnectedAt.IsZero()
+}
+
+// NormalizeNodeGroups deduplicates and lexicographically sorts group names.
+func NormalizeNodeGroups(groups []string) []string {
+	if len(groups) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(groups))
+	out := make([]string, 0, len(groups))
+	for _, g := range groups {
+		g = strings.TrimSpace(g)
+		if g == "" {
+			continue
+		}
+		if _, ok := seen[g]; ok {
+			continue
+		}
+		seen[g] = struct{}{}
+		out = append(out, g)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// NodeHasGroups reports whether nodeGroups contains every name in required (AND semantics).
+func NodeHasGroups(nodeGroups, required []string) bool {
+	if len(required) == 0 {
+		return true
+	}
+	set := make(map[string]struct{}, len(nodeGroups))
+	for _, g := range nodeGroups {
+		set[g] = struct{}{}
+	}
+	for _, need := range required {
+		if _, ok := set[need]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// NodeRuntime 节点最新运行时资源快照（按 node_id upsert）。
+//
+// 术语分层（数据本体按链路阶段命名，避免 metrics 一词贯穿所有层）：
+//   - 上报帧：pb.Metrics（wire 契约）、Agent 采集任务 "metrics"；
+//   - 控制面内存最新帧：registry.Connection.latestFrame / Snapshot.LatestFrame；
+//   - 落库快照：本结构与 node_runtime 表；
+//   - 读侧聚合缓存：overview.runtimeCache；
+//   - 对外展示：ReqNodeStatusView 与 overview.Response 的 cpu/gpu/memory/load 资源块。
+//
+// 配置层的 metricsInterval / metricsRefreshInterval 只描述上报与读侧刷新节律，
+// DefaultMetricsFlushInterval 与 *Stale* 只描述落盘与新鲜度窗口，均不指代本表。
+type NodeRuntime struct {
+	NodeID      string         `gorm:"primaryKey;type:varchar(64)"`
 	Uptime      int64          // 运行时长，单位秒 (Seconds)
 	ActiveTasks int64          // 当前活跃任务数
 	CPUCores    int64          // CPU 核心数
@@ -130,7 +208,10 @@ type NodeResourceReport struct {
 	ReportedAt  time.Time      `gorm:"not null"` // agent 采集端打点时间
 }
 
-// NodeDiskInfo 单个挂载点的磁盘快照（序列化为 JSON 存入 node_resource_reports.disk_usages）。
+// TableName 固定单数表名，避免 GORM 复数化为 node_runtimes。
+func (NodeRuntime) TableName() string { return "node_runtime" }
+
+// NodeDiskInfo 单个挂载点的磁盘快照（序列化为 JSON 存入 node_runtime.disk_usages）。
 type NodeDiskInfo struct {
 	MountPoint  string `json:"mountPoint"`
 	Filesystem  string `json:"filesystem"`

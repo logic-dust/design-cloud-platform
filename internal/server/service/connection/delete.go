@@ -3,7 +3,6 @@ package connection
 import (
 	"context"
 	"fmt"
-	"io/fs"
 
 	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/model"
@@ -11,75 +10,98 @@ import (
 
 // validateDeletePermission validates whether requestUser can delete the connection.
 func validateDeletePermission(connection model.Connection, requestUser string) error {
-	if !canAccessConnection(requestUser, connection) {
-		return fmt.Errorf("%w: only admin or owner can delete connection %s (owner:%s)", fs.ErrPermission, connection.Name, connection.Username)
-	}
-	if connection.Source == model.ConnectionSourceFixed && requestUser != AllUsers {
-		return fmt.Errorf("%w: fixed connection %s can only be deleted by admin", fs.ErrPermission, connection.Name)
+	if requestUser != AllUsers && connection.Username != requestUser {
+		return contract.NewForbiddenError(fmt.Sprintf("only admin or owner can delete connection %d (owner:%s)", connection.ID, connection.Username))
 	}
 	return nil
 }
 
-// Delete deletes one or more connections by ID, stopping any active processes and updating caches.
-func (s *Service) Delete(ctx context.Context, requestUser string, ids ...uint) error {
+// DeleteResult summarizes whether connections were deleted or entered terminating tombstones.
+type DeleteResult struct {
+	DeletedCount     int `json:"deletedCount"`
+	TerminatingCount int `json:"terminatingCount"`
+}
+
+// Delete removes connections after the same remote teardown as Stop.
+// On successful teardown (or nothing to kill): physical delete (quota released).
+// On kill failure when a teardown was attempted: terminating tombstone (resource cleared).
+func (s *Service) Delete(ctx context.Context, requestUser string, ids ...uint) (DeleteResult, error) {
+	var result DeleteResult
 	if len(ids) == 0 {
-		return nil
+		return result, nil
 	}
-	defer s.invalidateConnListCache(requestUser)
 
 	conns, err := s.connectionRepo.GetByIDs(ctx, ids)
 	if err != nil {
-		return fmt.Errorf("fetch connections for delete: %w", err)
+		return result, fmt.Errorf("fetch connections for delete: %w", err)
 	}
 
-	// Pre-flight check: validate delete permissions for all connections before performing side-effects
 	for _, c := range conns {
 		if err := validateDeletePermission(c, requestUser); err != nil {
-			return err
+			return result, err
 		}
 	}
 
-	var toDeleteIDs []uint
 	affectedUsers := make(map[string]struct{})
-	hasShared := false
-
 	for _, c := range conns {
-		if c.Protocol == contract.VNCProtocol && c.TargetNodeID != "" && c.Display != "" && (c.Status == model.ConnectionRunning || c.Status == model.ConnectionUnknown) {
-			// Terminate physical VNC server process on the remote node to avoid orphan processes and zombie re-discovery
-			if err := s.dispatchVNCControl(ctx, c, vncOpStop); err != nil {
-				if s.logger != nil {
-					s.logger.Warn("Failed to stop remote VNC process during connection delete", "connectionID", c.ID, "nodeID", c.TargetNodeID, "display", c.Display, "error", err)
-				}
-			}
+		if s.proxyConnectionCloser != nil {
+			_ = s.proxyConnectionCloser.CloseAllByConnectionID(c.ID)
 		}
 
-		if s.tunnelCloser != nil {
-			_ = s.tunnelCloser.CloseByConnectionID(c.ID)
+		terminating, err := s.deleteOne(ctx, c)
+		if err != nil {
+			return result, err
 		}
-
-		toDeleteIDs = append(toDeleteIDs, c.ID)
-		if c.Shared {
-			hasShared = true
-		} else if c.Username != "" {
+		if terminating {
+			result.TerminatingCount++
+		} else {
+			result.DeletedCount++
+		}
+		if c.Username != "" {
 			affectedUsers[c.Username] = struct{}{}
 		}
 	}
 
-	if len(toDeleteIDs) > 0 {
-		if err := s.connectionRepo.DeleteByIDs(ctx, toDeleteIDs); err != nil {
-			return fmt.Errorf("delete connections from db: %w", err)
+	for u := range affectedUsers {
+		s.notifyOwnerRefresh(ctx, requestUser, u, 0)
+	}
+	return result, nil
+}
+
+func (s *Service) deleteOne(ctx context.Context, c model.Connection) (bool, error) {
+	attempted, killErr := s.teardownRemoteSession(ctx, c)
+	if killErr != nil {
+		if s.logger != nil {
+			s.logger.Warn("seat/session kill failed on delete; marking terminating",
+				"connectionID", c.ID, "protocol", c.Protocol.String(),
+				"nodeID", c.NodeID, "error", killErr)
 		}
+		if attempted {
+			if markErr := s.connectionRepo.MarkTerminatingClearResource(ctx, c.ID); markErr != nil {
+				return false, fmt.Errorf("mark terminating after kill failure: %w", markErr)
+			}
+			return true, nil
+		}
+		return false, fmt.Errorf("delete teardown: %w", killErr)
 	}
 
-	if hasShared {
-		s.invalidateConnListCache("")
-		s.notifyOwnerRefresh(ctx, "", 0)
-	} else {
-		for u := range affectedUsers {
-			s.invalidateConnListCache(u)
-			s.notifyOwnerRefresh(ctx, u, 0)
-		}
+	if err := s.connectionRepo.DeleteByID(ctx, c.ID); err != nil {
+		return false, fmt.Errorf("delete connection %d: %w", c.ID, err)
 	}
+	return false, nil
+}
 
-	return nil
+// finishTerminatingKill reuses delete/stop kill semantics for probe-driven tombstone cleanup.
+func (s *Service) finishTerminatingKill(ctx context.Context, c model.Connection) error {
+	if _, err := s.teardownRemoteSession(ctx, c); err != nil {
+		return err
+	}
+	return s.finishTerminatingAfterSeatGone(ctx, c)
+}
+
+func (s *Service) finishTerminatingAfterSeatGone(ctx context.Context, c model.Connection) error {
+	if c.ResourceID == nil {
+		return s.connectionRepo.DeleteByID(ctx, c.ID)
+	}
+	return s.markStoppedTombstone(ctx, c)
 }

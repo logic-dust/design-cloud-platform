@@ -1,0 +1,75 @@
+# ========================================
+# ===== SECURITY ACCESS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+
+# ========================================
+# ===== 角色管理 (Roles) =====
+# ========================================
+
+# @expect 200,403
+### 获取角色目录 (Security admin)
+GET {{addr}}/api/admin/security/roles
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,403
+### 获取角色成员列表 (Security admin, 分页)
+GET {{addr}}/api/admin/security/roles/superadmin/members?limit=50&offset=0
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,403
+### 获取 systemAdmin 角色成员 (Security admin, 分页)
+GET {{addr}}/api/admin/security/roles/systemAdmin/members?limit=50&offset=0
+Authorization: Bearer {{accessToken}}
+
+# ========================================
+# ===== 管理域 (Scopes) =====
+# ========================================
+
+# @expect 200,403
+### 获取管理域 schema 定义 (Security admin)
+GET {{addr}}/api/admin/security/scopes/schemas
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,403
+### 获取管理域列表 (Security admin)
+GET {{addr}}/api/admin/security/scopes
+Authorization: Bearer {{accessToken}}
+
+# @manual
+### 设置用户管理域 (Security admin)
+# ----- scopes 名称见 GET /api/admin/security/scopes/schemas（如 node、setting）；勿对 lab 主账号 hpcadmin 自动跑 -----
+PUT {{addr}}/api/admin/security/scopes/{{normalUser}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "scopes": [
+    "node"
+  ]
+}
+
+# @manual
+### 清空用户管理域 (Security admin)
+PUT {{addr}}/api/admin/security/scopes/{{normalUser}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "scopes": []
+}
+
+# ========================================
+# ===== 用户角色设置 =====
+# ========================================
+
+### 设置用户角色 (Security admin)
+# ----- 单管理员模式: "normalUser" | "superAdmin" -----
+# ----- 三管理员模式: "normalUser" | "auditAdmin" | "systemAdmin" | "securityAdmin" -----
+PUT {{addr}}/api/admin/security/users/{{normalUser}}/role
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "role": "normalUser"
+}

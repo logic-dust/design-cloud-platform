@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/platform/config"
 
 	"github.com/go-ldap/ldap/v3"
 )
@@ -355,5 +355,120 @@ func TestLdapDial_CustomDialFn(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "simulated dial failure") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// =============================================================================
+// buildIDNumberFilter & idNameMap
+// =============================================================================
+
+func TestBuildIDNumberFilter(t *testing.T) {
+	t.Parallel()
+
+	base := "(objectClass=posixAccount)"
+
+	t.Run("empty", func(t *testing.T) {
+		if got := buildIDNumberFilter("uidNumber", nil, base); got != "" {
+			t.Fatalf("expected empty, got %q", got)
+		}
+	})
+
+	t.Run("single_no_or", func(t *testing.T) {
+		got := buildIDNumberFilter("uidNumber", []uint32{1000}, base)
+		want := "(&(uidNumber=1000)(objectClass=posixAccount))"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+		if strings.Contains(got, "|") {
+			t.Fatalf("single-id filter must not contain |: %q", got)
+		}
+	})
+
+	t.Run("multi_or", func(t *testing.T) {
+		got := buildIDNumberFilter("uidNumber", []uint32{10001, 10002}, base)
+		want := "(&(|(uidNumber=10001)(uidNumber=10002))(objectClass=posixAccount))"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("chunk_boundary_sizes", func(t *testing.T) {
+		for _, n := range []int{1, 49, 50, 51, 200} {
+			ids := make([]uint32, n)
+			for i := range ids {
+				ids[i] = uint32(1000 + i)
+			}
+			chunk := ids
+			if n > idLookupChunk {
+				chunk = ids[:idLookupChunk]
+			}
+			got := buildIDNumberFilter("uidNumber", chunk, base)
+			if len(chunk) == 1 && strings.Contains(got, "|") {
+				t.Fatalf("chunk size 1 must not contain |: %q", got)
+			}
+			if len(chunk) > 1 && !strings.Contains(got, "|") {
+				t.Fatalf("chunk size %d must contain |: %q", len(chunk), got)
+			}
+			if !strings.Contains(got, "objectClass=posixAccount") {
+				t.Fatalf("filter must preserve base filter: %q", got)
+			}
+		}
+	})
+}
+
+func makeLDAPEntry(attrs map[string][]string) *ldap.Entry {
+	e := &ldap.Entry{}
+	for name, values := range attrs {
+		e.Attributes = append(e.Attributes, &ldap.EntryAttribute{Name: name, Values: values})
+	}
+	return e
+}
+
+func TestIDNameMap_Normal(t *testing.T) {
+	t.Parallel()
+	got := idNameMap([]*ldap.Entry{
+		makeLDAPEntry(map[string][]string{"uidNumber": {"1000"}, "uid": {"alice"}}),
+		makeLDAPEntry(map[string][]string{"uidNumber": {"1001"}, "uid": {"bob"}}),
+	}, "uidNumber", "uid")
+	if len(got) != 2 || got[1000] != "alice" || got[1001] != "bob" {
+		t.Fatalf("unexpected map: %v", got)
+	}
+}
+
+func TestIDNameMap_DuplicateIDOverwrites(t *testing.T) {
+	t.Parallel()
+	got := idNameMap([]*ldap.Entry{
+		makeLDAPEntry(map[string][]string{"uidNumber": {"904300001"}, "uid": {"dup1"}}),
+		makeLDAPEntry(map[string][]string{"uidNumber": {"904300001"}, "uid": {"dup2"}}),
+	}, "uidNumber", "uid")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 map entry, got %v", got)
+	}
+	if _, ok := got[904300001]; !ok {
+		t.Fatalf("expected id 904300001 present, got %v", got)
+	}
+}
+
+func TestIDNameMap_SkipsIncompleteEntries(t *testing.T) {
+	t.Parallel()
+	got := idNameMap([]*ldap.Entry{
+		makeLDAPEntry(map[string][]string{"uid": {"no-uidnumber"}}),
+		makeLDAPEntry(map[string][]string{"uidNumber": {"1000"}}),
+		makeLDAPEntry(map[string][]string{"uidNumber": {"abc"}, "uid": {"bad-number"}}),
+		makeLDAPEntry(map[string][]string{"uidNumber": {"1002"}, "uid": {""}}),
+		makeLDAPEntry(map[string][]string{"uidNumber": {"1003"}, "uid": {"valid"}}),
+	}, "uidNumber", "uid")
+	if len(got) != 1 || got[1003] != "valid" {
+		t.Fatalf("skips incomplete entries: got %v", got)
+	}
+}
+
+func TestIDNameMap_GroupsUseCN(t *testing.T) {
+	t.Parallel()
+	got := idNameMap([]*ldap.Entry{
+		makeLDAPEntry(map[string][]string{"gidNumber": {"2000"}, "cn": {"developers"}}),
+	}, "gidNumber", "cn")
+	if len(got) != 1 || got[2000] != "developers" {
+		t.Fatalf("groups by cn: got %v", got)
 	}
 }

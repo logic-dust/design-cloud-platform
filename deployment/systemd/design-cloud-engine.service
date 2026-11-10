@@ -1,0 +1,66 @@
+# Design Cloud Engine — systemd unit (packaged)
+#
+# Role is NOT chosen at install time. Every node installs the same package and
+# the same unit. Hostname in cluster.servers decides whether Server role is enabled;
+# Agent role runs unconditionally on all nodes. Configless agents override ExecStart via `systemctl edit` (see
+# /usr/share/doc/design-cloud-engine/systemd/configless.conf.example).
+#
+# Do NOT enable this unit from RPM %post — edit /etc/design-cloud/config.toml
+# (and secret files) first, then: systemctl enable --now design-cloud-engine
+
+[Unit]
+Description=Design Cloud Engine
+Documentation=file:///usr/share/doc/design-cloud-engine/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dce
+Group=dce
+
+# FHS roots (systemd ≥219 ignores unknown keys; CentOS 7 relies on ReadWritePaths + tmpfiles)
+ConfigurationDirectory=design-cloud
+StateDirectory=design-cloud
+LogsDirectory=design-cloud
+RuntimeDirectory=design-cloud
+RuntimeDirectoryMode=0700
+Environment=RUNTIME_DIRECTORY=/run/design-cloud
+
+WorkingDirectory=/opt/dce
+
+# Fail fast on bad/incomplete config before the main process starts
+ExecStartPre=/opt/dce/dc-engine check-config --config /etc/design-cloud/config.toml
+# App/access logs go to stdout → journal (StandardOutput=journal below).
+# --log-dir only relocates audit/security files that Portal tails.
+ExecStart=/opt/dce/dc-engine --config /etc/design-cloud/config.toml --log-dir /var/log/design-cloud
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Capabilities & Hardening
+# SECURITY-REVIEW: intentional, not a misconfiguration.
+# dc-exec is a child with file capabilities cap_setuid,cap_setgid+ep. It must
+# switch uid/gid and read/write user desktops under /home. Therefore:
+# - NoNewPrivileges must stay unset, or the file capabilities never apply.
+# - CapabilityBoundingSet must include CAP_SETUID and CAP_SETGID (plus CAP_NET_BIND_SERVICE).
+# - ProtectHome must stay false. ProtectSystem=strict and PrivateTmp remain.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ProtectSystem=strict
+ProtectHome=false
+PrivateTmp=true
+ReadWritePaths=/etc/design-cloud /var/lib/design-cloud /var/log/design-cloud /run/design-cloud
+
+LimitNOFILE=65536
+LimitNPROC=4096
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=design-cloud-engine
+
+[Install]
+WantedBy=multi-user.target

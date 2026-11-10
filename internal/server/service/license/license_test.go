@@ -3,20 +3,21 @@ package license
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"log/slog"
+	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/execution"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/settings/schema"
+	"design-cloud-engine/internal/platform/config"
 )
 
 type mockExecutor struct {
@@ -155,7 +156,7 @@ func TestServiceCRUD(t *testing.T) {
 
 	// User Get on disabled should return 404 (ErrNotFound)
 	_, err = svc.Get(ctx, licDisabled.ID)
-	if !errors.Is(err, common.ErrNotFound) {
+	if !errors.Is(err, contract.ErrNotFound) {
 		t.Errorf("expected ErrNotFound for disabled license, got %v", err)
 	}
 
@@ -199,70 +200,141 @@ func TestValidation(t *testing.T) {
 		NodeID: "valid-node",
 	})
 
-	// 1. Empty name
+	// 1. Empty name -> 400 InvalidParam
 	_, err := svc.CreateFromInput(ctx, model.LicenseServiceBase{
 		Name:    "",
 		Address: "27000@server",
 		Type:    model.LicenseTypeFlexlm,
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Errorf("expected fs.ErrInvalid for empty name, got %v", err)
+	if err == nil {
+		t.Errorf("expected error for empty name")
+	} else {
+		if contractErr, ok := errors.AsType[contract.DomainError](err); !ok {
+			t.Errorf("expected contract.DomainError, got %T: %v", err, err)
+		} else if contractErr.HTTPStatus() != http.StatusBadRequest {
+			t.Errorf("expected 400 for empty name, got %d: %v", contractErr.HTTPStatus(), err)
+		}
 	}
 
-	// 2. Name too long (>64)
+	// 2. Name too long (>64) -> 422 Validation
 	longName := string(make([]byte, 65))
 	_, err = svc.CreateFromInput(ctx, model.LicenseServiceBase{
 		Name:    longName,
 		Address: "27000@server",
 		Type:    model.LicenseTypeFlexlm,
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Errorf("expected fs.ErrInvalid for long name, got %v", err)
+	if err == nil {
+		t.Errorf("expected error for long name")
+	} else {
+		if contractErr, ok := errors.AsType[contract.DomainError](err); !ok {
+			t.Errorf("expected contract.DomainError, got %T: %v", err, err)
+		} else if contractErr.HTTPStatus() != http.StatusUnprocessableEntity {
+			t.Errorf("expected 422 for long name, got %d: %v", contractErr.HTTPStatus(), err)
+		}
 	}
 
-	// 3. Invalid type
+	// 3. Invalid type -> 422 Validation
 	_, err = svc.CreateFromInput(ctx, model.LicenseServiceBase{
 		Name:    "Flex",
 		Address: "27000@server",
 		Type:    "unsupported",
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Errorf("expected fs.ErrInvalid for invalid type, got %v", err)
+	if err == nil {
+		t.Errorf("expected error for invalid type")
+	} else {
+		if contractErr, ok := errors.AsType[contract.DomainError](err); !ok {
+			t.Errorf("expected contract.DomainError, got %T: %v", err, err)
+		} else if contractErr.HTTPStatus() != http.StatusUnprocessableEntity {
+			t.Errorf("expected 422 for invalid type, got %d: %v", contractErr.HTTPStatus(), err)
+		}
 	}
 
-	// 4. Empty address
+	// 4. Empty address -> 400 InvalidParam
 	_, err = svc.CreateFromInput(ctx, model.LicenseServiceBase{
 		Name:    "Flex",
 		Address: "",
 		Type:    model.LicenseTypeFlexlm,
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Errorf("expected fs.ErrInvalid for empty address, got %v", err)
+	if err == nil {
+		t.Errorf("expected error for empty address")
+	} else {
+		if contractErr, ok := errors.AsType[contract.DomainError](err); !ok {
+			t.Errorf("expected contract.DomainError, got %T: %v", err, err)
+		} else if contractErr.HTTPStatus() != http.StatusBadRequest {
+			t.Errorf("expected 400 for empty address, got %d: %v", contractErr.HTTPStatus(), err)
+		}
 	}
 
-	// 5. Server node not found
+	// 4b. Address too long (>64) -> 422 Validation
+	_, err = svc.CreateFromInput(ctx, model.LicenseServiceBase{
+		Name:    "Flex",
+		Address: strings.Repeat("a", 65),
+		Type:    model.LicenseTypeFlexlm,
+	})
+	if err == nil {
+		t.Errorf("expected error for long address")
+	}
+
+	// 4c. Address with newline -> 422 Validation
+	_, err = svc.CreateFromInput(ctx, model.LicenseServiceBase{
+		Name:    "Flex",
+		Address: "27000@server\nnewline",
+		Type:    model.LicenseTypeFlexlm,
+	})
+	if err == nil {
+		t.Errorf("expected error for address with newline")
+	}
+
+	// 5. Relative lmutilPath -> 422 Validation
+	_, err = svc.CreateFromInput(ctx, model.LicenseServiceBase{
+		Name:       "Flex",
+		Address:    "27000@server",
+		Type:       model.LicenseTypeFlexlm,
+		LmutilPath: "bin/lmutil",
+	})
+	if err == nil {
+		t.Errorf("expected error for relative lmutilPath")
+	} else {
+		if contractErr, ok := errors.AsType[contract.DomainError](err); !ok {
+			t.Errorf("expected contract.DomainError, got %T: %v", err, err)
+		} else if contractErr.HTTPStatus() != http.StatusUnprocessableEntity {
+			t.Errorf("expected 422 for relative lmutilPath, got %d: %v", contractErr.HTTPStatus(), err)
+		}
+	}
+
+	// 6. Server node not found -> 422 Validation
 	_, err = svc.CreateFromInput(ctx, model.LicenseServiceBase{
 		Name:    "Flex",
 		Address: "27000@server",
 		Server:  "non-existent-node",
 		Type:    model.LicenseTypeFlexlm,
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Errorf("expected fs.ErrInvalid for non-existent server node, got %v", err)
+	if err == nil {
+		t.Errorf("expected error for non-existent server node")
+	} else {
+		if contractErr, ok := errors.AsType[contract.DomainError](err); !ok {
+			t.Errorf("expected contract.DomainError, got %T: %v", err, err)
+		} else if contractErr.HTTPStatus() != http.StatusUnprocessableEntity {
+			t.Errorf("expected 422 for non-existent server node, got %d: %v", contractErr.HTTPStatus(), err)
+		}
 	}
 
-	// 6. Valid with node
+	// 7. Valid with node + absolute lmutilPath
 	created, err := svc.CreateFromInput(ctx, model.LicenseServiceBase{
-		Name:    "Flex",
-		Address: "27000@server",
-		Server:  "valid-node",
-		Type:    model.LicenseTypeFlexlm,
+		Name:       "Flex",
+		Address:    "27000@server",
+		Server:     "valid-node",
+		Type:       model.LicenseTypeFlexlm,
+		LmutilPath: "/opt/flexnet/bin/lmutil",
 	})
 	if err != nil {
 		t.Fatalf("expected valid create to succeed, got %v", err)
 	}
 	if created.Server != "valid-node" {
 		t.Errorf("expected server valid-node, got %s", created.Server)
+	}
+	if created.LmutilPath != "/opt/flexnet/bin/lmutil" {
+		t.Errorf("expected lmutilPath persisted, got %q", created.LmutilPath)
 	}
 }
 
@@ -278,12 +350,10 @@ func TestGetStatus_CacheAndErrors(t *testing.T) {
 
 	// Create an enabled license
 	lic := model.LicenseService{
-		LicenseServiceBase: model.LicenseServiceBase{
-			Enabled: true,
-			Name:    "Flex",
-			Address: "27000@server",
-			Type:    model.LicenseTypeFlexlm,
-		},
+		Enabled: true,
+		Name:    "Flex",
+		Address: "27000@server",
+		Type:    model.LicenseTypeFlexlm,
 	}
 	if err := licStore.Save(ctx, &lic); err != nil {
 		t.Fatalf("failed to save license: %v", err)
@@ -350,7 +420,7 @@ Vendor daemon status (on mgt01):
 	lic.Enabled = false
 	_ = licStore.Save(ctx, &lic)
 	_, err = svc.GetStatus(ctx, lic.ID)
-	if !errors.Is(err, common.ErrNotFound) {
+	if !errors.Is(err, contract.ErrNotFound) {
 		t.Errorf("expected ErrNotFound for disabled license on GetStatus, got %v", err)
 	}
 }
@@ -360,12 +430,10 @@ func TestGetStatus_SingleFlight(t *testing.T) {
 	ctx := context.Background()
 
 	lic := model.LicenseService{
-		LicenseServiceBase: model.LicenseServiceBase{
-			Enabled: true,
-			Name:    "Flex-SF",
-			Address: "27000@server",
-			Type:    model.LicenseTypeFlexlm,
-		},
+		Enabled: true,
+		Name:    "Flex-SF",
+		Address: "27000@server",
+		Type:    model.LicenseTypeFlexlm,
 	}
 	_ = licStore.Save(ctx, &lic)
 
@@ -387,7 +455,7 @@ Vendor daemon status (on mgt01):
 	errs := make([]error, n)
 	statuses := make([]string, n)
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		go func(idx int) {
 			defer wg.Done()
 			statuses[idx], errs[idx] = svc.GetStatus(ctx, lic.ID)
@@ -399,7 +467,7 @@ Vendor daemon status (on mgt01):
 	close(blockCh)
 	wg.Wait()
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if errs[i] != nil {
 			t.Errorf("request %d failed: %v", i, errs[i])
 		}
@@ -419,12 +487,10 @@ func TestListFeatures_CacheAndDelimiterError(t *testing.T) {
 	ctx := context.Background()
 
 	lic := model.LicenseService{
-		LicenseServiceBase: model.LicenseServiceBase{
-			Enabled: true,
-			Name:    "Flex-Features",
-			Address: "27000@server",
-			Type:    model.LicenseTypeFlexlm,
-		},
+		Enabled: true,
+		Name:    "Flex-Features",
+		Address: "27000@server",
+		Type:    model.LicenseTypeFlexlm,
 	}
 	_ = licStore.Save(ctx, &lic)
 
@@ -466,12 +532,10 @@ _______   _________ _________   ______   ________
 
 	// 3. Delimiter missing on new license without cache
 	lic2 := model.LicenseService{
-		LicenseServiceBase: model.LicenseServiceBase{
-			Enabled: true,
-			Name:    "Flex-NoDelim",
-			Address: "27000@server2",
-			Type:    model.LicenseTypeFlexlm,
-		},
+		Enabled: true,
+		Name:    "Flex-NoDelim",
+		Address: "27000@server2",
+		Type:    model.LicenseTypeFlexlm,
 	}
 	_ = licStore.Save(ctx, &lic2)
 
@@ -490,9 +554,7 @@ func TestStatus_FlexLMBranching(t *testing.T) {
 	ctx := context.Background()
 
 	lic := &model.LicenseService{
-		LicenseServiceBase: model.LicenseServiceBase{
-			Type: model.LicenseTypeFlexlm,
-		},
+		Type: model.LicenseTypeFlexlm,
 	}
 
 	// 1. Both UP -> Up
@@ -531,9 +593,7 @@ Vendor daemon status (on mgt01):
 
 	// 3. Unsupported type
 	unsupportedLic := &model.LicenseService{
-		LicenseServiceBase: model.LicenseServiceBase{
-			Type: "unsupported",
-		},
+		Type: "unsupported",
 	}
 	_, err = svc.Status(ctx, unsupportedLic)
 	if err == nil {
@@ -546,24 +606,24 @@ func TestSettingsTTLHotUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	// Initial default values
-	if ttl := svc.statusCacheTTL(ctx); ttl != 60*time.Second {
-		t.Errorf("expected initial status TTL 60s, got %v", ttl)
+	if ttl := svc.statusCacheTTL(ctx); ttl != 300*time.Second {
+		t.Errorf("expected initial status TTL 300s, got %v", ttl)
 	}
-	if ttl := svc.featuresCacheTTL(ctx); ttl != 60*time.Second {
-		t.Errorf("expected initial features TTL 60s, got %v", ttl)
+	if ttl := svc.featuresCacheTTL(ctx); ttl != 300*time.Second {
+		t.Errorf("expected initial features TTL 300s, got %v", ttl)
 	}
 
 	// Hot-update to new values
 	mockSettings.setSettings(schema.LicenseSettings{
-		StatusCacheTTL:   45,
-		FeaturesCacheTTL: 90,
+		StatusCacheTTL:   120,
+		FeaturesCacheTTL: 180,
 	})
 
-	if ttl := svc.statusCacheTTL(ctx); ttl != 45*time.Second {
-		t.Errorf("expected updated status TTL 45s, got %v", ttl)
+	if ttl := svc.statusCacheTTL(ctx); ttl != 120*time.Second {
+		t.Errorf("expected updated status TTL 120s, got %v", ttl)
 	}
-	if ttl := svc.featuresCacheTTL(ctx); ttl != 90*time.Second {
-		t.Errorf("expected updated features TTL 90s, got %v", ttl)
+	if ttl := svc.featuresCacheTTL(ctx); ttl != 180*time.Second {
+		t.Errorf("expected updated features TTL 180s, got %v", ttl)
 	}
 
 	// Settings error falls back to 0 (which triggers TTLCache default)

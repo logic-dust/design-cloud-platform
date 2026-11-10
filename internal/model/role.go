@@ -5,8 +5,7 @@ import (
 	"strings"
 )
 
-// Role is a single flat enum; admin roles are parallel to normal (0).
-// 0 = normal, 1 = audit, 2 = security, 3 = system
+// Role is a single flat enum; admin roles are parallel to RoleNormal (0).
 // RoleSuperAdmin (4) is only active in single-admin mode; unavailable in three-admin mode.
 type Role int
 
@@ -40,10 +39,11 @@ func (r Role) String() string {
 	}
 }
 
-// ParseRole converts a case-insensitive string to a Role.
+// ParseRole converts a case-insensitive canonical role name to a Role.
+// Accepted names are normalUser, auditAdmin, securityAdmin, systemAdmin, and superAdmin.
 func ParseRole(s string) (Role, error) {
 	switch strings.ToLower(s) {
-	case "normal", "normaluser":
+	case "normaluser":
 		return RoleNormal, nil
 	case "auditadmin":
 		return RoleAuditAdmin, nil
@@ -51,7 +51,7 @@ func ParseRole(s string) (Role, error) {
 		return RoleSystemAdmin, nil
 	case "securityadmin":
 		return RoleSecurityAdmin, nil
-	case "admin", "superadmin":
+	case "superadmin":
 		return RoleSuperAdmin, nil
 	default:
 		return 0, fmt.Errorf("unknown role: %q", s)

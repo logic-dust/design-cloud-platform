@@ -1,11 +1,13 @@
 package scheduler
 
 import (
+	"cmp"
 	"context"
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"design-cloud-engine/internal/execution/payload"
@@ -19,25 +21,41 @@ type lsfDriver struct {
 
 var reLSFSubmit = regexp.MustCompile(`Job <(\d+)> is submitted to (?:default )?queue <([^>]+)>`)
 
-func newLSFDriver(envScript string) Scheduler {
+// jobFields 是建议客户端展示的作业列（Meta.Fields.Job）。顺序对齐常见 bjobs 默认观感：
+// JOBID USER STAT QUEUE FROM_HOST EXEC_HOST JOB_NAME SUBMIT_TIME。
+// 用户/状态列请用 Meta.Keys（user→USER、status→STAT），不要假定固定下标。
+const jobFields = "JOBID USER STAT QUEUE FROM_HOST EXEC_HOST JOB_NAME SUBMIT_TIME"
+
+// hostFields / queueFields 为 JSON 响应中的原生键名（LSF -o 里 JL/U 写作 JL_U；
+// PRIO 在 JSON 中落地为 PRIORITY）。已在 LSF 10.1 实机验证。
+const hostFields = "HOST_NAME STATUS JL_U MAX NJOBS RUN SSUSP USUSP RSV"
+
+// queueFields：Meta.Fields.Queue 推荐列序；限额列 MAX / JL_* 置末（JL/U→JSON JL_U）。
+const queueFields = "QUEUE_NAME PRIORITY STATUS NJOBS PEND RUN SUSP MAX JL_H JL_P JL_U"
+
+// bqueues -o 使用 PRIO；JSON 记录键为 PRIORITY（见 queueFields）。
+const bqueuesOutputFields = "QUEUE_NAME PRIO STATUS MAX JL_U JL_P JL_H NJOBS PEND RUN SUSP"
+
+func newLSFDriver() Scheduler {
 	return &lsfDriver{
-		envScript: envScript,
 		sysEnvs: map[string]string{
 			"LSB_SHORT_HOSTLIST":  "1",
 			"LSB_DISPLAY_YEAR":    "Y",
 			"LSB_HMS_TIME_FORMAT": "Y",
 		},
-		jobFields: []string{
-			"JOBID", "USER", "STAT", "QUEUE", "FROM_HOST", "EXEC_HOST", "JOB_NAME", "SUBMIT_TIME", "RUN_TIME",
-		},
+		jobFields:   strings.Fields(jobFields),
+		hostFields:  strings.Fields(hostFields),
+		queueFields: strings.Fields(queueFields),
 	}
 }
 
-func (d *lsfDriver) StatusKey() string { return "STAT" }
-
 const (
-	// LSB_BJOBS_FORMAT
-	bjobsOutputFields = "JOBID USER STAT QUEUE FROM_HOST EXEC_HOST JOB_NAME SUBMIT_TIME RUN_TIME EXEC_CWD OUTPUT_DIR INPUT_FILE OUTPUT_FILE ERROR_FILE EXIT_CODE EXIT_REASON"
+	// LSB_BJOBS_FORMAT。jobFields 是稳定的显示列；其后是本驱动额外请求的
+	// 记录字段（bjobs -o 可自由扩展且零额外成本）。所有字段名均已在
+	// LSF 10.1 实机验证有效，未知字段名会导致 bjobs 直接报错，故不要臆造。
+	bjobsOutputFields = jobFields + " RUN_TIME EXEC_CWD OUTPUT_DIR INPUT_FILE OUTPUT_FILE ERROR_FILE" +
+		" EXIT_CODE EXIT_REASON START_TIME FINISH_TIME PEND_TIME CPU_USED MEM SWAP PIDS SLOTS" +
+		" PROJ_NAME JOB_PRIORITY APPLICATION EXEC_HOME NEXEC_HOST USER_GROUP JOB_GROUP CMD"
 )
 
 type bjobsJSONResponse struct {
@@ -64,8 +82,7 @@ func (d *lsfDriver) parseGetJobsOutput(output string) (JobListResult, error) {
 	//}
 
 	return JobListResult{
-		Fields: d.JobFields(),
-		Jobs:   result.Records,
+		Jobs: result.Records,
 	}, nil
 }
 
@@ -84,12 +101,8 @@ func parseLSFSubmitOutput(output string) (JobSubmitResult, error) {
 // --- High-level Execute Methods ---
 
 func (d *lsfDriver) ExecuteListJobs(ctx context.Context, exec execution.Executor, query JobListQuery) (JobListResult, error) {
-	args := []string{"-json", "-o", bjobsOutputFields, "-a"}
-	if query.User != "" {
-		args = append(args, "-u", query.User)
-	} else {
-		args = append(args, "-u", "all")
-	}
+	lsfUser := cmp.Or(query.User, "all")
+	args := []string{"-json", "-o", bjobsOutputFields, "-a", "-u", lsfUser}
 	if query.Queue != "" {
 		args = append(args, "-q", query.Queue)
 	}
@@ -98,8 +111,7 @@ func (d *lsfDriver) ExecuteListJobs(ctx context.Context, exec execution.Executor
 	}
 
 	spec := payload.NewCommand("bjobs", args...)
-
-	output, err := runListJobsQuery(ctx, exec, spec, d.SysEnvs(), d.envScript, query)
+	output, err := runJobQuery(ctx, exec, spec, d.SysEnvs())
 	if err != nil {
 		return JobListResult{}, err
 	}
@@ -109,21 +121,27 @@ func (d *lsfDriver) ExecuteListJobs(ctx context.Context, exec execution.Executor
 func (d *lsfDriver) ExecuteListHosts(ctx context.Context, exec execution.Executor) (HostListResult, error) {
 	spec := payload.NewCommand("bhosts", "-json", "-o", bhostsOutputFields)
 
-	output, err := runListHostsQuery(ctx, exec, spec, d.SysEnvs(), d.envScript)
+	output, err := runJobQuery(ctx, exec, spec, d.SysEnvs())
 	if err != nil {
 		return HostListResult{}, err
 	}
 	return parseLSFHostsOutput(output)
 }
 
-func (d *lsfDriver) ExecuteListQueues(_ context.Context, _ execution.Executor, jobs []map[string]any) (QueueListResult, error) {
-	return d.aggregateQueuesFromJobs(jobs, []string{"QUEUE", "queue"}, d.StatusKey(), d.NormalizeStatus), nil
+func (d *lsfDriver) ExecuteListQueues(ctx context.Context, exec execution.Executor) (QueueListResult, error) {
+	spec := payload.NewCommand("bqueues", "-json", "-o", bqueuesOutputFields)
+
+	output, err := runJobQuery(ctx, exec, spec, d.SysEnvs())
+	if err != nil {
+		return QueueListResult{}, err
+	}
+	return parseLSFQueuesOutput(output)
 }
 
 func (d *lsfDriver) ExecuteGetJob(ctx context.Context, exec execution.Executor, jobID string) (map[string]any, error) {
 	spec := payload.NewCommand("bjobs", "-json", "-o", bjobsOutputFields, jobID)
 
-	output, err := runGetJobQuery(ctx, exec, spec, d.SysEnvs(), d.envScript, jobID)
+	output, err := runJobQuery(ctx, exec, spec, d.SysEnvs())
 	if err != nil {
 		return nil, err
 	}
@@ -136,6 +154,9 @@ func (d *lsfDriver) ExecuteGetJob(ctx context.Context, exec execution.Executor, 
 		return nil, ErrJobNotFound
 	}
 	if errVal, _ := result.Jobs[0]["ERROR"].(string); errVal != "" {
+		if isSchedulerJobNotFound(errors.New(errVal)) {
+			return nil, ErrJobNotFound
+		}
 		return nil, errors.New(errVal)
 	}
 
@@ -156,11 +177,44 @@ func (d *lsfDriver) ExecuteSubmit(ctx context.Context, exec execution.Executor, 
 	args = append(args, req.Cmd)
 	spec := payload.NewCommand("bsub", args...)
 
-	output, err := runJobSubmit(ctx, exec, spec, req, d.envScript, targetNode, nodeAffinity)
+	output, err := runJobSubmit(ctx, exec, spec, req.Env, req.User, targetNode, nodeAffinity)
 	if err != nil {
 		return JobSubmitResult{}, err
 	}
 	return parseLSFSubmitOutput(output)
+}
+
+var lsfKeys = SchedulerKeyMap{
+	ID:         "JOBID",
+	User:       "USER",
+	Status:     "STAT",
+	SubmitTime: "SUBMIT_TIME",
+}
+
+// lsfActionStatuses 只列出该动作在 LSF 上确实能执行的 STAT。
+// kill 含 PROV：作业已派发、主机/镜像仍在置备，bkill 可以取消。
+// bstop 只作用于 PEND（→PSUSP）和 RUN（→USUSP）。
+// bresume 不能恢复 SSUSP，系统挂起由 LSF 自己恢复。
+// btop / bbot / bswitch 只对还在队列里的 PEND 有意义；PROV 已经派发。
+var lsfActionStatuses = map[JobOp][]string{
+	JobOpKill:     {"PEND", "RUN", "PROV", "PSUSP", "USUSP", "SSUSP", "WAIT"},
+	JobOpSuspend:  {"PEND", "RUN"},
+	JobOpResume:   {"PSUSP", "USUSP"},
+	JobOpToTop:    {"PEND"},
+	JobOpToBottom: {"PEND"},
+	JobOpSwitch:   {"PEND"},
+}
+
+func (d *lsfDriver) Meta() SchedulerMeta {
+	return SchedulerMeta{
+		Fields: SchedulerDisplayFields{
+			Job:   slices.Clone(d.jobFields),
+			Host:  slices.Clone(d.hostFields),
+			Queue: slices.Clone(d.queueFields),
+		},
+		Keys:    lsfKeys,
+		Actions: cloneActionStatuses(lsfActionStatuses),
+	}
 }
 
 func (d *lsfDriver) ExecuteControl(ctx context.Context, exec execution.Executor, jobID string, op JobOp, runUser string, args JobControlArgs) error {
@@ -186,7 +240,7 @@ func (d *lsfDriver) ExecuteControl(ctx context.Context, exec execution.Executor,
 
 	jobCmdArgs = append(jobCmdArgs, jobID)
 	spec := payload.NewCommand(jobCmd, jobCmdArgs...)
-	_, err := runJobControl(ctx, exec, spec, d.SysEnvs(), d.envScript, jobID, op, runUser, "", args.TargetQueue)
+	_, err := runJobControl(ctx, exec, spec, d.SysEnvs(), runUser)
 	return err
 }
 
@@ -203,12 +257,13 @@ func (d *lsfDriver) ExecuteModify(ctx context.Context, exec execution.Executor, 
 	}
 	cmdArgs = append(cmdArgs, jobID)
 	spec := payload.NewCommand("bmod", cmdArgs...)
-	_, err := runJobModify(ctx, exec, spec, d.envScript, jobID, args, runUser)
+	_, err := runJobModify(ctx, exec, spec, runUser)
 	return err
 }
 
 var lsfStatusMap = map[string]NormalizedJobStatus{
 	"RUN":   JobStatusRunning,
+	"PROV":  JobStatusRunning, // dispatched; host/image still provisioning, slot already taken
 	"PEND":  JobStatusPending,
 	"PSUSP": JobStatusSuspended,
 	"SSUSP": JobStatusSuspended,
@@ -228,10 +283,16 @@ func (d *lsfDriver) NormalizeStatus(raw string) NormalizedJobStatus {
 	return JobStatusUnknown
 }
 
-const bhostsOutputFields = "HOST_NAME STATUS MAX NJOBS RUN SSUSP USUSP RSV"
+// bhostsOutputFields 与 hostFields 一致；JL/U 在 -o 中必须写成 JL_U。
+const bhostsOutputFields = hostFields
 
 type bhostsJSONResponse struct {
 	Hosts   int              `json:"HOSTS"`
+	Records []map[string]any `json:"RECORDS"`
+}
+
+type bqueuesJSONResponse struct {
+	Queues  int              `json:"QUEUES"`
 	Records []map[string]any `json:"RECORDS"`
 }
 
@@ -241,34 +302,17 @@ func parseLSFHostsOutput(output string) (HostListResult, error) {
 		return HostListResult{}, fmt.Errorf("failed to parse bhosts json output: %w", err)
 	}
 
-	hosts := make([]HostStats, 0, len(result.Records))
+	hosts := make([]map[string]any, 0, len(result.Records))
 	onlineCount := 0
-
 	for _, rec := range result.Records {
 		name, _ := rec["HOST_NAME"].(string)
-		if name == "" {
+		if strings.TrimSpace(name) == "" {
 			continue
 		}
-		status, _ := rec["STATUS"].(string)
-		statusLower := strings.ToLower(strings.TrimSpace(status))
-
-		isOnline := statusLower == "ok" || statusLower == "closed" || strings.HasPrefix(statusLower, "ok") || strings.HasPrefix(statusLower, "closed")
-		if isOnline {
+		if isLSFHostOnline(rec["STATUS"]) {
 			onlineCount++
 		}
-
-		maxVal := parseAnyInt(rec["MAX"])
-		njobsVal := parseAnyInt(rec["NJOBS"])
-		runVal := parseAnyInt(rec["RUN"])
-
-		hosts = append(hosts, HostStats{
-			Name:      name,
-			Status:    status,
-			IsOnline:  isOnline,
-			MaxSlots:  maxVal,
-			UsedSlots: njobsVal,
-			RunJobs:   runVal,
-		})
+		hosts = append(hosts, rec)
 	}
 
 	return HostListResult{
@@ -278,17 +322,25 @@ func parseLSFHostsOutput(output string) (HostListResult, error) {
 	}, nil
 }
 
-func parseAnyInt(v any) int {
-	switch val := v.(type) {
-	case float64:
-		return int(val)
-	case int:
-		return val
-	case string:
-		var n int
-		_, _ = fmt.Sscanf(strings.TrimSpace(val), "%d", &n)
-		return n
-	default:
-		return 0
+func parseLSFQueuesOutput(output string) (QueueListResult, error) {
+	var result bqueuesJSONResponse
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		return QueueListResult{}, fmt.Errorf("failed to parse bqueues json output: %w", err)
 	}
+	queues := make([]map[string]any, 0, len(result.Records))
+	for _, rec := range result.Records {
+		name, _ := rec["QUEUE_NAME"].(string)
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		queues = append(queues, rec)
+	}
+	return QueueListResult{Queues: queues}, nil
+}
+
+func isLSFHostOnline(status any) bool {
+	s, _ := status.(string)
+	statusLower := strings.ToLower(strings.TrimSpace(s))
+	return statusLower == "ok" || statusLower == "closed" ||
+		strings.HasPrefix(statusLower, "ok") || strings.HasPrefix(statusLower, "closed")
 }

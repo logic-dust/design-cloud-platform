@@ -122,7 +122,7 @@ type AgentMessage struct {
 	//	*AgentMessage_RegisterRequest
 	//	*AgentMessage_HeartbeatRequest
 	//	*AgentMessage_CommandResult
-	//	*AgentMessage_ResourceReport
+	//	*AgentMessage_Metrics
 	//	*AgentMessage_ConnectionReport
 	//	*AgentMessage_StorageProbeReport
 	//	*AgentMessage_RenewCertRequest
@@ -196,10 +196,10 @@ func (x *AgentMessage) GetCommandResult() *CommandResult {
 	return nil
 }
 
-func (x *AgentMessage) GetResourceReport() *ResourceReport {
+func (x *AgentMessage) GetMetrics() *Metrics {
 	if x != nil {
-		if x, ok := x.Payload.(*AgentMessage_ResourceReport); ok {
-			return x.ResourceReport
+		if x, ok := x.Payload.(*AgentMessage_Metrics); ok {
+			return x.Metrics
 		}
 	}
 	return nil
@@ -257,16 +257,16 @@ type AgentMessage_CommandResult struct {
 	CommandResult *CommandResult `protobuf:"bytes,3,opt,name=command_result,json=commandResult,proto3,oneof"` // 命令执行结果
 }
 
-type AgentMessage_ResourceReport struct {
-	ResourceReport *ResourceReport `protobuf:"bytes,4,opt,name=resource_report,json=resourceReport,proto3,oneof"` // 资源上报
+type AgentMessage_Metrics struct {
+	Metrics *Metrics `protobuf:"bytes,4,opt,name=metrics,proto3,oneof"` // 节点资源指标
 }
 
 type AgentMessage_ConnectionReport struct {
-	ConnectionReport *ConnectionReport `protobuf:"bytes,5,opt,name=connection_report,json=connectionReport,proto3,oneof"` // 运行态连接上报
+	ConnectionReport *ConnectionReport `protobuf:"bytes,5,opt,name=connection_report,json=connectionReport,proto3,oneof"` // 连接席位运行态上报（VNC/XRDP/RDP）
 }
 
 type AgentMessage_StorageProbeReport struct {
-	StorageProbeReport *StorageProbeReport `protobuf:"bytes,6,opt,name=storage_probe_report,json=storageProbeReport,proto3,oneof"` // Storage probe report
+	StorageProbeReport *StorageProbeReport `protobuf:"bytes,6,opt,name=storage_probe_report,json=storageProbeReport,proto3,oneof"` // 共享存储容量周期采样
 }
 
 type AgentMessage_RenewCertRequest struct {
@@ -283,7 +283,7 @@ func (*AgentMessage_HeartbeatRequest) isAgentMessage_Payload() {}
 
 func (*AgentMessage_CommandResult) isAgentMessage_Payload() {}
 
-func (*AgentMessage_ResourceReport) isAgentMessage_Payload() {}
+func (*AgentMessage_Metrics) isAgentMessage_Payload() {}
 
 func (*AgentMessage_ConnectionReport) isAgentMessage_Payload() {}
 
@@ -293,7 +293,7 @@ func (*AgentMessage_RenewCertRequest) isAgentMessage_Payload() {}
 
 func (*AgentMessage_RenewCertResult) isAgentMessage_Payload() {}
 
-// StorageProbeReport is sent by the agent as a periodic shared storage capacity sample.
+// StorageProbeItem 单条共享存储用量
 type StorageProbeItem struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	StorageId     string                 `protobuf:"bytes,1,opt,name=storage_id,json=storageId,proto3" json:"storage_id,omitempty"`
@@ -354,6 +354,7 @@ func (x *StorageProbeItem) GetUsed() int64 {
 	return 0
 }
 
+// StorageProbeReport Agent 周期上报的共享存储容量样本
 type StorageProbeReport struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Items         []*StorageProbeItem    `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`
@@ -478,9 +479,12 @@ func (x *RegisterRequest) GetSystemInfo() *SystemInfo {
 // SystemInfo 系统信息
 type SystemInfo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Os            string                 `protobuf:"bytes,1,opt,name=os,proto3" json:"os,omitempty"`                              // 操作系统
-	Arch          string                 `protobuf:"bytes,2,opt,name=arch,proto3" json:"arch,omitempty"`                          // CPU 架构
-	CpuCores      int64                  `protobuf:"varint,3,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"` // CPU 核心数
+	Os            string                 `protobuf:"bytes,1,opt,name=os,proto3" json:"os,omitempty"`                                            // 操作系统家族：Agent 编译目标 runtime.GOOS
+	Arch          string                 `protobuf:"bytes,2,opt,name=arch,proto3" json:"arch,omitempty"`                                        // CPU 架构：Agent 编译目标 runtime.GOARCH
+	CpuCores      int64                  `protobuf:"varint,3,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`               // CPU 核心数
+	OsName        string                 `protobuf:"bytes,4,opt,name=os_name,json=osName,proto3" json:"os_name,omitempty"`                      // 操作系统产品名（连接时探测一次，如 CentOS Linux）
+	OsVersion     string                 `protobuf:"bytes,5,opt,name=os_version,json=osVersion,proto3" json:"os_version,omitempty"`             // 操作系统版本（连接时探测一次）
+	KernelVersion string                 `protobuf:"bytes,6,opt,name=kernel_version,json=kernelVersion,proto3" json:"kernel_version,omitempty"` // 内核版本（可选；Windows 可为空）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -536,11 +540,31 @@ func (x *SystemInfo) GetCpuCores() int64 {
 	return 0
 }
 
+func (x *SystemInfo) GetOsName() string {
+	if x != nil {
+		return x.OsName
+	}
+	return ""
+}
+
+func (x *SystemInfo) GetOsVersion() string {
+	if x != nil {
+		return x.OsVersion
+	}
+	return ""
+}
+
+func (x *SystemInfo) GetKernelVersion() string {
+	if x != nil {
+		return x.KernelVersion
+	}
+	return ""
+}
+
 // HeartbeatRequest 心跳请求
 type HeartbeatRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ReportedAt    int64                  `protobuf:"varint,1,opt,name=reported_at,json=reportedAt,proto3" json:"reported_at,omitempty"` // 上报数据时间（agent 采集时打点，Unix 秒）
-	Rdp           *RDPStatus             `protobuf:"bytes,2,opt,name=rdp,proto3" json:"rdp,omitempty"`                                  // Windows 节点远程桌面状态（消息字段自带 presence，Linux 不填）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -582,67 +606,7 @@ func (x *HeartbeatRequest) GetReportedAt() int64 {
 	return 0
 }
 
-func (x *HeartbeatRequest) GetRdp() *RDPStatus {
-	if x != nil {
-		return x.Rdp
-	}
-	return nil
-}
-
-// RDPStatus Windows 远程桌面（TermService）就绪状态
-type RDPStatus struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Available     bool                   `protobuf:"varint,1,opt,name=available,proto3" json:"available,omitempty"` // 注册表策略 + TermService 状态 + 端口握手 三级探活综合判定
-	Port          uint32                 `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`           // 实际监听端口（注册表 WinStations\RDP-Tcp\PortNumber，默认 3389）
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RDPStatus) Reset() {
-	*x = RDPStatus{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[6]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RDPStatus) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RDPStatus) ProtoMessage() {}
-
-func (x *RDPStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[6]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RDPStatus.ProtoReflect.Descriptor instead.
-func (*RDPStatus) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{6}
-}
-
-func (x *RDPStatus) GetAvailable() bool {
-	if x != nil {
-		return x.Available
-	}
-	return false
-}
-
-func (x *RDPStatus) GetPort() uint32 {
-	if x != nil {
-		return x.Port
-	}
-	return 0
-}
-
-// CommandResult 包含了命令执行的通用结果字段
+// CommandResult 命令执行的通用结果字段
 type CommandResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TraceId       string                 `protobuf:"bytes,1,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`             // 对应的追踪 ID
@@ -658,7 +622,7 @@ type CommandResult struct {
 
 func (x *CommandResult) Reset() {
 	*x = CommandResult{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[7]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -670,7 +634,7 @@ func (x *CommandResult) String() string {
 func (*CommandResult) ProtoMessage() {}
 
 func (x *CommandResult) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[7]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -683,7 +647,7 @@ func (x *CommandResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandResult.ProtoReflect.Descriptor instead.
 func (*CommandResult) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{7}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CommandResult) GetTraceId() string {
@@ -748,7 +712,7 @@ type GPUInfo struct {
 
 func (x *GPUInfo) Reset() {
 	*x = GPUInfo{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[8]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -760,7 +724,7 @@ func (x *GPUInfo) String() string {
 func (*GPUInfo) ProtoMessage() {}
 
 func (x *GPUInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[8]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -773,7 +737,7 @@ func (x *GPUInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GPUInfo.ProtoReflect.Descriptor instead.
 func (*GPUInfo) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{8}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GPUInfo) GetName() string {
@@ -804,8 +768,8 @@ func (x *GPUInfo) GetUtilization() float64 {
 	return 0
 }
 
-// ResourceReport 资源上报
-type ResourceReport struct {
+// Metrics 节点资源指标（CPU/内存/负载/GPU/磁盘等）
+type Metrics struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	CpuUtil       float64                `protobuf:"fixed64,1,opt,name=cpu_util,json=cpuUtil,proto3" json:"cpu_util,omitempty"`             // CPU 使用率 (0-1 比例数值，如 0.0131 表示 1.31%)
 	MemTotal      int64                  `protobuf:"varint,2,opt,name=mem_total,json=memTotal,proto3" json:"mem_total,omitempty"`           // /proc/meminfo MemTotal，单位 KB (KiB)
@@ -815,7 +779,7 @@ type ResourceReport struct {
 	Load1         float64                `protobuf:"fixed64,6,opt,name=load1,proto3" json:"load1,omitempty"`                                // /proc/loadavg 1 分钟负载
 	Load5         float64                `protobuf:"fixed64,7,opt,name=load5,proto3" json:"load5,omitempty"`                                // /proc/loadavg 5 分钟负载
 	Load15        float64                `protobuf:"fixed64,8,opt,name=load15,proto3" json:"load15,omitempty"`                              // /proc/loadavg 15 分钟负载
-	Uptime        int64                  `protobuf:"varint,9,opt,name=uptime,proto3" json:"uptime,omitempty"`                               // 运行时长
+	Uptime        int64                  `protobuf:"varint,9,opt,name=uptime,proto3" json:"uptime,omitempty"`                               // 运行时长（秒）
 	ActiveTasks   int64                  `protobuf:"varint,10,opt,name=active_tasks,json=activeTasks,proto3" json:"active_tasks,omitempty"` // 当前活跃任务数
 	Gpus          []*GPUInfo             `protobuf:"bytes,11,rep,name=gpus,proto3" json:"gpus,omitempty"`                                   // GPU 设备列表
 	CpuCores      int64                  `protobuf:"varint,12,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`          // CPU 核心数
@@ -825,21 +789,21 @@ type ResourceReport struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ResourceReport) Reset() {
-	*x = ResourceReport{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[9]
+func (x *Metrics) Reset() {
+	*x = Metrics{}
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ResourceReport) String() string {
+func (x *Metrics) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ResourceReport) ProtoMessage() {}
+func (*Metrics) ProtoMessage() {}
 
-func (x *ResourceReport) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[9]
+func (x *Metrics) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -850,103 +814,103 @@ func (x *ResourceReport) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ResourceReport.ProtoReflect.Descriptor instead.
-func (*ResourceReport) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{9}
+// Deprecated: Use Metrics.ProtoReflect.Descriptor instead.
+func (*Metrics) Descriptor() ([]byte, []int) {
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{8}
 }
 
-func (x *ResourceReport) GetCpuUtil() float64 {
+func (x *Metrics) GetCpuUtil() float64 {
 	if x != nil {
 		return x.CpuUtil
 	}
 	return 0
 }
 
-func (x *ResourceReport) GetMemTotal() int64 {
+func (x *Metrics) GetMemTotal() int64 {
 	if x != nil {
 		return x.MemTotal
 	}
 	return 0
 }
 
-func (x *ResourceReport) GetMemUsed() int64 {
+func (x *Metrics) GetMemUsed() int64 {
 	if x != nil {
 		return x.MemUsed
 	}
 	return 0
 }
 
-func (x *ResourceReport) GetSwapTotal() int64 {
+func (x *Metrics) GetSwapTotal() int64 {
 	if x != nil {
 		return x.SwapTotal
 	}
 	return 0
 }
 
-func (x *ResourceReport) GetSwapFree() int64 {
+func (x *Metrics) GetSwapFree() int64 {
 	if x != nil {
 		return x.SwapFree
 	}
 	return 0
 }
 
-func (x *ResourceReport) GetLoad1() float64 {
+func (x *Metrics) GetLoad1() float64 {
 	if x != nil {
 		return x.Load1
 	}
 	return 0
 }
 
-func (x *ResourceReport) GetLoad5() float64 {
+func (x *Metrics) GetLoad5() float64 {
 	if x != nil {
 		return x.Load5
 	}
 	return 0
 }
 
-func (x *ResourceReport) GetLoad15() float64 {
+func (x *Metrics) GetLoad15() float64 {
 	if x != nil {
 		return x.Load15
 	}
 	return 0
 }
 
-func (x *ResourceReport) GetUptime() int64 {
+func (x *Metrics) GetUptime() int64 {
 	if x != nil {
 		return x.Uptime
 	}
 	return 0
 }
 
-func (x *ResourceReport) GetActiveTasks() int64 {
+func (x *Metrics) GetActiveTasks() int64 {
 	if x != nil {
 		return x.ActiveTasks
 	}
 	return 0
 }
 
-func (x *ResourceReport) GetGpus() []*GPUInfo {
+func (x *Metrics) GetGpus() []*GPUInfo {
 	if x != nil {
 		return x.Gpus
 	}
 	return nil
 }
 
-func (x *ResourceReport) GetCpuCores() int64 {
+func (x *Metrics) GetCpuCores() int64 {
 	if x != nil {
 		return x.CpuCores
 	}
 	return 0
 }
 
-func (x *ResourceReport) GetDiskUsages() []*DiskUsage {
+func (x *Metrics) GetDiskUsages() []*DiskUsage {
 	if x != nil {
 		return x.DiskUsages
 	}
 	return nil
 }
 
-func (x *ResourceReport) GetReportedAt() int64 {
+func (x *Metrics) GetReportedAt() int64 {
 	if x != nil {
 		return x.ReportedAt
 	}
@@ -967,7 +931,7 @@ type DiskUsage struct {
 
 func (x *DiskUsage) Reset() {
 	*x = DiskUsage{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[10]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -979,7 +943,7 @@ func (x *DiskUsage) String() string {
 func (*DiskUsage) ProtoMessage() {}
 
 func (x *DiskUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[10]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -992,7 +956,7 @@ func (x *DiskUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiskUsage.ProtoReflect.Descriptor instead.
 func (*DiskUsage) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{10}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *DiskUsage) GetMountPoint() string {
@@ -1030,34 +994,130 @@ func (x *DiskUsage) GetFilesystem() string {
 	return ""
 }
 
-type ConnectionInfo struct {
+// VNCSeatInfo VNC 席位运行态
+type VNCSeatInfo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ConnectionId  int64                  `protobuf:"varint,1,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`
 	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	Username      string                 `protobuf:"bytes,3,opt,name=username,proto3" json:"username,omitempty"`
-	Host          string                 `protobuf:"bytes,4,opt,name=host,proto3" json:"host,omitempty"`
-	Port          int32                  `protobuf:"varint,5,opt,name=port,proto3" json:"port,omitempty"`
-	Pid           int32                  `protobuf:"varint,6,opt,name=pid,proto3" json:"pid,omitempty"`
-	Display       string                 `protobuf:"bytes,7,opt,name=display,proto3" json:"display,omitempty"`
-	Protocol      string                 `protobuf:"bytes,8,opt,name=protocol,proto3" json:"protocol,omitempty"`
+	Port          int32                  `protobuf:"varint,4,opt,name=port,proto3" json:"port,omitempty"`
+	Pid           int32                  `protobuf:"varint,5,opt,name=pid,proto3" json:"pid,omitempty"`
+	Display       *int32                 `protobuf:"varint,6,opt,name=display,proto3,oneof" json:"display,omitempty"`                      // VNC 显示号。未设置表示无显示号；0 表示 :0。不使用带冒号的字符串。
+	StartedAt     *int64                 `protobuf:"varint,7,opt,name=started_at,json=startedAt,proto3,oneof" json:"started_at,omitempty"` // 进程物理启动绝对时间戳（秒），用于探针自动收养时保留真实创建时间
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ConnectionInfo) Reset() {
-	*x = ConnectionInfo{}
+func (x *VNCSeatInfo) Reset() {
+	*x = VNCSeatInfo{}
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VNCSeatInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VNCSeatInfo) ProtoMessage() {}
+
+func (x *VNCSeatInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VNCSeatInfo.ProtoReflect.Descriptor instead.
+func (*VNCSeatInfo) Descriptor() ([]byte, []int) {
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *VNCSeatInfo) GetConnectionId() int64 {
+	if x != nil {
+		return x.ConnectionId
+	}
+	return 0
+}
+
+func (x *VNCSeatInfo) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *VNCSeatInfo) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *VNCSeatInfo) GetPort() int32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+func (x *VNCSeatInfo) GetPid() int32 {
+	if x != nil {
+		return x.Pid
+	}
+	return 0
+}
+
+func (x *VNCSeatInfo) GetDisplay() int32 {
+	if x != nil && x.Display != nil {
+		return *x.Display
+	}
+	return 0
+}
+
+func (x *VNCSeatInfo) GetStartedAt() int64 {
+	if x != nil && x.StartedAt != nil {
+		return *x.StartedAt
+	}
+	return 0
+}
+
+// XRDPSeatInfo xrdp 管理的 X 席位（每用户 Xorg）。
+// TCP 端口为共享 xrdp 监听（通常 3389），不按席位单独上报。
+type XRDPSeatInfo struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	ConnectionId int64                  `protobuf:"varint,1,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`
+	Name         string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Username     string                 `protobuf:"bytes,3,opt,name=username,proto3" json:"username,omitempty"`
+	Pid          int32                  `protobuf:"varint,4,opt,name=pid,proto3" json:"pid,omitempty"`
+	Display      *int32                 `protobuf:"varint,5,opt,name=display,proto3,oneof" json:"display,omitempty"` // X 显示号。未设置表示无；0 表示 :0。
+	// 为 true 表示该 X 席位无健康的 logind 会话（缺失或正在关闭）；
+	// 断开保活仍维持活动会话时不会设置本字段。
+	SessionEndingConfirmed bool   `protobuf:"varint,6,opt,name=session_ending_confirmed,json=sessionEndingConfirmed,proto3" json:"session_ending_confirmed,omitempty"`
+	StartedAt              *int64 `protobuf:"varint,7,opt,name=started_at,json=startedAt,proto3,oneof" json:"started_at,omitempty"` // 进程物理启动绝对时间戳（秒），用于探针自动收养时保留真实创建时间
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *XRDPSeatInfo) Reset() {
+	*x = XRDPSeatInfo{}
 	mi := &file_internal_contract_proto_cluster_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ConnectionInfo) String() string {
+func (x *XRDPSeatInfo) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ConnectionInfo) ProtoMessage() {}
+func (*XRDPSeatInfo) ProtoMessage() {}
 
-func (x *ConnectionInfo) ProtoReflect() protoreflect.Message {
+func (x *XRDPSeatInfo) ProtoReflect() protoreflect.Message {
 	mi := &file_internal_contract_proto_cluster_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1069,78 +1129,135 @@ func (x *ConnectionInfo) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ConnectionInfo.ProtoReflect.Descriptor instead.
-func (*ConnectionInfo) Descriptor() ([]byte, []int) {
+// Deprecated: Use XRDPSeatInfo.ProtoReflect.Descriptor instead.
+func (*XRDPSeatInfo) Descriptor() ([]byte, []int) {
 	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{11}
 }
 
-func (x *ConnectionInfo) GetConnectionId() int64 {
+func (x *XRDPSeatInfo) GetConnectionId() int64 {
 	if x != nil {
 		return x.ConnectionId
 	}
 	return 0
 }
 
-func (x *ConnectionInfo) GetName() string {
+func (x *XRDPSeatInfo) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *ConnectionInfo) GetUsername() string {
+func (x *XRDPSeatInfo) GetUsername() string {
 	if x != nil {
 		return x.Username
 	}
 	return ""
 }
 
-func (x *ConnectionInfo) GetHost() string {
-	if x != nil {
-		return x.Host
-	}
-	return ""
-}
-
-func (x *ConnectionInfo) GetPort() int32 {
-	if x != nil {
-		return x.Port
-	}
-	return 0
-}
-
-func (x *ConnectionInfo) GetPid() int32 {
+func (x *XRDPSeatInfo) GetPid() int32 {
 	if x != nil {
 		return x.Pid
 	}
 	return 0
 }
 
-func (x *ConnectionInfo) GetDisplay() string {
+func (x *XRDPSeatInfo) GetDisplay() int32 {
+	if x != nil && x.Display != nil {
+		return *x.Display
+	}
+	return 0
+}
+
+func (x *XRDPSeatInfo) GetSessionEndingConfirmed() bool {
 	if x != nil {
-		return x.Display
+		return x.SessionEndingConfirmed
+	}
+	return false
+}
+
+func (x *XRDPSeatInfo) GetStartedAt() int64 {
+	if x != nil && x.StartedAt != nil {
+		return *x.StartedAt
+	}
+	return 0
+}
+
+// RDPSessionInfo Windows 全桌面 RDP 会话（非 RemoteApp / 控制台）
+type RDPSessionInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Username      string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
+	SessionId     int32                  `protobuf:"varint,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	SessionName   string                 `protobuf:"bytes,3,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"` // 例如 rdp-tcp#1
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RDPSessionInfo) Reset() {
+	*x = RDPSessionInfo{}
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RDPSessionInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RDPSessionInfo) ProtoMessage() {}
+
+func (x *RDPSessionInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RDPSessionInfo.ProtoReflect.Descriptor instead.
+func (*RDPSessionInfo) Descriptor() ([]byte, []int) {
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RDPSessionInfo) GetUsername() string {
+	if x != nil {
+		return x.Username
 	}
 	return ""
 }
 
-func (x *ConnectionInfo) GetProtocol() string {
+func (x *RDPSessionInfo) GetSessionId() int32 {
 	if x != nil {
-		return x.Protocol
+		return x.SessionId
+	}
+	return 0
+}
+
+func (x *RDPSessionInfo) GetSessionName() string {
+	if x != nil {
+		return x.SessionName
 	}
 	return ""
 }
 
+// ConnectionReport 连接席位汇总上报
 type ConnectionReport struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ReportedAt    int64                  `protobuf:"varint,1,opt,name=reported_at,json=reportedAt,proto3" json:"reported_at,omitempty"` // 上报数据时间（agent 采集时打点，Unix 秒）
-	Connections   []*ConnectionInfo      `protobuf:"bytes,2,rep,name=connections,proto3" json:"connections,omitempty"`                  // 当前运行态连接信息列表
+	ReportedAt    int64                  `protobuf:"varint,1,opt,name=reported_at,json=reportedAt,proto3" json:"reported_at,omitempty"`
+	VncSeats      []*VNCSeatInfo         `protobuf:"bytes,2,rep,name=vnc_seats,json=vncSeats,proto3" json:"vnc_seats,omitempty"`
+	XrdpSeats     []*XRDPSeatInfo        `protobuf:"bytes,3,rep,name=xrdp_seats,json=xrdpSeats,proto3" json:"xrdp_seats,omitempty"`
+	RdpSessions   []*RDPSessionInfo      `protobuf:"bytes,4,rep,name=rdp_sessions,json=rdpSessions,proto3" json:"rdp_sessions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ConnectionReport) Reset() {
 	*x = ConnectionReport{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[12]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1152,7 +1269,7 @@ func (x *ConnectionReport) String() string {
 func (*ConnectionReport) ProtoMessage() {}
 
 func (x *ConnectionReport) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[12]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1165,7 +1282,7 @@ func (x *ConnectionReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectionReport.ProtoReflect.Descriptor instead.
 func (*ConnectionReport) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{12}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ConnectionReport) GetReportedAt() int64 {
@@ -1175,25 +1292,38 @@ func (x *ConnectionReport) GetReportedAt() int64 {
 	return 0
 }
 
-func (x *ConnectionReport) GetConnections() []*ConnectionInfo {
+func (x *ConnectionReport) GetVncSeats() []*VNCSeatInfo {
 	if x != nil {
-		return x.Connections
+		return x.VncSeats
 	}
 	return nil
 }
 
-// RenewCertRequest carries the agent-generated CSR. The private key never
-// leaves the agent (CSR signing mode).
+func (x *ConnectionReport) GetXrdpSeats() []*XRDPSeatInfo {
+	if x != nil {
+		return x.XrdpSeats
+	}
+	return nil
+}
+
+func (x *ConnectionReport) GetRdpSessions() []*RDPSessionInfo {
+	if x != nil {
+		return x.RdpSessions
+	}
+	return nil
+}
+
+// RenewCertRequest Agent 上送的证书签名请求（私钥不出节点）
 type RenewCertRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Csr           []byte                 `protobuf:"bytes,1,opt,name=csr,proto3" json:"csr,omitempty"` // PEM-encoded certificate request
+	Csr           []byte                 `protobuf:"bytes,1,opt,name=csr,proto3" json:"csr,omitempty"` // PEM 编码的 CSR
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RenewCertRequest) Reset() {
 	*x = RenewCertRequest{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[13]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1205,7 +1335,7 @@ func (x *RenewCertRequest) String() string {
 func (*RenewCertRequest) ProtoMessage() {}
 
 func (x *RenewCertRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[13]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1218,7 +1348,7 @@ func (x *RenewCertRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewCertRequest.ProtoReflect.Descriptor instead.
 func (*RenewCertRequest) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{13}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *RenewCertRequest) GetCsr() []byte {
@@ -1228,7 +1358,7 @@ func (x *RenewCertRequest) GetCsr() []byte {
 	return nil
 }
 
-// RenewCertResult reports the local installation outcome to the server.
+// RenewCertResult Agent 本地安装证书结果回报
 type RenewCertResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
@@ -1239,7 +1369,7 @@ type RenewCertResult struct {
 
 func (x *RenewCertResult) Reset() {
 	*x = RenewCertResult{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[14]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1251,7 +1381,7 @@ func (x *RenewCertResult) String() string {
 func (*RenewCertResult) ProtoMessage() {}
 
 func (x *RenewCertResult) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[14]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1264,7 +1394,7 @@ func (x *RenewCertResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewCertResult.ProtoReflect.Descriptor instead.
 func (*RenewCertResult) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{14}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *RenewCertResult) GetOk() bool {
@@ -1303,7 +1433,7 @@ type ServerCommand struct {
 
 func (x *ServerCommand) Reset() {
 	*x = ServerCommand{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[15]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1315,7 +1445,7 @@ func (x *ServerCommand) String() string {
 func (*ServerCommand) ProtoMessage() {}
 
 func (x *ServerCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[15]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1328,7 +1458,7 @@ func (x *ServerCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerCommand.ProtoReflect.Descriptor instead.
 func (*ServerCommand) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{15}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ServerCommand) GetPayload() isServerCommand_Payload {
@@ -1449,7 +1579,7 @@ type ServerCommand_CancelCommand struct {
 }
 
 type ServerCommand_RedirectCommand struct {
-	RedirectCommand *RedirectCommand `protobuf:"bytes,5,opt,name=redirect_command,json=redirectCommand,proto3,oneof"` // leader 重定向命令
+	RedirectCommand *RedirectCommand `protobuf:"bytes,5,opt,name=redirect_command,json=redirectCommand,proto3,oneof"` // Leader 重定向命令
 }
 
 type ServerCommand_CommandResultAck struct {
@@ -1457,7 +1587,7 @@ type ServerCommand_CommandResultAck struct {
 }
 
 type ServerCommand_CollectProbeCommand struct {
-	CollectProbeCommand *CollectProbeCommand `protobuf:"bytes,7,opt,name=collect_probe_command,json=collectProbeCommand,proto3,oneof"` // 触发一次节点探针即时采集 (vnc-probe/resource-report/storage-probe)
+	CollectProbeCommand *CollectProbeCommand `protobuf:"bytes,7,opt,name=collect_probe_command,json=collectProbeCommand,proto3,oneof"` // 触发一次节点探针即时采集 (connection-probe/metrics/storage-probe)
 }
 
 type ServerCommand_UpdateSettingsCommand struct {
@@ -1492,18 +1622,17 @@ func (*ServerCommand_RenewCertCommand) isServerCommand_Payload() {}
 
 func (*ServerCommand_RenewCertResponse) isServerCommand_Payload() {}
 
-// RenewCertCommand asks the agent to start certificate renewal (generate a new
-// key pair and CSR). Carries no sensitive payload.
+// RenewCertCommand 请求 Agent 启动证书续签（生成新密钥对与 CSR，无敏感载荷）
 type RenewCertCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Reason        string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"` // e.g. "expiring"
+	Reason        string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"` // 例如 expiring
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RenewCertCommand) Reset() {
 	*x = RenewCertCommand{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[16]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1515,7 +1644,7 @@ func (x *RenewCertCommand) String() string {
 func (*RenewCertCommand) ProtoMessage() {}
 
 func (x *RenewCertCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[16]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1528,7 +1657,7 @@ func (x *RenewCertCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewCertCommand.ProtoReflect.Descriptor instead.
 func (*RenewCertCommand) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{16}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RenewCertCommand) GetReason() string {
@@ -1538,18 +1667,18 @@ func (x *RenewCertCommand) GetReason() string {
 	return ""
 }
 
-// RenewCertResponse carries the signed certificate and the cluster CA back.
+// RenewCertResponse 签发后的节点证书与集群 CA
 type RenewCertResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Cert          []byte                 `protobuf:"bytes,1,opt,name=cert,proto3" json:"cert,omitempty"` // PEM-encoded signed node certificate (SAN decided by server)
-	Ca            []byte                 `protobuf:"bytes,2,opt,name=ca,proto3" json:"ca,omitempty"`     // PEM-encoded cluster CA certificate
+	Cert          []byte                 `protobuf:"bytes,1,opt,name=cert,proto3" json:"cert,omitempty"` // PEM 编码的节点证书（SAN 由 Server 决定）
+	Ca            []byte                 `protobuf:"bytes,2,opt,name=ca,proto3" json:"ca,omitempty"`     // PEM 编码的集群 CA 证书
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RenewCertResponse) Reset() {
 	*x = RenewCertResponse{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[17]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1561,7 +1690,7 @@ func (x *RenewCertResponse) String() string {
 func (*RenewCertResponse) ProtoMessage() {}
 
 func (x *RenewCertResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[17]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1574,7 +1703,7 @@ func (x *RenewCertResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewCertResponse.ProtoReflect.Descriptor instead.
 func (*RenewCertResponse) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{17}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *RenewCertResponse) GetCert() []byte {
@@ -1605,7 +1734,7 @@ type RegisterResponse struct {
 
 func (x *RegisterResponse) Reset() {
 	*x = RegisterResponse{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[18]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1617,7 +1746,7 @@ func (x *RegisterResponse) String() string {
 func (*RegisterResponse) ProtoMessage() {}
 
 func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[18]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1630,7 +1759,7 @@ func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterResponse.ProtoReflect.Descriptor instead.
 func (*RegisterResponse) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{18}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *RegisterResponse) GetAccepted() bool {
@@ -1668,10 +1797,11 @@ func (x *RegisterResponse) GetAgentSettings() *AgentSettings {
 	return nil
 }
 
+// VNCConfig VNC 探针与启动相关配置
 type VNCConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	BinDir        string                 `protobuf:"bytes,1,opt,name=bin_dir,json=binDir,proto3" json:"bin_dir,omitempty"`
-	ScanInterval  int32                  `protobuf:"varint,2,opt,name=scan_interval,json=scanInterval,proto3" json:"scan_interval,omitempty"` // VNC 进程扫描周期，单位秒，默认 1800 (30min)；0=不启用周期扫描
+	ScanInterval  int32                  `protobuf:"varint,2,opt,name=scan_interval,json=scanInterval,proto3" json:"scan_interval,omitempty"` // VNC 进程扫描周期，单位秒，默认 60 (1min)；0=不启用周期扫描
 	ScanEnabled   bool                   `protobuf:"varint,3,opt,name=scan_enabled,json=scanEnabled,proto3" json:"scan_enabled,omitempty"`    // 是否启用 VNC 周期扫描，默认 true
 	ServerArgs    []string               `protobuf:"bytes,4,rep,name=server_args,json=serverArgs,proto3" json:"server_args,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1680,7 +1810,7 @@ type VNCConfig struct {
 
 func (x *VNCConfig) Reset() {
 	*x = VNCConfig{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[19]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1692,7 +1822,7 @@ func (x *VNCConfig) String() string {
 func (*VNCConfig) ProtoMessage() {}
 
 func (x *VNCConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[19]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1705,7 +1835,7 @@ func (x *VNCConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VNCConfig.ProtoReflect.Descriptor instead.
 func (*VNCConfig) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{19}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *VNCConfig) GetBinDir() string {
@@ -1736,19 +1866,20 @@ func (x *VNCConfig) GetServerArgs() []string {
 	return nil
 }
 
+// MonitorConfig 节点资源与磁盘监控配置
 type MonitorConfig struct {
-	state                  protoimpl.MessageState `protogen:"open.v1"`
-	NvidiaSmiPath          string                 `protobuf:"bytes,1,opt,name=nvidia_smi_path,json=nvidiaSmiPath,proto3" json:"nvidia_smi_path,omitempty"`                             // GPU 相关配置（nvidia-smi 路径等）
-	DiskMounts             []*MountTarget         `protobuf:"bytes,2,rep,name=disk_mounts,json=diskMounts,proto3" json:"disk_mounts,omitempty"`                                        // 额外磁盘挂载监听列表
-	ResourceReportInterval int32                  `protobuf:"varint,3,opt,name=resource_report_interval,json=resourceReportInterval,proto3" json:"resource_report_interval,omitempty"` // 资源上报间隔，单位秒
-	ResourceReportEnabled  bool                   `protobuf:"varint,4,opt,name=resource_report_enabled,json=resourceReportEnabled,proto3" json:"resource_report_enabled,omitempty"`    // 是否启用资源上报
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	NvidiaSmiPath   string                 `protobuf:"bytes,1,opt,name=nvidia_smi_path,json=nvidiaSmiPath,proto3" json:"nvidia_smi_path,omitempty"`      // GPU 相关配置（nvidia-smi 路径等）
+	DiskMounts      []*MountTarget         `protobuf:"bytes,2,rep,name=disk_mounts,json=diskMounts,proto3" json:"disk_mounts,omitempty"`                 // 额外磁盘挂载监听列表
+	MetricsInterval int32                  `protobuf:"varint,3,opt,name=metrics_interval,json=metricsInterval,proto3" json:"metrics_interval,omitempty"` // 资源指标上报间隔，单位秒
+	MetricsEnabled  bool                   `protobuf:"varint,4,opt,name=metrics_enabled,json=metricsEnabled,proto3" json:"metrics_enabled,omitempty"`    // 是否启用资源指标上报
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *MonitorConfig) Reset() {
 	*x = MonitorConfig{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[20]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1760,7 +1891,7 @@ func (x *MonitorConfig) String() string {
 func (*MonitorConfig) ProtoMessage() {}
 
 func (x *MonitorConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[20]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1773,7 +1904,7 @@ func (x *MonitorConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MonitorConfig.ProtoReflect.Descriptor instead.
 func (*MonitorConfig) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{20}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *MonitorConfig) GetNvidiaSmiPath() string {
@@ -1790,36 +1921,37 @@ func (x *MonitorConfig) GetDiskMounts() []*MountTarget {
 	return nil
 }
 
-func (x *MonitorConfig) GetResourceReportInterval() int32 {
+func (x *MonitorConfig) GetMetricsInterval() int32 {
 	if x != nil {
-		return x.ResourceReportInterval
+		return x.MetricsInterval
 	}
 	return 0
 }
 
-func (x *MonitorConfig) GetResourceReportEnabled() bool {
+func (x *MonitorConfig) GetMetricsEnabled() bool {
 	if x != nil {
-		return x.ResourceReportEnabled
+		return x.MetricsEnabled
 	}
 	return false
 }
 
-// AgentSettings contains per-node config that the Server pushes to the Agent.
+// AgentSettings Server 推送给 Agent 的节点生效配置
 type AgentSettings struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	LauncherPath  string                 `protobuf:"bytes,1,opt,name=launcher_path,json=launcherPath,proto3" json:"launcher_path,omitempty"`
-	Vnc           *VNCConfig             `protobuf:"bytes,2,opt,name=vnc,proto3" json:"vnc,omitempty"`
-	Monitor       *MonitorConfig         `protobuf:"bytes,3,opt,name=monitor,proto3" json:"monitor,omitempty"`
-	Storages      []*StorageConfig       `protobuf:"bytes,4,rep,name=storages,proto3" json:"storages,omitempty"`                                 // Only storages this node should probe
-	ProbeInterval int32                  `protobuf:"varint,5,opt,name=probe_interval,json=probeInterval,proto3" json:"probe_interval,omitempty"` // 共享存储探测间隔，单位秒（0 = 使用默认值 1h）
-	LmutilPath    string                 `protobuf:"bytes,6,opt,name=lmutil_path,json=lmutilPath,proto3" json:"lmutil_path,omitempty"`           // 节点生效的 lmutil 可执行文件绝对路径
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	ExecBinPath        string                 `protobuf:"bytes,1,opt,name=exec_bin_path,json=execBinPath,proto3" json:"exec_bin_path,omitempty"`
+	Vnc                *VNCConfig             `protobuf:"bytes,2,opt,name=vnc,proto3" json:"vnc,omitempty"`
+	Monitor            *MonitorConfig         `protobuf:"bytes,3,opt,name=monitor,proto3" json:"monitor,omitempty"`
+	Storages           []*StorageConfig       `protobuf:"bytes,4,rep,name=storages,proto3" json:"storages,omitempty"`                                                 // 本节点应探测的共享存储列表
+	ProbeInterval      int32                  `protobuf:"varint,5,opt,name=probe_interval,json=probeInterval,proto3" json:"probe_interval,omitempty"`                 // 共享存储探测间隔，单位秒（0 = 使用默认值 1h）
+	LmutilPath         string                 `protobuf:"bytes,6,opt,name=lmutil_path,json=lmutilPath,proto3" json:"lmutil_path,omitempty"`                           // 节点生效的 lmutil 可执行文件绝对路径
+	SchedulerEnvScript string                 `protobuf:"bytes,7,opt,name=scheduler_env_script,json=schedulerEnvScript,proto3" json:"scheduler_env_script,omitempty"` // 节点生效的调度器环境初始化脚本绝对路径（空 = 不 source）
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *AgentSettings) Reset() {
 	*x = AgentSettings{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[21]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1831,7 +1963,7 @@ func (x *AgentSettings) String() string {
 func (*AgentSettings) ProtoMessage() {}
 
 func (x *AgentSettings) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[21]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1844,12 +1976,12 @@ func (x *AgentSettings) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentSettings.ProtoReflect.Descriptor instead.
 func (*AgentSettings) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{21}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{22}
 }
 
-func (x *AgentSettings) GetLauncherPath() string {
+func (x *AgentSettings) GetExecBinPath() string {
 	if x != nil {
-		return x.LauncherPath
+		return x.ExecBinPath
 	}
 	return ""
 }
@@ -1889,7 +2021,14 @@ func (x *AgentSettings) GetLmutilPath() string {
 	return ""
 }
 
-// StorageConfig describes a shared storage volume the agent should probe.
+func (x *AgentSettings) GetSchedulerEnvScript() string {
+	if x != nil {
+		return x.SchedulerEnvScript
+	}
+	return ""
+}
+
+// StorageConfig Agent 应探测的共享存储卷
 type StorageConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -1900,7 +2039,7 @@ type StorageConfig struct {
 
 func (x *StorageConfig) Reset() {
 	*x = StorageConfig{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[22]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1912,7 +2051,7 @@ func (x *StorageConfig) String() string {
 func (*StorageConfig) ProtoMessage() {}
 
 func (x *StorageConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[22]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1925,7 +2064,7 @@ func (x *StorageConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StorageConfig.ProtoReflect.Descriptor instead.
 func (*StorageConfig) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{22}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *StorageConfig) GetId() string {
@@ -1942,7 +2081,7 @@ func (x *StorageConfig) GetMountPoint() string {
 	return ""
 }
 
-// MountTarget defines a mount point that the agent should monitor via statfs.
+// MountTarget Agent 通过 statfs 监控的挂载点
 type MountTarget struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`        // 显示名，如"项目盘"
@@ -1955,7 +2094,7 @@ type MountTarget struct {
 
 func (x *MountTarget) Reset() {
 	*x = MountTarget{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[23]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1967,7 +2106,7 @@ func (x *MountTarget) String() string {
 func (*MountTarget) ProtoMessage() {}
 
 func (x *MountTarget) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[23]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1980,7 +2119,7 @@ func (x *MountTarget) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MountTarget.ProtoReflect.Descriptor instead.
 func (*MountTarget) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{23}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *MountTarget) GetName() string {
@@ -2014,14 +2153,14 @@ func (x *MountTarget) GetOs() string {
 // HeartbeatResponse 心跳响应
 type HeartbeatResponse struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
-	ServerTimestamp int64                  `protobuf:"varint,1,opt,name=server_timestamp,json=serverTimestamp,proto3" json:"server_timestamp,omitempty"` // Server 时间戳
+	ServerTimestamp int64                  `protobuf:"varint,1,opt,name=server_timestamp,json=serverTimestamp,proto3" json:"server_timestamp,omitempty"` // Server 时间戳（Unix 秒）
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[24]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2033,7 +2172,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[24]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2046,7 +2185,7 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{24}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *HeartbeatResponse) GetServerTimestamp() int64 {
@@ -2056,7 +2195,7 @@ func (x *HeartbeatResponse) GetServerTimestamp() int64 {
 	return 0
 }
 
-// CommandRequest 包含了命令请求的通用字段
+// CommandRequest 命令请求的通用字段
 type CommandRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TraceId       string                 `protobuf:"bytes,1,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`                                                    // 唯一追踪标识符
@@ -2072,7 +2211,7 @@ type CommandRequest struct {
 
 func (x *CommandRequest) Reset() {
 	*x = CommandRequest{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[25]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2084,7 +2223,7 @@ func (x *CommandRequest) String() string {
 func (*CommandRequest) ProtoMessage() {}
 
 func (x *CommandRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[25]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2097,7 +2236,7 @@ func (x *CommandRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandRequest.ProtoReflect.Descriptor instead.
 func (*CommandRequest) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{25}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *CommandRequest) GetTraceId() string {
@@ -2159,7 +2298,7 @@ type CancelCommand struct {
 
 func (x *CancelCommand) Reset() {
 	*x = CancelCommand{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[26]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2171,7 +2310,7 @@ func (x *CancelCommand) String() string {
 func (*CancelCommand) ProtoMessage() {}
 
 func (x *CancelCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[26]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2184,7 +2323,7 @@ func (x *CancelCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelCommand.ProtoReflect.Descriptor instead.
 func (*CancelCommand) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{26}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *CancelCommand) GetTraceId() string {
@@ -2205,7 +2344,7 @@ type CommandResultAck struct {
 
 func (x *CommandResultAck) Reset() {
 	*x = CommandResultAck{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[27]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2217,7 +2356,7 @@ func (x *CommandResultAck) String() string {
 func (*CommandResultAck) ProtoMessage() {}
 
 func (x *CommandResultAck) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[27]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2230,7 +2369,7 @@ func (x *CommandResultAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandResultAck.ProtoReflect.Descriptor instead.
 func (*CommandResultAck) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{27}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *CommandResultAck) GetTraceId() string {
@@ -2247,7 +2386,7 @@ func (x *CommandResultAck) GetPersisted() bool {
 	return false
 }
 
-// RedirectCommand tells an agent to reconnect to the current leader.
+// RedirectCommand 指示 Agent 重连至当前 Leader
 type RedirectCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	LeaderNodeId  string                 `protobuf:"bytes,1,opt,name=leader_node_id,json=leaderNodeId,proto3" json:"leader_node_id,omitempty"`
@@ -2259,7 +2398,7 @@ type RedirectCommand struct {
 
 func (x *RedirectCommand) Reset() {
 	*x = RedirectCommand{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[28]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2271,7 +2410,7 @@ func (x *RedirectCommand) String() string {
 func (*RedirectCommand) ProtoMessage() {}
 
 func (x *RedirectCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[28]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2284,7 +2423,7 @@ func (x *RedirectCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RedirectCommand.ProtoReflect.Descriptor instead.
 func (*RedirectCommand) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{28}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *RedirectCommand) GetLeaderNodeId() string {
@@ -2308,18 +2447,19 @@ func (x *RedirectCommand) GetReason() string {
 	return ""
 }
 
+// CollectProbeCommand 按需触发即时探针采集
 type CollectProbeCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ProbeName     string                 `protobuf:"bytes,1,opt,name=probe_name,json=probeName,proto3" json:"probe_name,omitempty"` // 探针标识 (如 "vnc-probe", "resource-report", "storage-probe")
+	ProbeName     string                 `protobuf:"bytes,1,opt,name=probe_name,json=probeName,proto3" json:"probe_name,omitempty"` // 探针标识 (如 connection-probe, metrics, storage-probe)
 	TraceId       string                 `protobuf:"bytes,2,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
-	RequestedAt   int64                  `protobuf:"varint,3,opt,name=requested_at,json=requestedAt,proto3" json:"requested_at,omitempty"`
+	RequestedAt   int64                  `protobuf:"varint,3,opt,name=requested_at,json=requestedAt,proto3" json:"requested_at,omitempty"` // 请求时间（Unix 秒）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CollectProbeCommand) Reset() {
 	*x = CollectProbeCommand{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[29]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2331,7 +2471,7 @@ func (x *CollectProbeCommand) String() string {
 func (*CollectProbeCommand) ProtoMessage() {}
 
 func (x *CollectProbeCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[29]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2344,7 +2484,7 @@ func (x *CollectProbeCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CollectProbeCommand.ProtoReflect.Descriptor instead.
 func (*CollectProbeCommand) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{29}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *CollectProbeCommand) GetProbeName() string {
@@ -2368,7 +2508,7 @@ func (x *CollectProbeCommand) GetRequestedAt() int64 {
 	return 0
 }
 
-// UpdateSettingsCommand pushes new tool paths or agent settings dynamically.
+// UpdateSettingsCommand 动态推送 Agent 工具路径与运行配置
 type UpdateSettingsCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	AgentSettings *AgentSettings         `protobuf:"bytes,1,opt,name=agent_settings,json=agentSettings,proto3" json:"agent_settings,omitempty"`
@@ -2378,7 +2518,7 @@ type UpdateSettingsCommand struct {
 
 func (x *UpdateSettingsCommand) Reset() {
 	*x = UpdateSettingsCommand{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[30]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2390,7 +2530,7 @@ func (x *UpdateSettingsCommand) String() string {
 func (*UpdateSettingsCommand) ProtoMessage() {}
 
 func (x *UpdateSettingsCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[30]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2403,7 +2543,7 @@ func (x *UpdateSettingsCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateSettingsCommand.ProtoReflect.Descriptor instead.
 func (*UpdateSettingsCommand) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{30}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *UpdateSettingsCommand) GetAgentSettings() *AgentSettings {
@@ -2413,21 +2553,24 @@ func (x *UpdateSettingsCommand) GetAgentSettings() *AgentSettings {
 	return nil
 }
 
+// ForwardDispatchRequest Standby 向 Leader 转发的派发请求
 type ForwardDispatchRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Request       *CommandRequest        `protobuf:"bytes,1,opt,name=request,proto3" json:"request,omitempty"`
 	SourceNodeId  string                 `protobuf:"bytes,2,opt,name=source_node_id,json=sourceNodeId,proto3" json:"source_node_id,omitempty"`
 	TargetNode    string                 `protobuf:"bytes,3,opt,name=target_node,json=targetNode,proto3" json:"target_node,omitempty"`
-	NodeSelector  map[string]string      `protobuf:"bytes,4,rep,name=node_selector,json=nodeSelector,proto3" json:"node_selector,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	NodeSelector  []string               `protobuf:"bytes,4,rep,name=node_selector,json=nodeSelector,proto3" json:"node_selector,omitempty"`
 	NodeAffinity  NodeAffinity           `protobuf:"varint,5,opt,name=node_affinity,json=nodeAffinity,proto3,enum=cluster.NodeAffinity" json:"node_affinity,omitempty"`
 	RunMode       RunMode                `protobuf:"varint,6,opt,name=run_mode,json=runMode,proto3,enum=cluster.RunMode" json:"run_mode,omitempty"`
+	LeaderEpoch   uint64                 `protobuf:"varint,7,opt,name=leader_epoch,json=leaderEpoch,proto3" json:"leader_epoch,omitempty"` // Standby 观测到的 Leader epoch（fencing token）
+	Hop           uint32                 `protobuf:"varint,8,opt,name=hop,proto3" json:"hop,omitempty"`                                    // 转发跳数，上限 1（防御性防环）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ForwardDispatchRequest) Reset() {
 	*x = ForwardDispatchRequest{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[31]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2439,7 +2582,7 @@ func (x *ForwardDispatchRequest) String() string {
 func (*ForwardDispatchRequest) ProtoMessage() {}
 
 func (x *ForwardDispatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[31]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2452,7 +2595,7 @@ func (x *ForwardDispatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForwardDispatchRequest.ProtoReflect.Descriptor instead.
 func (*ForwardDispatchRequest) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{31}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ForwardDispatchRequest) GetRequest() *CommandRequest {
@@ -2476,7 +2619,7 @@ func (x *ForwardDispatchRequest) GetTargetNode() string {
 	return ""
 }
 
-func (x *ForwardDispatchRequest) GetNodeSelector() map[string]string {
+func (x *ForwardDispatchRequest) GetNodeSelector() []string {
 	if x != nil {
 		return x.NodeSelector
 	}
@@ -2497,6 +2640,21 @@ func (x *ForwardDispatchRequest) GetRunMode() RunMode {
 	return RunMode_RUN_MODE_SYNC
 }
 
+func (x *ForwardDispatchRequest) GetLeaderEpoch() uint64 {
+	if x != nil {
+		return x.LeaderEpoch
+	}
+	return 0
+}
+
+func (x *ForwardDispatchRequest) GetHop() uint32 {
+	if x != nil {
+		return x.Hop
+	}
+	return 0
+}
+
+// ForwardDispatchResponse Leader 派发结果
 type ForwardDispatchResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Result        *CommandResult         `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
@@ -2508,7 +2666,7 @@ type ForwardDispatchResponse struct {
 
 func (x *ForwardDispatchResponse) Reset() {
 	*x = ForwardDispatchResponse{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[32]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2520,7 +2678,7 @@ func (x *ForwardDispatchResponse) String() string {
 func (*ForwardDispatchResponse) ProtoMessage() {}
 
 func (x *ForwardDispatchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[32]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2533,7 +2691,7 @@ func (x *ForwardDispatchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForwardDispatchResponse.ProtoReflect.Descriptor instead.
 func (*ForwardDispatchResponse) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{32}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ForwardDispatchResponse) GetResult() *CommandResult {
@@ -2557,21 +2715,25 @@ func (x *ForwardDispatchResponse) GetAccepted() bool {
 	return false
 }
 
+// ForwardClusterEventRequest 跨节点 Portal 推送事件转发
 type ForwardClusterEventRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SourceNodeId  string                 `protobuf:"bytes,1,opt,name=source_node_id,json=sourceNodeId,proto3" json:"source_node_id,omitempty"`
-	TargetType    string                 `protobuf:"bytes,2,opt,name=target_type,json=targetType,proto3" json:"target_type,omitempty"` // "user", "role", "broadcast"
-	UserIds       []string               `protobuf:"bytes,3,rep,name=user_ids,json=userIds,proto3" json:"user_ids,omitempty"`
-	Role          int32                  `protobuf:"varint,4,opt,name=role,proto3" json:"role,omitempty"`
-	EventName     string                 `protobuf:"bytes,5,opt,name=event_name,json=eventName,proto3" json:"event_name,omitempty"`
-	PayloadJson   string                 `protobuf:"bytes,6,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
+	EventId       string                 `protobuf:"bytes,2,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`          // 全局唯一事件 ID，接收端按此去重
+	ExpiresAt     int64                  `protobuf:"varint,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`   // Unix 秒；超过 TTL 的事件丢弃
+	TargetType    string                 `protobuf:"bytes,4,opt,name=target_type,json=targetType,proto3" json:"target_type,omitempty"` // user、role、broadcast
+	UserIds       []string               `protobuf:"bytes,5,rep,name=user_ids,json=userIds,proto3" json:"user_ids,omitempty"`
+	Role          int32                  `protobuf:"varint,6,opt,name=role,proto3" json:"role,omitempty"`
+	EventName     string                 `protobuf:"bytes,7,opt,name=event_name,json=eventName,proto3" json:"event_name,omitempty"`
+	PayloadJson   string                 `protobuf:"bytes,8,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
+	Hop           uint32                 `protobuf:"varint,9,opt,name=hop,proto3" json:"hop,omitempty"` // 转发跳数，上限 1（防御性防环）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ForwardClusterEventRequest) Reset() {
 	*x = ForwardClusterEventRequest{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[33]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2583,7 +2745,7 @@ func (x *ForwardClusterEventRequest) String() string {
 func (*ForwardClusterEventRequest) ProtoMessage() {}
 
 func (x *ForwardClusterEventRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[33]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2596,7 +2758,7 @@ func (x *ForwardClusterEventRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForwardClusterEventRequest.ProtoReflect.Descriptor instead.
 func (*ForwardClusterEventRequest) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{33}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ForwardClusterEventRequest) GetSourceNodeId() string {
@@ -2604,6 +2766,20 @@ func (x *ForwardClusterEventRequest) GetSourceNodeId() string {
 		return x.SourceNodeId
 	}
 	return ""
+}
+
+func (x *ForwardClusterEventRequest) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *ForwardClusterEventRequest) GetExpiresAt() int64 {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return 0
 }
 
 func (x *ForwardClusterEventRequest) GetTargetType() string {
@@ -2641,6 +2817,14 @@ func (x *ForwardClusterEventRequest) GetPayloadJson() string {
 	return ""
 }
 
+func (x *ForwardClusterEventRequest) GetHop() uint32 {
+	if x != nil {
+		return x.Hop
+	}
+	return 0
+}
+
+// ForwardClusterEventResponse 转发处理结果
 type ForwardClusterEventResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
@@ -2650,7 +2834,7 @@ type ForwardClusterEventResponse struct {
 
 func (x *ForwardClusterEventResponse) Reset() {
 	*x = ForwardClusterEventResponse{}
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[34]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2662,7 +2846,7 @@ func (x *ForwardClusterEventResponse) String() string {
 func (*ForwardClusterEventResponse) ProtoMessage() {}
 
 func (x *ForwardClusterEventResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contract_proto_cluster_proto_msgTypes[34]
+	mi := &file_internal_contract_proto_cluster_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2675,7 +2859,7 @@ func (x *ForwardClusterEventResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForwardClusterEventResponse.ProtoReflect.Descriptor instead.
 func (*ForwardClusterEventResponse) Descriptor() ([]byte, []int) {
-	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{34}
+	return file_internal_contract_proto_cluster_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ForwardClusterEventResponse) GetSuccess() bool {
@@ -2689,12 +2873,12 @@ var File_internal_contract_proto_cluster_proto protoreflect.FileDescriptor
 
 const file_internal_contract_proto_cluster_proto_rawDesc = "" +
 	"\n" +
-	"%internal/contract/proto/cluster.proto\x12\acluster\x1a\x1egoogle/protobuf/duration.proto\"\xdd\x04\n" +
+	"%internal/contract/proto/cluster.proto\x12\acluster\x1a\x1egoogle/protobuf/duration.proto\"\xc7\x04\n" +
 	"\fAgentMessage\x12E\n" +
 	"\x10register_request\x18\x01 \x01(\v2\x18.cluster.RegisterRequestH\x00R\x0fregisterRequest\x12H\n" +
 	"\x11heartbeat_request\x18\x02 \x01(\v2\x19.cluster.HeartbeatRequestH\x00R\x10heartbeatRequest\x12?\n" +
-	"\x0ecommand_result\x18\x03 \x01(\v2\x16.cluster.CommandResultH\x00R\rcommandResult\x12B\n" +
-	"\x0fresource_report\x18\x04 \x01(\v2\x17.cluster.ResourceReportH\x00R\x0eresourceReport\x12H\n" +
+	"\x0ecommand_result\x18\x03 \x01(\v2\x16.cluster.CommandResultH\x00R\rcommandResult\x12,\n" +
+	"\ametrics\x18\x04 \x01(\v2\x10.cluster.MetricsH\x00R\ametrics\x12H\n" +
 	"\x11connection_report\x18\x05 \x01(\v2\x19.cluster.ConnectionReportH\x00R\x10connectionReport\x12O\n" +
 	"\x14storage_probe_report\x18\x06 \x01(\v2\x1b.cluster.StorageProbeReportH\x00R\x12storageProbeReport\x12I\n" +
 	"\x12renew_cert_request\x18\a \x01(\v2\x19.cluster.RenewCertRequestH\x00R\x10renewCertRequest\x12F\n" +
@@ -2714,19 +2898,19 @@ const file_internal_contract_proto_cluster_proto_rawDesc = "" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12#\n" +
 	"\rregistered_at\x18\x03 \x01(\x03R\fregisteredAt\x124\n" +
 	"\vsystem_info\x18\x04 \x01(\v2\x13.cluster.SystemInfoR\n" +
-	"systemInfo\"M\n" +
+	"systemInfo\"\xac\x01\n" +
 	"\n" +
 	"SystemInfo\x12\x0e\n" +
 	"\x02os\x18\x01 \x01(\tR\x02os\x12\x12\n" +
 	"\x04arch\x18\x02 \x01(\tR\x04arch\x12\x1b\n" +
-	"\tcpu_cores\x18\x03 \x01(\x03R\bcpuCores\"Y\n" +
+	"\tcpu_cores\x18\x03 \x01(\x03R\bcpuCores\x12\x17\n" +
+	"\aos_name\x18\x04 \x01(\tR\x06osName\x12\x1d\n" +
+	"\n" +
+	"os_version\x18\x05 \x01(\tR\tosVersion\x12%\n" +
+	"\x0ekernel_version\x18\x06 \x01(\tR\rkernelVersion\"3\n" +
 	"\x10HeartbeatRequest\x12\x1f\n" +
 	"\vreported_at\x18\x01 \x01(\x03R\n" +
-	"reportedAt\x12$\n" +
-	"\x03rdp\x18\x02 \x01(\v2\x12.cluster.RDPStatusR\x03rdp\"=\n" +
-	"\tRDPStatus\x12\x1c\n" +
-	"\tavailable\x18\x01 \x01(\bR\tavailable\x12\x12\n" +
-	"\x04port\x18\x02 \x01(\rR\x04port\"\xeb\x01\n" +
+	"reportedAt\"\xeb\x01\n" +
 	"\rCommandResult\x12\x19\n" +
 	"\btrace_id\x18\x01 \x01(\tR\atraceId\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x1b\n" +
@@ -2739,8 +2923,8 @@ const file_internal_contract_proto_cluster_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1b\n" +
 	"\tmem_total\x18\x02 \x01(\x03R\bmemTotal\x12\x19\n" +
 	"\bmem_used\x18\x03 \x01(\x03R\amemUsed\x12 \n" +
-	"\vutilization\x18\x04 \x01(\x01R\vutilization\"\xb7\x03\n" +
-	"\x0eResourceReport\x12\x19\n" +
+	"\vutilization\x18\x04 \x01(\x01R\vutilization\"\xb0\x03\n" +
+	"\aMetrics\x12\x19\n" +
 	"\bcpu_util\x18\x01 \x01(\x01R\acpuUtil\x12\x1b\n" +
 	"\tmem_total\x18\x02 \x01(\x03R\bmemTotal\x12\x19\n" +
 	"\bmem_used\x18\x03 \x01(\x03R\amemUsed\x12\x1d\n" +
@@ -2767,20 +2951,43 @@ const file_internal_contract_proto_cluster_proto_rawDesc = "" +
 	"\fmonitor_name\x18\x04 \x01(\tR\vmonitorName\x12\x1e\n" +
 	"\n" +
 	"filesystem\x18\x05 \x01(\tR\n" +
-	"filesystem\"\xd5\x01\n" +
-	"\x0eConnectionInfo\x12#\n" +
+	"filesystem\"\xe6\x01\n" +
+	"\vVNCSeatInfo\x12#\n" +
 	"\rconnection_id\x18\x01 \x01(\x03R\fconnectionId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1a\n" +
 	"\busername\x18\x03 \x01(\tR\busername\x12\x12\n" +
-	"\x04host\x18\x04 \x01(\tR\x04host\x12\x12\n" +
-	"\x04port\x18\x05 \x01(\x05R\x04port\x12\x10\n" +
-	"\x03pid\x18\x06 \x01(\x05R\x03pid\x12\x18\n" +
-	"\adisplay\x18\a \x01(\tR\adisplay\x12\x1a\n" +
-	"\bprotocol\x18\b \x01(\tR\bprotocol\"n\n" +
+	"\x04port\x18\x04 \x01(\x05R\x04port\x12\x10\n" +
+	"\x03pid\x18\x05 \x01(\x05R\x03pid\x12\x1d\n" +
+	"\adisplay\x18\x06 \x01(\x05H\x00R\adisplay\x88\x01\x01\x12\"\n" +
+	"\n" +
+	"started_at\x18\a \x01(\x03H\x01R\tstartedAt\x88\x01\x01B\n" +
+	"\n" +
+	"\b_displayB\r\n" +
+	"\v_started_at\"\x8d\x02\n" +
+	"\fXRDPSeatInfo\x12#\n" +
+	"\rconnection_id\x18\x01 \x01(\x03R\fconnectionId\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1a\n" +
+	"\busername\x18\x03 \x01(\tR\busername\x12\x10\n" +
+	"\x03pid\x18\x04 \x01(\x05R\x03pid\x12\x1d\n" +
+	"\adisplay\x18\x05 \x01(\x05H\x00R\adisplay\x88\x01\x01\x128\n" +
+	"\x18session_ending_confirmed\x18\x06 \x01(\bR\x16sessionEndingConfirmed\x12\"\n" +
+	"\n" +
+	"started_at\x18\a \x01(\x03H\x01R\tstartedAt\x88\x01\x01B\n" +
+	"\n" +
+	"\b_displayB\r\n" +
+	"\v_started_at\"n\n" +
+	"\x0eRDPSessionInfo\x12\x1a\n" +
+	"\busername\x18\x01 \x01(\tR\busername\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x02 \x01(\x05R\tsessionId\x12!\n" +
+	"\fsession_name\x18\x03 \x01(\tR\vsessionName\"\xd8\x01\n" +
 	"\x10ConnectionReport\x12\x1f\n" +
 	"\vreported_at\x18\x01 \x01(\x03R\n" +
-	"reportedAt\x129\n" +
-	"\vconnections\x18\x02 \x03(\v2\x17.cluster.ConnectionInfoR\vconnections\"$\n" +
+	"reportedAt\x121\n" +
+	"\tvnc_seats\x18\x02 \x03(\v2\x14.cluster.VNCSeatInfoR\bvncSeats\x124\n" +
+	"\n" +
+	"xrdp_seats\x18\x03 \x03(\v2\x15.cluster.XRDPSeatInfoR\txrdpSeats\x12:\n" +
+	"\frdp_sessions\x18\x04 \x03(\v2\x17.cluster.RDPSessionInfoR\vrdpSessions\"$\n" +
 	"\x10RenewCertRequest\x12\x10\n" +
 	"\x03csr\x18\x01 \x01(\fR\x03csr\";\n" +
 	"\x0fRenewCertResult\x12\x0e\n" +
@@ -2816,21 +3023,22 @@ const file_internal_contract_proto_cluster_proto_rawDesc = "" +
 	"\rscan_interval\x18\x02 \x01(\x05R\fscanInterval\x12!\n" +
 	"\fscan_enabled\x18\x03 \x01(\bR\vscanEnabled\x12\x1f\n" +
 	"\vserver_args\x18\x04 \x03(\tR\n" +
-	"serverArgs\"\xe0\x01\n" +
+	"serverArgs\"\xc2\x01\n" +
 	"\rMonitorConfig\x12&\n" +
 	"\x0fnvidia_smi_path\x18\x01 \x01(\tR\rnvidiaSmiPath\x125\n" +
 	"\vdisk_mounts\x18\x02 \x03(\v2\x14.cluster.MountTargetR\n" +
-	"diskMounts\x128\n" +
-	"\x18resource_report_interval\x18\x03 \x01(\x05R\x16resourceReportInterval\x126\n" +
-	"\x17resource_report_enabled\x18\x04 \x01(\bR\x15resourceReportEnabled\"\x88\x02\n" +
-	"\rAgentSettings\x12#\n" +
-	"\rlauncher_path\x18\x01 \x01(\tR\flauncherPath\x12$\n" +
+	"diskMounts\x12)\n" +
+	"\x10metrics_interval\x18\x03 \x01(\x05R\x0fmetricsInterval\x12'\n" +
+	"\x0fmetrics_enabled\x18\x04 \x01(\bR\x0emetricsEnabled\"\xb9\x02\n" +
+	"\rAgentSettings\x12\"\n" +
+	"\rexec_bin_path\x18\x01 \x01(\tR\vexecBinPath\x12$\n" +
 	"\x03vnc\x18\x02 \x01(\v2\x12.cluster.VNCConfigR\x03vnc\x120\n" +
 	"\amonitor\x18\x03 \x01(\v2\x16.cluster.MonitorConfigR\amonitor\x122\n" +
 	"\bstorages\x18\x04 \x03(\v2\x16.cluster.StorageConfigR\bstorages\x12%\n" +
 	"\x0eprobe_interval\x18\x05 \x01(\x05R\rprobeInterval\x12\x1f\n" +
 	"\vlmutil_path\x18\x06 \x01(\tR\n" +
-	"lmutilPath\"@\n" +
+	"lmutilPath\x120\n" +
+	"\x14scheduler_env_script\x18\a \x01(\tR\x12schedulerEnvScript\"@\n" +
 	"\rStorageConfig\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
 	"\vmount_point\x18\x02 \x01(\tR\n" +
@@ -2871,31 +3079,34 @@ const file_internal_contract_proto_cluster_proto_rawDesc = "" +
 	"\btrace_id\x18\x02 \x01(\tR\atraceId\x12!\n" +
 	"\frequested_at\x18\x03 \x01(\x03R\vrequestedAt\"V\n" +
 	"\x15UpdateSettingsCommand\x12=\n" +
-	"\x0eagent_settings\x18\x01 \x01(\v2\x16.cluster.AgentSettingsR\ragentSettings\"\x94\x03\n" +
+	"\x0eagent_settings\x18\x01 \x01(\v2\x16.cluster.AgentSettingsR\ragentSettings\"\xd5\x02\n" +
 	"\x16ForwardDispatchRequest\x121\n" +
 	"\arequest\x18\x01 \x01(\v2\x17.cluster.CommandRequestR\arequest\x12$\n" +
 	"\x0esource_node_id\x18\x02 \x01(\tR\fsourceNodeId\x12\x1f\n" +
 	"\vtarget_node\x18\x03 \x01(\tR\n" +
-	"targetNode\x12V\n" +
-	"\rnode_selector\x18\x04 \x03(\v21.cluster.ForwardDispatchRequest.NodeSelectorEntryR\fnodeSelector\x12:\n" +
+	"targetNode\x12#\n" +
+	"\rnode_selector\x18\x04 \x03(\tR\fnodeSelector\x12:\n" +
 	"\rnode_affinity\x18\x05 \x01(\x0e2\x15.cluster.NodeAffinityR\fnodeAffinity\x12+\n" +
-	"\brun_mode\x18\x06 \x01(\x0e2\x10.cluster.RunModeR\arunMode\x1a?\n" +
-	"\x11NodeSelectorEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x88\x01\n" +
+	"\brun_mode\x18\x06 \x01(\x0e2\x10.cluster.RunModeR\arunMode\x12!\n" +
+	"\fleader_epoch\x18\a \x01(\x04R\vleaderEpoch\x12\x10\n" +
+	"\x03hop\x18\b \x01(\rR\x03hop\"\x88\x01\n" +
 	"\x17ForwardDispatchResponse\x12.\n" +
 	"\x06result\x18\x01 \x01(\v2\x16.cluster.CommandResultR\x06result\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12\x1a\n" +
-	"\baccepted\x18\x03 \x01(\bR\baccepted\"\xd4\x01\n" +
+	"\baccepted\x18\x03 \x01(\bR\baccepted\"\xa0\x02\n" +
 	"\x1aForwardClusterEventRequest\x12$\n" +
-	"\x0esource_node_id\x18\x01 \x01(\tR\fsourceNodeId\x12\x1f\n" +
-	"\vtarget_type\x18\x02 \x01(\tR\n" +
-	"targetType\x12\x19\n" +
-	"\buser_ids\x18\x03 \x03(\tR\auserIds\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\x05R\x04role\x12\x1d\n" +
+	"\x0esource_node_id\x18\x01 \x01(\tR\fsourceNodeId\x12\x19\n" +
+	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12\x1d\n" +
 	"\n" +
-	"event_name\x18\x05 \x01(\tR\teventName\x12!\n" +
-	"\fpayload_json\x18\x06 \x01(\tR\vpayloadJson\"7\n" +
+	"expires_at\x18\x03 \x01(\x03R\texpiresAt\x12\x1f\n" +
+	"\vtarget_type\x18\x04 \x01(\tR\n" +
+	"targetType\x12\x19\n" +
+	"\buser_ids\x18\x05 \x03(\tR\auserIds\x12\x12\n" +
+	"\x04role\x18\x06 \x01(\x05R\x04role\x12\x1d\n" +
+	"\n" +
+	"event_name\x18\a \x01(\tR\teventName\x12!\n" +
+	"\fpayload_json\x18\b \x01(\tR\vpayloadJson\x12\x10\n" +
+	"\x03hop\x18\t \x01(\rR\x03hop\"7\n" +
 	"\x1bForwardClusterEventResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess*H\n" +
 	"\fNodeAffinity\x12!\n" +
@@ -2932,84 +3143,84 @@ var file_internal_contract_proto_cluster_proto_goTypes = []any{
 	(*RegisterRequest)(nil),             // 5: cluster.RegisterRequest
 	(*SystemInfo)(nil),                  // 6: cluster.SystemInfo
 	(*HeartbeatRequest)(nil),            // 7: cluster.HeartbeatRequest
-	(*RDPStatus)(nil),                   // 8: cluster.RDPStatus
-	(*CommandResult)(nil),               // 9: cluster.CommandResult
-	(*GPUInfo)(nil),                     // 10: cluster.GPUInfo
-	(*ResourceReport)(nil),              // 11: cluster.ResourceReport
-	(*DiskUsage)(nil),                   // 12: cluster.DiskUsage
-	(*ConnectionInfo)(nil),              // 13: cluster.ConnectionInfo
-	(*ConnectionReport)(nil),            // 14: cluster.ConnectionReport
-	(*RenewCertRequest)(nil),            // 15: cluster.RenewCertRequest
-	(*RenewCertResult)(nil),             // 16: cluster.RenewCertResult
-	(*ServerCommand)(nil),               // 17: cluster.ServerCommand
-	(*RenewCertCommand)(nil),            // 18: cluster.RenewCertCommand
-	(*RenewCertResponse)(nil),           // 19: cluster.RenewCertResponse
-	(*RegisterResponse)(nil),            // 20: cluster.RegisterResponse
-	(*VNCConfig)(nil),                   // 21: cluster.VNCConfig
-	(*MonitorConfig)(nil),               // 22: cluster.MonitorConfig
-	(*AgentSettings)(nil),               // 23: cluster.AgentSettings
-	(*StorageConfig)(nil),               // 24: cluster.StorageConfig
-	(*MountTarget)(nil),                 // 25: cluster.MountTarget
-	(*HeartbeatResponse)(nil),           // 26: cluster.HeartbeatResponse
-	(*CommandRequest)(nil),              // 27: cluster.CommandRequest
-	(*CancelCommand)(nil),               // 28: cluster.CancelCommand
-	(*CommandResultAck)(nil),            // 29: cluster.CommandResultAck
-	(*RedirectCommand)(nil),             // 30: cluster.RedirectCommand
-	(*CollectProbeCommand)(nil),         // 31: cluster.CollectProbeCommand
-	(*UpdateSettingsCommand)(nil),       // 32: cluster.UpdateSettingsCommand
-	(*ForwardDispatchRequest)(nil),      // 33: cluster.ForwardDispatchRequest
-	(*ForwardDispatchResponse)(nil),     // 34: cluster.ForwardDispatchResponse
-	(*ForwardClusterEventRequest)(nil),  // 35: cluster.ForwardClusterEventRequest
-	(*ForwardClusterEventResponse)(nil), // 36: cluster.ForwardClusterEventResponse
-	nil,                                 // 37: cluster.CommandRequest.EnvEntry
-	nil,                                 // 38: cluster.ForwardDispatchRequest.NodeSelectorEntry
+	(*CommandResult)(nil),               // 8: cluster.CommandResult
+	(*GPUInfo)(nil),                     // 9: cluster.GPUInfo
+	(*Metrics)(nil),                     // 10: cluster.Metrics
+	(*DiskUsage)(nil),                   // 11: cluster.DiskUsage
+	(*VNCSeatInfo)(nil),                 // 12: cluster.VNCSeatInfo
+	(*XRDPSeatInfo)(nil),                // 13: cluster.XRDPSeatInfo
+	(*RDPSessionInfo)(nil),              // 14: cluster.RDPSessionInfo
+	(*ConnectionReport)(nil),            // 15: cluster.ConnectionReport
+	(*RenewCertRequest)(nil),            // 16: cluster.RenewCertRequest
+	(*RenewCertResult)(nil),             // 17: cluster.RenewCertResult
+	(*ServerCommand)(nil),               // 18: cluster.ServerCommand
+	(*RenewCertCommand)(nil),            // 19: cluster.RenewCertCommand
+	(*RenewCertResponse)(nil),           // 20: cluster.RenewCertResponse
+	(*RegisterResponse)(nil),            // 21: cluster.RegisterResponse
+	(*VNCConfig)(nil),                   // 22: cluster.VNCConfig
+	(*MonitorConfig)(nil),               // 23: cluster.MonitorConfig
+	(*AgentSettings)(nil),               // 24: cluster.AgentSettings
+	(*StorageConfig)(nil),               // 25: cluster.StorageConfig
+	(*MountTarget)(nil),                 // 26: cluster.MountTarget
+	(*HeartbeatResponse)(nil),           // 27: cluster.HeartbeatResponse
+	(*CommandRequest)(nil),              // 28: cluster.CommandRequest
+	(*CancelCommand)(nil),               // 29: cluster.CancelCommand
+	(*CommandResultAck)(nil),            // 30: cluster.CommandResultAck
+	(*RedirectCommand)(nil),             // 31: cluster.RedirectCommand
+	(*CollectProbeCommand)(nil),         // 32: cluster.CollectProbeCommand
+	(*UpdateSettingsCommand)(nil),       // 33: cluster.UpdateSettingsCommand
+	(*ForwardDispatchRequest)(nil),      // 34: cluster.ForwardDispatchRequest
+	(*ForwardDispatchResponse)(nil),     // 35: cluster.ForwardDispatchResponse
+	(*ForwardClusterEventRequest)(nil),  // 36: cluster.ForwardClusterEventRequest
+	(*ForwardClusterEventResponse)(nil), // 37: cluster.ForwardClusterEventResponse
+	nil,                                 // 38: cluster.CommandRequest.EnvEntry
 	(*durationpb.Duration)(nil),         // 39: google.protobuf.Duration
 }
 var file_internal_contract_proto_cluster_proto_depIdxs = []int32{
 	5,  // 0: cluster.AgentMessage.register_request:type_name -> cluster.RegisterRequest
 	7,  // 1: cluster.AgentMessage.heartbeat_request:type_name -> cluster.HeartbeatRequest
-	9,  // 2: cluster.AgentMessage.command_result:type_name -> cluster.CommandResult
-	11, // 3: cluster.AgentMessage.resource_report:type_name -> cluster.ResourceReport
-	14, // 4: cluster.AgentMessage.connection_report:type_name -> cluster.ConnectionReport
+	8,  // 2: cluster.AgentMessage.command_result:type_name -> cluster.CommandResult
+	10, // 3: cluster.AgentMessage.metrics:type_name -> cluster.Metrics
+	15, // 4: cluster.AgentMessage.connection_report:type_name -> cluster.ConnectionReport
 	4,  // 5: cluster.AgentMessage.storage_probe_report:type_name -> cluster.StorageProbeReport
-	15, // 6: cluster.AgentMessage.renew_cert_request:type_name -> cluster.RenewCertRequest
-	16, // 7: cluster.AgentMessage.renew_cert_result:type_name -> cluster.RenewCertResult
+	16, // 6: cluster.AgentMessage.renew_cert_request:type_name -> cluster.RenewCertRequest
+	17, // 7: cluster.AgentMessage.renew_cert_result:type_name -> cluster.RenewCertResult
 	3,  // 8: cluster.StorageProbeReport.items:type_name -> cluster.StorageProbeItem
 	6,  // 9: cluster.RegisterRequest.system_info:type_name -> cluster.SystemInfo
-	8,  // 10: cluster.HeartbeatRequest.rdp:type_name -> cluster.RDPStatus
-	39, // 11: cluster.CommandResult.duration:type_name -> google.protobuf.Duration
-	10, // 12: cluster.ResourceReport.gpus:type_name -> cluster.GPUInfo
-	12, // 13: cluster.ResourceReport.disk_usages:type_name -> cluster.DiskUsage
-	13, // 14: cluster.ConnectionReport.connections:type_name -> cluster.ConnectionInfo
-	20, // 15: cluster.ServerCommand.register_response:type_name -> cluster.RegisterResponse
-	26, // 16: cluster.ServerCommand.heartbeat_response:type_name -> cluster.HeartbeatResponse
-	27, // 17: cluster.ServerCommand.command_request:type_name -> cluster.CommandRequest
-	28, // 18: cluster.ServerCommand.cancel_command:type_name -> cluster.CancelCommand
-	30, // 19: cluster.ServerCommand.redirect_command:type_name -> cluster.RedirectCommand
-	29, // 20: cluster.ServerCommand.command_result_ack:type_name -> cluster.CommandResultAck
-	31, // 21: cluster.ServerCommand.collect_probe_command:type_name -> cluster.CollectProbeCommand
-	32, // 22: cluster.ServerCommand.update_settings_command:type_name -> cluster.UpdateSettingsCommand
-	18, // 23: cluster.ServerCommand.renew_cert_command:type_name -> cluster.RenewCertCommand
-	19, // 24: cluster.ServerCommand.renew_cert_response:type_name -> cluster.RenewCertResponse
-	23, // 25: cluster.RegisterResponse.agent_settings:type_name -> cluster.AgentSettings
-	25, // 26: cluster.MonitorConfig.disk_mounts:type_name -> cluster.MountTarget
-	21, // 27: cluster.AgentSettings.vnc:type_name -> cluster.VNCConfig
-	22, // 28: cluster.AgentSettings.monitor:type_name -> cluster.MonitorConfig
-	24, // 29: cluster.AgentSettings.storages:type_name -> cluster.StorageConfig
-	37, // 30: cluster.CommandRequest.env:type_name -> cluster.CommandRequest.EnvEntry
-	39, // 31: cluster.CommandRequest.timeout:type_name -> google.protobuf.Duration
-	23, // 32: cluster.UpdateSettingsCommand.agent_settings:type_name -> cluster.AgentSettings
-	27, // 33: cluster.ForwardDispatchRequest.request:type_name -> cluster.CommandRequest
-	38, // 34: cluster.ForwardDispatchRequest.node_selector:type_name -> cluster.ForwardDispatchRequest.NodeSelectorEntry
+	39, // 10: cluster.CommandResult.duration:type_name -> google.protobuf.Duration
+	9,  // 11: cluster.Metrics.gpus:type_name -> cluster.GPUInfo
+	11, // 12: cluster.Metrics.disk_usages:type_name -> cluster.DiskUsage
+	12, // 13: cluster.ConnectionReport.vnc_seats:type_name -> cluster.VNCSeatInfo
+	13, // 14: cluster.ConnectionReport.xrdp_seats:type_name -> cluster.XRDPSeatInfo
+	14, // 15: cluster.ConnectionReport.rdp_sessions:type_name -> cluster.RDPSessionInfo
+	21, // 16: cluster.ServerCommand.register_response:type_name -> cluster.RegisterResponse
+	27, // 17: cluster.ServerCommand.heartbeat_response:type_name -> cluster.HeartbeatResponse
+	28, // 18: cluster.ServerCommand.command_request:type_name -> cluster.CommandRequest
+	29, // 19: cluster.ServerCommand.cancel_command:type_name -> cluster.CancelCommand
+	31, // 20: cluster.ServerCommand.redirect_command:type_name -> cluster.RedirectCommand
+	30, // 21: cluster.ServerCommand.command_result_ack:type_name -> cluster.CommandResultAck
+	32, // 22: cluster.ServerCommand.collect_probe_command:type_name -> cluster.CollectProbeCommand
+	33, // 23: cluster.ServerCommand.update_settings_command:type_name -> cluster.UpdateSettingsCommand
+	19, // 24: cluster.ServerCommand.renew_cert_command:type_name -> cluster.RenewCertCommand
+	20, // 25: cluster.ServerCommand.renew_cert_response:type_name -> cluster.RenewCertResponse
+	24, // 26: cluster.RegisterResponse.agent_settings:type_name -> cluster.AgentSettings
+	26, // 27: cluster.MonitorConfig.disk_mounts:type_name -> cluster.MountTarget
+	22, // 28: cluster.AgentSettings.vnc:type_name -> cluster.VNCConfig
+	23, // 29: cluster.AgentSettings.monitor:type_name -> cluster.MonitorConfig
+	25, // 30: cluster.AgentSettings.storages:type_name -> cluster.StorageConfig
+	38, // 31: cluster.CommandRequest.env:type_name -> cluster.CommandRequest.EnvEntry
+	39, // 32: cluster.CommandRequest.timeout:type_name -> google.protobuf.Duration
+	24, // 33: cluster.UpdateSettingsCommand.agent_settings:type_name -> cluster.AgentSettings
+	28, // 34: cluster.ForwardDispatchRequest.request:type_name -> cluster.CommandRequest
 	0,  // 35: cluster.ForwardDispatchRequest.node_affinity:type_name -> cluster.NodeAffinity
 	1,  // 36: cluster.ForwardDispatchRequest.run_mode:type_name -> cluster.RunMode
-	9,  // 37: cluster.ForwardDispatchResponse.result:type_name -> cluster.CommandResult
+	8,  // 37: cluster.ForwardDispatchResponse.result:type_name -> cluster.CommandResult
 	2,  // 38: cluster.ControlService.Sync:input_type -> cluster.AgentMessage
-	33, // 39: cluster.ControlService.ForwardDispatch:input_type -> cluster.ForwardDispatchRequest
-	35, // 40: cluster.ControlService.ForwardClusterEvent:input_type -> cluster.ForwardClusterEventRequest
-	17, // 41: cluster.ControlService.Sync:output_type -> cluster.ServerCommand
-	34, // 42: cluster.ControlService.ForwardDispatch:output_type -> cluster.ForwardDispatchResponse
-	36, // 43: cluster.ControlService.ForwardClusterEvent:output_type -> cluster.ForwardClusterEventResponse
+	34, // 39: cluster.ControlService.ForwardDispatch:input_type -> cluster.ForwardDispatchRequest
+	36, // 40: cluster.ControlService.ForwardClusterEvent:input_type -> cluster.ForwardClusterEventRequest
+	18, // 41: cluster.ControlService.Sync:output_type -> cluster.ServerCommand
+	35, // 42: cluster.ControlService.ForwardDispatch:output_type -> cluster.ForwardDispatchResponse
+	37, // 43: cluster.ControlService.ForwardClusterEvent:output_type -> cluster.ForwardClusterEventResponse
 	41, // [41:44] is the sub-list for method output_type
 	38, // [38:41] is the sub-list for method input_type
 	38, // [38:38] is the sub-list for extension type_name
@@ -3026,13 +3237,15 @@ func file_internal_contract_proto_cluster_proto_init() {
 		(*AgentMessage_RegisterRequest)(nil),
 		(*AgentMessage_HeartbeatRequest)(nil),
 		(*AgentMessage_CommandResult)(nil),
-		(*AgentMessage_ResourceReport)(nil),
+		(*AgentMessage_Metrics)(nil),
 		(*AgentMessage_ConnectionReport)(nil),
 		(*AgentMessage_StorageProbeReport)(nil),
 		(*AgentMessage_RenewCertRequest)(nil),
 		(*AgentMessage_RenewCertResult)(nil),
 	}
-	file_internal_contract_proto_cluster_proto_msgTypes[15].OneofWrappers = []any{
+	file_internal_contract_proto_cluster_proto_msgTypes[10].OneofWrappers = []any{}
+	file_internal_contract_proto_cluster_proto_msgTypes[11].OneofWrappers = []any{}
+	file_internal_contract_proto_cluster_proto_msgTypes[16].OneofWrappers = []any{
 		(*ServerCommand_RegisterResponse)(nil),
 		(*ServerCommand_HeartbeatResponse)(nil),
 		(*ServerCommand_CommandRequest)(nil),

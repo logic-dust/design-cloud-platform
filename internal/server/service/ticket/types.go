@@ -1,157 +1,273 @@
 package ticket
 
 import (
-	"encoding/json"
-	"strconv"
+	"bytes"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"time"
+
+	"design-cloud-engine/internal/model"
 )
 
-// --- 请求 DTO ---
+// Nullable 区分 PATCH 请求中"未传"（Set=false）与"传 null"（Set=true, Value=nil）。
+type Nullable[T any] struct {
+	Set   bool
+	Value *T
+}
 
-// CreateTicketRequest 创建工单
+func (n *Nullable[T]) UnmarshalJSON(data []byte) error {
+	n.Set = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		n.Value = nil
+		return nil
+	}
+	var v T
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	n.Value = &v
+	return nil
+}
+
+// Actor 是发起操作的当前用户。
+type Actor struct {
+	ID       uint
+	Username string
+	Role     model.Role
+	Scopes   model.AdminScopes
+}
+
+// IsTicketAdmin 与 /api/admin/system/tickets 的路由守卫一致：
+// superAdmin、systemAdmin，或持有 tickets 管理范围的普通用户。
+func (a Actor) IsTicketAdmin() bool {
+	switch a.Role {
+	case model.RoleSuperAdmin, model.RoleSystemAdmin:
+		return true
+	case model.RoleNormal:
+		return a.Scopes.Has(model.ScopeTickets)
+	default:
+		return false
+	}
+}
+
+// --- 请求 ---
+
 type CreateTicketRequest struct {
-	ProjectID          uint                   `json:"projectId" binding:"required"`
-	Type               int                    `json:"type" binding:"min=0,max=2"`
-	Title              string                 `json:"title" binding:"required,max=256"`
-	Description        string                 `json:"description"`
-	AssigneeID         uint                   `json:"assigneeId" binding:"required"`
-	DueDate            *time.Time             `json:"dueDate,omitempty"`
-	Priority           int                    `json:"priority" binding:"min=0,max=3"`
-	Status             int                    `json:"status" binding:"min=0,max=3"`
-	AcceptanceCriteria *AcceptanceCriteriaDTO `json:"acceptanceCriteria,omitempty"`
-	Attachments        []AttachmentDTO        `json:"attachments"`
+	ProjectID          uint                            `json:"projectId"`
+	Type               *string                         `json:"type"`
+	Title              string                          `json:"title"`
+	Description        string                          `json:"description"`
+	AssigneeID         *uint                           `json:"assigneeId"`
+	Priority           *string                         `json:"priority"`
+	Status             *string                         `json:"status"`
+	DueDate            *time.Time                      `json:"dueDate"`
+	AcceptanceCriteria *model.TicketAcceptanceCriteria `json:"acceptanceCriteria"`
+	Attachments        []model.TicketAttachment        `json:"attachments"`
 }
 
-// UpdateTicketRequest 更新工单
 type UpdateTicketRequest struct {
-	Type               *int                   `json:"type,omitempty"`
-	Title              *string                `json:"title,omitempty"`
-	Description        *string                `json:"description,omitempty"`
-	AssigneeID         *uint                  `json:"assigneeId,omitempty"`
-	DueDate            *time.Time             `json:"dueDate,omitempty"`
-	Priority           *int                   `json:"priority,omitempty"`
-	Status             *int                   `json:"status,omitempty"`
-	AcceptanceCriteria *AcceptanceCriteriaDTO `json:"acceptanceCriteria,omitempty"`
-	Attachments        *[]AttachmentDTO       `json:"attachments,omitempty"`
-	SortOrder          *float64               `json:"sortOrder,omitempty"`
+	Version            *int                                     `json:"version"`
+	Type               *string                                  `json:"type"`
+	Title              *string                                  `json:"title"`
+	Description        *string                                  `json:"description"`
+	AssigneeID         Nullable[uint]                           `json:"assigneeId"`
+	Priority           *string                                  `json:"priority"`
+	Status             *string                                  `json:"status"`
+	DueDate            Nullable[time.Time]                      `json:"dueDate"`
+	AcceptanceCriteria Nullable[model.TicketAcceptanceCriteria] `json:"acceptanceCriteria"`
+	Attachments        *[]model.TicketAttachment                `json:"attachments"`
 }
 
-// Filter 工单列表过滤参数
-type Filter struct {
-	ProjectID      *uint `json:"projectId,omitempty"`
-	ReporterID     *uint `json:"reporterId,omitempty"`
-	AssigneeID     *uint `json:"assigneeId,omitempty"`
-	Type           *int  `json:"type,omitempty"`
-	Status         *int  `json:"status,omitempty"`
-	Priority       *int  `json:"priority,omitempty"`
-	Limit          int   `json:"limit,omitempty"`
-	Offset         int   `json:"offset,omitempty"`
-	IncludeDeleted bool  `json:"includeDeleted,omitempty"`
+type MoveTicketRequest struct {
+	Version  *int    `json:"version"`
+	Status   *string `json:"status"`
+	AfterID  *uint   `json:"afterId"`
+	BeforeID *uint   `json:"beforeId"`
 }
 
-// AcceptanceCriteriaDTO 验收标准
-type AcceptanceCriteriaDTO struct {
-	Description string   `json:"description"`
-	Checklist   []string `json:"checklist"`
+// ListQuery 是已解析、已校验的列表条件（由 handler 从查询参数构造）。
+type ListQuery struct {
+	ProjectID      *uint
+	ReporterID     *uint
+	AssigneeID     *uint
+	Unassigned     bool
+	Types          []model.TicketType
+	Statuses       []model.TicketStatus
+	Priorities     []model.TicketPriority
+	Q              string
+	Sort           string
+	Order          string
+	Limit          int
+	Offset         int
+	IncludeDeleted bool
+	// AfterSort / AfterID 为 sortOrder keyset 续页游标；成对出现时优先于 Offset。
+	AfterSort *float64
+	AfterID   *uint
 }
 
-// AttachmentDTO 附件
-type AttachmentDTO struct {
-	FileName string `json:"fileName"`
-	FileSize int64  `json:"fileSize"`
-	FilePath string `json:"filePath"`
-	MimeType string `json:"mimeType"`
-	UploadAt string `json:"uploadAt"`
+// HasKeyset 表示请求携带了完整的 keyset 游标。
+func (q ListQuery) HasKeyset() bool {
+	return q.AfterSort != nil && q.AfterID != nil
 }
 
-// CreateProjectRequest 创建项目
 type CreateProjectRequest struct {
-	Name        string `json:"name" binding:"required,max=128"`
+	Name        string `json:"name"`
 	Description string `json:"description"`
 }
 
-// UpdateProjectRequest 更新项目
 type UpdateProjectRequest struct {
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+	IsArchived  *bool   `json:"isArchived"`
 }
 
-// ArchiveProjectRequest 归档/取消归档项目
-type ArchiveProjectRequest struct {
-	Archived bool `json:"archived"`
+type CommentRequest struct {
+	Body string `json:"body"`
 }
 
-// --- 响应定义 ---
+// --- 响应 ---
 
-// PagedResponse 分页响应
-type PagedResponse struct {
-	Items      any   `json:"items"`
-	TotalCount int64 `json:"totalCount"`
-	Limit      int   `json:"limit"`
-	Offset     int   `json:"offset"`
-	HasMore    bool  `json:"hasMore"`
+type UserRef struct {
+	ID       uint   `json:"id"`
+	Username string `json:"username"`
 }
 
-// SummaryDTO 概览统计
+type ProjectRef struct {
+	ID   uint   `json:"id"`
+	Name string `json:"name"`
+}
+
+type TicketDTO struct {
+	ID                 uint                            `json:"id"`
+	Project            ProjectRef                      `json:"project"`
+	Type               model.TicketType                `json:"type"`
+	Title              string                          `json:"title"`
+	Description        string                          `json:"description"`
+	Reporter           UserRef                         `json:"reporter"`
+	Assignee           *UserRef                        `json:"assignee"`
+	Priority           model.TicketPriority            `json:"priority"`
+	Status             model.TicketStatus              `json:"status"`
+	DueDate            *time.Time                      `json:"dueDate"`
+	AcceptanceCriteria *model.TicketAcceptanceCriteria `json:"acceptanceCriteria"`
+	Attachments        []model.TicketAttachment        `json:"attachments"`
+	SortOrder          float64                         `json:"sortOrder"`
+	Version            int                             `json:"version"`
+	CompletedAt        *time.Time                      `json:"completedAt"`
+	CreatedAt          time.Time                       `json:"createdAt"`
+	UpdatedAt          time.Time                       `json:"updatedAt"`
+	DeletedAt          *time.Time                      `json:"deletedAt,omitempty"`
+}
+
+type ProjectDTO struct {
+	ID          uint       `json:"id"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	IsArchived  bool       `json:"isArchived"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+	DeletedAt   *time.Time `json:"deletedAt,omitempty"`
+}
+
+type CommentDTO struct {
+	ID        uint      `json:"id"`
+	TicketID  uint      `json:"ticketId"`
+	Author    UserRef   `json:"author"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type EventDTO struct {
+	ID        uint                    `json:"id"`
+	Actor     UserRef                 `json:"actor"`
+	Action    model.TicketEventAction `json:"action"`
+	Field     string                  `json:"field,omitempty"`
+	From      *string                 `json:"from"`
+	To        *string                 `json:"to"`
+	CreatedAt time.Time               `json:"createdAt"`
+}
+
+type Page[T any] struct {
+	Items []T `json:"items"`
+	// TotalCount 为匹配过滤条件的总数；keyset 续页不重算 COUNT 时为 -1。
+	TotalCount    int64    `json:"totalCount"`
+	Limit         int      `json:"limit"`
+	Offset        int      `json:"offset"`
+	HasMore       bool     `json:"hasMore"`
+	NextAfterSort *float64 `json:"nextAfterSort,omitempty"`
+	NextAfterID   *uint    `json:"nextAfterId,omitempty"`
+}
+
+func newPage[T any](items []T, total int64, limit, offset int) Page[T] {
+	if items == nil {
+		items = []T{}
+	}
+	return Page[T]{Items: items, TotalCount: total, Limit: limit, Offset: offset, HasMore: int64(offset+len(items)) < total}
+}
+
 type SummaryDTO struct {
-	TotalTasks            int          `json:"totalTasks"`
-	CompletedTasks        int          `json:"completedTasks"`
-	OverallCompletionRate float64      `json:"overallCompletionRate"`
-	Trends                []TrendPoint `json:"trends"`
+	Timezone              string         `json:"timezone"`
+	TotalTasks            int            `json:"totalTasks"`
+	CompletedTasks        int            `json:"completedTasks"`
+	OverallCompletionRate float64        `json:"overallCompletionRate"`
+	ByStatus              map[string]int `json:"byStatus"`
+	Trends                []TrendPoint   `json:"trends"`
 }
 
-// TrendPoint 趋势数据点
 type TrendPoint struct {
-	Date           time.Time `json:"date"`
-	TaskCount      int       `json:"taskCount"`
-	CompletionRate float64   `json:"completionRate"`
+	Date      string `json:"date"`
+	Created   int    `json:"created"`
+	Completed int    `json:"completed"`
 }
 
-// serializeAcceptanceCriteria 将 DTO 序列化为 JSON 字符串
-func serializeAcceptanceCriteria(criteria *AcceptanceCriteriaDTO) string {
-	if criteria == nil {
-		return ""
-	}
-	data, err := json.Marshal(criteria)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
+// --- 映射 ---
 
-// serializeAttachments 将附件 DTO 切片序列化为 JSON 字符串
-func serializeAttachments(attachments []AttachmentDTO) string {
-	if len(attachments) == 0 {
-		return ""
+func toTicketDTO(t model.Ticket) TicketDTO {
+	d := TicketDTO{
+		ID:                 t.ID,
+		Project:            ProjectRef{ID: t.ProjectID, Name: t.Project.Name},
+		Type:               t.Type,
+		Title:              t.Title,
+		Description:        t.Description,
+		Reporter:           UserRef{ID: t.ReporterID, Username: t.Reporter.Username},
+		Priority:           t.Priority,
+		Status:             t.Status,
+		DueDate:            t.DueDate,
+		AcceptanceCriteria: t.AcceptanceCriteria,
+		Attachments:        t.Attachments,
+		SortOrder:          t.SortOrder,
+		Version:            t.Version,
+		CompletedAt:        t.CompletedAt,
+		CreatedAt:          t.CreatedAt,
+		UpdatedAt:          t.UpdatedAt,
 	}
-	data, err := json.Marshal(attachments)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
-// formatUint 将 uint 格式化为字符串
-func formatUint(v uint) string {
-	return strconv.FormatUint(uint64(v), 10)
-}
-
-// formatUserIDs 将用户 ID 集合格式化为字符串切片（去重），用于事件推送目标。
-// formatUserIDs 格式化用户列表（去重），可排除操作者。
-// 操作者走请求-响应链路（response 已反馈结果），无需推送——只推被动方。
-// 寻址：hub 按 username 路由，传入即为 username 列表。
-func formatUserIDs(exclude string, usernames ...string) []string {
-	seen := make(map[string]struct{}, len(usernames))
-	out := make([]string, 0, len(usernames))
-	for _, u := range usernames {
-		if u == "" || u == exclude {
-			continue
+	if t.AssigneeID != nil {
+		ref := UserRef{ID: *t.AssigneeID}
+		if t.Assignee != nil {
+			ref.Username = t.Assignee.Username
 		}
-		if _, ok := seen[u]; ok {
-			continue
-		}
-		seen[u] = struct{}{}
-		out = append(out, u)
+		d.Assignee = &ref
 	}
-	return out
+	if d.Attachments == nil {
+		d.Attachments = []model.TicketAttachment{}
+	}
+	if t.DeletedAt.Valid {
+		d.DeletedAt = &t.DeletedAt.Time
+	}
+	return d
+}
+
+func toProjectDTO(p model.TicketProject) ProjectDTO {
+	d := ProjectDTO{ID: p.ID, Name: p.Name, Description: p.Description, IsArchived: p.IsArchived, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+	if p.DeletedAt.Valid {
+		d.DeletedAt = &p.DeletedAt.Time
+	}
+	return d
+}
+
+func toCommentDTO(c model.TicketComment) CommentDTO {
+	return CommentDTO{ID: c.ID, TicketID: c.TicketID, Author: UserRef{ID: c.AuthorID, Username: c.Author.Username}, Body: c.Body, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt}
+}
+
+func toEventDTO(e model.TicketEvent) EventDTO {
+	return EventDTO{ID: e.ID, Actor: UserRef{ID: e.ActorID, Username: e.Actor.Username}, Action: e.Action, Field: e.Field, From: e.FromValue, To: e.ToValue, CreatedAt: e.CreatedAt}
 }

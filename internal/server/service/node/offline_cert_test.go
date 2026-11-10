@@ -47,8 +47,8 @@ func TestOfflineIssueCert_NewNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get node: %v", err)
 	}
-	if node.Status != model.NodeStatusProvisioned {
-		t.Errorf("expected status provisioned, got %v", node.Status)
+	if node.Status != model.NodeStatusUnset {
+		t.Errorf("expected unset runtime status, got %v", node.Status)
 	}
 	if node.IsServer {
 		t.Errorf("expected is_server to be false")
@@ -56,8 +56,8 @@ func TestOfflineIssueCert_NewNode(t *testing.T) {
 	if node.CertFingerprint != res.Fingerprint {
 		t.Errorf("expected node fingerprint %s, got %s", res.Fingerprint, node.CertFingerprint)
 	}
-	if node.Token != "" {
-		t.Errorf("expected token to be empty for offline-issued node, got %s", node.Token)
+	if node.EnrollmentTokenHash != "" {
+		t.Errorf("expected enrollment token hash to be empty for offline-issued node")
 	}
 }
 

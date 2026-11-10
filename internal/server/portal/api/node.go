@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/platform/config"
 	"design-cloud-engine/internal/server/portal/httputil"
 	nodesvc "design-cloud-engine/internal/server/service/node"
 
@@ -45,9 +45,9 @@ func (h *nodeHandler) registerNode(c *echo.Context) error {
 	}
 	serverAddr := serverHost + ":" + strconv.Itoa(h.clusterPort)
 
-	materials, err := h.node.BootstrapWithToken(c.Request().Context(), nodeID, body.Token, serverAddr)
+	enrollment, err := h.node.EnrollWithToken(c.Request().Context(), nodeID, body.Token, serverAddr)
 	if err != nil {
 		return handleNodeError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: materials})
+	return c.JSON(http.StatusOK, httputil.Response{Data: enrollment})
 }

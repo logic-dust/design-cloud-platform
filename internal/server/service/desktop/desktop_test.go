@@ -3,12 +3,13 @@ package desktop
 import (
 	"context"
 	"errors"
-	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"design-cloud-engine/internal/server/service/settings/schema"
+	"design-cloud-engine/internal/contract"
+	"design-cloud-engine/internal/contract/schema"
 )
 
 type mockDesktopSettingsProvider struct {
@@ -30,6 +31,7 @@ func TestDesktopService(t *testing.T) {
 	mockSettings := &mockDesktopSettingsProvider{
 		settings: schema.DesktopSettings{
 			ReleasesEnabled: true,
+			PluginsEnabled:  true,
 			MaxAssets:       5,
 			WindowsEnabled:  true,
 			LinuxEnabled:    true,
@@ -51,10 +53,16 @@ func TestDesktopService(t *testing.T) {
 
 	mockSettings.settings.ReleasesEnabled = true
 
-	// 2. Missing manifest -> 404 (fs.ErrNotExist)
+	// 2. Missing manifest -> 404 (contract.NewNotFoundError)
 	_, err := svc.GetDesktopManifest(context.Background(), 10, "win")
-	if !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("expected fs.ErrNotExist when manifest missing, got %v", err)
+	if err == nil {
+		t.Errorf("expected error when manifest missing, got nil")
+	} else {
+		if contractErr, ok := errors.AsType[contract.DomainError](err); !ok {
+			t.Errorf("expected contract.DomainError, got %T: %v", err, err)
+		} else if contractErr.HTTPStatus() != http.StatusNotFound {
+			t.Errorf("expected 404 for missing manifest, got %d: %v", contractErr.HTTPStatus(), err)
+		}
 	}
 
 	// 3. Create releases.win.json
@@ -105,8 +113,48 @@ func TestDesktopService(t *testing.T) {
 		t.Errorf("expected %s, got %s", pkgPath, resolved)
 	}
 
-	// 7. Path traversal prevention
-	if _, err := svc.ResolveDownloadPath(context.Background(), "../secret"); !errors.Is(err, fs.ErrInvalid) {
-		t.Errorf("expected fs.ErrInvalid for path traversal, got %v", err)
+	// 7. Path traversal prevention -> 422 (contract.NewValidationError)
+	if _, err := svc.ResolveDownloadPath(context.Background(), "../secret"); err == nil {
+		t.Errorf("expected error for path traversal, got nil")
+	} else {
+		if contractErr, ok := errors.AsType[contract.DomainError](err); !ok {
+			t.Errorf("expected contract.DomainError for path traversal, got %T: %v", err, err)
+		} else if contractErr.HTTPStatus() != http.StatusUnprocessableEntity {
+			t.Errorf("expected 422 for path traversal, got %d: %v", contractErr.HTTPStatus(), err)
+		}
+	}
+}
+
+func TestDesktopPluginRelease(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	mockSettings := &mockDesktopSettingsProvider{
+		settings: schema.DesktopSettings{
+			PluginsEnabled: true,
+			WindowsEnabled: true,
+		},
+	}
+	svc := NewService(tmpDir, mockSettings, nil)
+
+	platformDir := filepath.Join(tmpDir, "plugins", "turbovnc", "win")
+	if err := os.MkdirAll(platformDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(platformDir, LatestVersionFile), []byte("3.1.4|abc|4\n"), 0644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(platformDir, LatestZipFile), []byte("zip!"), 0644); err != nil {
+		t.Fatalf("write zip: %v", err)
+	}
+
+	release, err := svc.GetPluginLatest(context.Background(), "turbovnc", "win")
+	if err != nil || release.Version != "3.1.4" {
+		t.Fatalf("GetPluginLatest: %v %+v", err, release)
+	}
+
+	mockSettings.settings.PluginsEnabled = false
+	if _, err := svc.GetPluginLatest(context.Background(), "turbovnc", "win"); err == nil {
+		t.Fatal("expected error when plugins disabled")
 	}
 }

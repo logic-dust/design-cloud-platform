@@ -20,11 +20,12 @@ func (h *licenseHandler) adminLicensesAPI(g *echo.Group) {
 
 // --- 获取许可证服务列表（管理员，含未启用）
 func (h *licenseHandler) adminListLicenseServices(c *echo.Context) error {
-	list, err := h.license.AdminList(c.Request().Context())
+	p := httputil.ParsePage(c)
+	list, total, err := h.license.AdminListPage(c.Request().Context(), p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: list})
+	return httputil.RespondPage(c, list, total)
 }
 
 // --- 获取许可证服务详情（管理员，含未启用）

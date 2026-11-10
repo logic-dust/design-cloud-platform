@@ -9,18 +9,16 @@ import (
 	"slices"
 	"time"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/common/crypto"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/cache"
+	"design-cloud-engine/internal/platform/crypto"
+	"design-cloud-engine/internal/server/push"
 	"design-cloud-engine/internal/server/service/file"
-	"design-cloud-engine/internal/server/service/push"
 	securitysvc "design-cloud-engine/internal/server/service/security"
-	"design-cloud-engine/internal/server/service/settings"
-	"design-cloud-engine/internal/server/service/settings/schema"
 	"design-cloud-engine/internal/server/service/user"
 
+	"design-cloud-engine/internal/contract"
 	"gorm.io/gorm"
 )
 
@@ -30,16 +28,20 @@ type Service struct {
 	logger      *slog.Logger
 	authSvc     *AuthManager
 	userSvc     *user.Service
-	settingsSvc *settings.Service
+	settingsSvc SettingsReader
 	securitySvc *securitysvc.Service
 	cache       *sessionInfoCache
-	invalidator *cache.Invalidator
-	proxyPruner func(time.Time) int
+	evictor     *Evictor
 	publisher   push.Publisher
 }
 
 // NewService creates a new session service.
-func NewService(logger *slog.Logger, authSvc *AuthManager, userSvc *user.Service, securitySvc *securitysvc.Service, settingsSvc *settings.Service, sessionRepo *db.SessionRepo, invalidator *cache.Invalidator, publisher push.Publisher) (*Service, error) {
+//
+// evictor is the shared cross-domain session-effect component: session and user
+// both use the same instance, and this service only borrows its cache. That
+// keeps the construction order a DAG (Evictor → User → Session) instead of the
+// former user↔session post-construction wiring.
+func NewService(logger *slog.Logger, authSvc *AuthManager, userSvc *user.Service, securitySvc *securitysvc.Service, settingsSvc SettingsReader, sessionRepo *db.SessionRepo, evictor *Evictor, publisher push.Publisher) (*Service, error) {
 	if logger == nil {
 		return nil, fmt.Errorf("session: logger is required")
 	}
@@ -58,36 +60,34 @@ func NewService(logger *slog.Logger, authSvc *AuthManager, userSvc *user.Service
 	if sessionRepo == nil {
 		return nil, fmt.Errorf("session: session repo is required")
 	}
+	if evictor == nil {
+		return nil, fmt.Errorf("session: session evictor is required")
+	}
 	if publisher == nil {
 		publisher = push.NoopPublisher{}
 	}
-	sCache := newSessionInfoCache()
 
-	s := &Service{
+	return &Service{
 		sessionRepo: sessionRepo,
 		logger:      logger,
 		authSvc:     authSvc,
 		userSvc:     userSvc,
 		settingsSvc: settingsSvc,
 		securitySvc: securitySvc,
-		cache:       sCache,
-		invalidator: invalidator,
+		cache:       evictor.cache,
+		evictor:     evictor,
 		publisher:   publisher,
-	}
-	if invalidator != nil {
-		invalidator.Register("session", func() {
-			sCache.clear()
-		})
-	}
-	return s, nil
+	}, nil
 }
 
+// InvalidateByUsername drops the local cache entries of a user without deleting
+// the persisted sessions.
 func (s *Service) InvalidateByUsername(username string) {
-	s.cache.evictByUsername(username)
+	s.evictor.InvalidateByUsername(username)
 }
 
 func (s *Service) invalidateToken(token string) {
-	s.cache.evictToken(token)
+	s.cache.invalidateToken(token)
 }
 
 // Close stops the background tasks of the session service.
@@ -98,7 +98,8 @@ func (s *Service) Close() {
 const passwordChangeRequiredSessionTTLSeconds = 5 * 60
 
 // Create authenticates a user and issues a new session token.
-func (s *Service) Create(ctx context.Context, username, password, ip string, enableThreeRoles bool, fileLister FileLocationsLister) (*Payload, error) {
+func (s *Service) Create(ctx context.Context, username, password string, client LoginClient, enableThreeRoles bool, fileLister FileLocationsLister) (*Payload, error) {
+	ip := client.IP
 	// 1. System-protected accounts — reject immediately
 	if err := s.authSvc.blockRootAndAdmin(ctx, username, ip); err != nil {
 		return nil, err
@@ -122,27 +123,32 @@ func (s *Service) Create(ctx context.Context, username, password, ip string, ena
 		return nil, err
 	}
 
-	// 5. Load auth settings, enforce session quota, and resolve the TTL
+	// 5. Load auth settings, enforce session quota, and resolve the TTL.
+	// GetAuthSettings already validates and falls back to schema defaults for
+	// corrupt stored values; a hard error means settings are unavailable — fail closed.
 	authSettings, err := s.settingsSvc.GetAuthSettings(ctx)
 	if err != nil {
-		s.logger.Warn("Failed to load auth settings, using defaults", "error", err, "username", username)
+		s.logger.Error("Failed to load auth settings", "error", err, "username", username)
+		return nil, fmt.Errorf("load auth settings: %w", err)
 	}
 	if err := s.enforceSessionQuota(ctx, userRecord, authSettings); err != nil {
 		return nil, err
 	}
 	sessionTTLSeconds := authSettings.SessionTTL
-	if sessionTTLSeconds < 300 {
-		sessionTTLSeconds = 86400 // fallback when settings unavailable
-	}
 	if authResult.PasswordMustChange {
 		sessionTTLSeconds = passwordChangeRequiredSessionTTLSeconds
 	}
 
 	// 6. Create session record
 	newSession := newSessionRecordWithTTL(userRecord.ID, username, ip, userRecord.Role, userRecord.Type, userRecord.AdminScopes, sessionTTLSeconds, authResult.PasswordMustChange)
+	newSession.Hostname = model.TruncateText(client.Hostname, model.MaxSessionHostnameLength)
+	newSession.Platform = model.TruncateText(client.Platform, model.MaxSessionPlatformLength)
+	newSession.OSVersion = model.TruncateText(client.OSVersion, model.MaxSessionOSVersionLength)
+	newSession.AppVersion = model.TruncateText(client.AppVersion, model.MaxSessionAppVersionLength)
+	newSession.DeviceID = model.TruncateText(client.DeviceID, model.MaxSessionDeviceIDLength)
 	if err := s.sessionRepo.Create(ctx, &newSession); err != nil {
 		s.logger.Error("Save session failed", "error", err, "username", username)
-		if common.IsUniqueConstraintError(err) {
+		if db.IsUniqueConstraintError(err) {
 			return nil, fmt.Errorf("session token collision, please retry: %w", err)
 		}
 		return nil, fmt.Errorf("create session: %w", err)
@@ -153,6 +159,7 @@ func (s *Service) Create(ctx context.Context, username, password, ip string, ena
 		"ip", ip)
 
 	payload := s.BuildSessionContextPayload(ctx, &newSession, fileLister, ip, authResult.PasswordMustChange)
+	payload.MultiSessionEnabled = multiSessionEnabled(authSettings)
 	// System users carry their LDAP password expiration; app users have none.
 	if u, err := s.userSvc.Get(ctx, username); err == nil {
 		payload.PasswordExpiresAt = u.PasswordExpiresAt
@@ -177,7 +184,7 @@ func (s *Service) checkAdminModeRestriction(ctx context.Context, username string
 				return ErrAdminModeRestriction
 			}
 		}
-	} else if !errors.Is(err, common.ErrNotFound) {
+	} else if !errors.Is(err, contract.ErrNotFound) {
 		// Unexpected DB error (transient outage, connection failure, etc.)
 		s.logger.Warn("admin-mode check failed, denying login", "error", err, "username", username)
 		return fmt.Errorf("admin-mode precheck failed: %w", err)
@@ -201,29 +208,50 @@ func (s *Service) syncUserAndPasswordExpiry(ctx context.Context, username, ip st
 			return nil, fmt.Errorf("failed to update user status: %w", err)
 		}
 		userRecord.Status = model.UserPasswordExpired
+	} else if !passwordMustChange && userRecord.Status == model.UserPasswordExpired {
+		// LDAP/OS auth succeeded (e.g. admin reset password in IPA); clear stale portal DB state.
+		if err := s.userSvc.ChangeStatus(ctx, username, model.UserActive); err != nil {
+			s.logger.Error("Failed to clear stale password-expired status", "error", err, "username", username)
+			return nil, fmt.Errorf("failed to update user status: %w", err)
+		}
+		userRecord.Status = model.UserActive
 	}
 	return userRecord, nil
 }
 
+// multiSessionEnabled reports whether one user may hold several sessions at once.
+func multiSessionEnabled(authSettings schema.AuthSettings) bool {
+	return authSettings.MaxSessionsPerUser > 1
+}
+
+// MultiSessionEnabled loads auth settings and reports whether multiple sessions per user are allowed.
+func (s *Service) MultiSessionEnabled(ctx context.Context) (bool, error) {
+	authSettings, err := s.settingsSvc.GetAuthSettings(ctx)
+	if err != nil {
+		return false, fmt.Errorf("load auth settings: %w", err)
+	}
+	return multiSessionEnabled(authSettings), nil
+}
+
 // enforceSessionQuota trims the user's oldest sessions when the active count
-// exceeds MaxLoginSessionsPerUser. No-op when the quota is disabled (<= 0).
+// exceeds MaxSessionsPerUser. No-op when the quota is disabled (<= 0).
 func (s *Service) enforceSessionQuota(ctx context.Context, userRecord *model.User, authSettings schema.AuthSettings) error {
-	maxLoginSessions := authSettings.MaxLoginSessionsPerUser
-	if maxLoginSessions <= 0 {
+	maxSessions := authSettings.MaxSessionsPerUser
+	if maxSessions <= 0 {
 		return nil
 	}
 	count, err := s.sessionRepo.CountByUser(ctx, userRecord.ID)
 	if err != nil {
 		return fmt.Errorf("count active sessions: %w", err)
 	}
-	if count < int64(maxLoginSessions) {
+	if count < int64(maxSessions) {
 		return nil
 	}
 	oldSessions, err := s.sessionRepo.GetByUserID(ctx, userRecord.ID)
 	if err != nil {
 		return fmt.Errorf("load active sessions: %w", err)
 	}
-	for i := range len(oldSessions) - maxLoginSessions + 1 {
+	for i := range len(oldSessions) - maxSessions + 1 {
 		if err := s.sessionRepo.DeleteByIDs(ctx, []uint{oldSessions[i].ID}); err != nil {
 			return fmt.Errorf("clear old session: %w", err)
 		}
@@ -249,7 +277,11 @@ func (s *Service) Renew(ctx context.Context, sessionToken string) (*model.Sessio
 		return nil, ErrPasswordChangeRequired
 	}
 	now := time.Now()
-	ttl := time.Duration(s.sessionTTLSeconds(ctx)) * time.Second
+	ttlSec, err := s.sessionTTLSeconds(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ttl := time.Duration(ttlSec) * time.Second
 
 	// 社区标准滑动窗口 (Sliding Expiration Window)：
 	// 仅当会话剩余有效时间小于总 TTL 的一半时（进入滑动刷新窗口），才触发真实 DB 写入；
@@ -263,8 +295,8 @@ func (s *Service) Renew(ctx context.Context, sessionToken string) (*model.Sessio
 	refreshed.UpdatedAt = now
 
 	if err := s.sessionRepo.Renew(ctx, refreshed.ID, refreshed.ExpiresAt); err != nil {
-		if errors.Is(err, common.ErrNotFound) {
-			s.cache.evictToken(sessionToken)
+		if errors.Is(err, contract.ErrNotFound) {
+			s.cache.invalidateToken(sessionToken)
 			return nil, ErrInvalidSessionToken
 		}
 		return nil, fmt.Errorf("renew session %d: %w", refreshed.ID, err)
@@ -280,11 +312,11 @@ func (s *Service) GetByToken(ctx context.Context, token string) (*model.Session,
 		if time.Now().Before(info.ExpiresAt) {
 			return info, nil
 		}
-		s.cache.evictToken(token)
+		s.cache.invalidateToken(token)
 	}
 	session, err := s.sessionRepo.GetByToken(ctx, token)
 	if err != nil {
-		if errors.Is(err, common.ErrNotFound) {
+		if errors.Is(err, contract.ErrNotFound) {
 			return nil, ErrInvalidSessionToken
 		}
 		return nil, fmt.Errorf("get session by token: %w", err)
@@ -297,20 +329,16 @@ func (s *Service) GetByToken(ctx context.Context, token string) (*model.Session,
 // transaction. It is the single shared implementation of the invalidation
 // closure previously duplicated across the Delete* methods.
 func (s *Service) bumpSessionInvalidation(ctx context.Context, tx *gorm.DB) error {
-	if s.invalidator != nil {
-		return s.invalidator.BumpTx(ctx, tx, "session")
+	if s.evictor != nil && s.evictor.invalidator != nil {
+		return s.evictor.invalidator.BumpTx(ctx, tx, db.CacheVersionTopicSessions)
 	}
 	return nil
 }
 
+// Delete removes every persisted session of the user through the shared Evictor,
+// so user-initiated and session-initiated revocation share one implementation.
 func (s *Service) Delete(ctx context.Context, username string) error {
-	if err := s.sessionRepo.DeleteByUsername(ctx, username, func(tx *gorm.DB) error {
-		return s.bumpSessionInvalidation(ctx, tx)
-	}); err != nil {
-		return fmt.Errorf("delete sessions for user %s: %w", username, err)
-	}
-	s.InvalidateByUsername(username)
-	return nil
+	return s.evictor.Delete(ctx, username)
 }
 
 func (s *Service) DeleteByIDs(ctx context.Context, sessionIDs ...uint) error {
@@ -326,10 +354,10 @@ func (s *Service) DeleteByIDs(ctx context.Context, sessionIDs ...uint) error {
 	}
 
 	actualIDs := make([]uint, 0, len(sessions))
-	usernames := make(map[string]struct{}, len(sessions))
+	usernames := make(map[string]uint, len(sessions))
 	for _, sess := range sessions {
 		actualIDs = append(actualIDs, sess.ID)
-		usernames[sess.Username] = struct{}{}
+		usernames[sess.Username] = sess.UserID
 		s.invalidateToken(sess.Token)
 	}
 
@@ -353,6 +381,9 @@ func (s *Service) DeleteByIDs(ctx context.Context, sessionIDs ...uint) error {
 			},
 		},
 	})
+	for username, userID := range usernames {
+		s.evictor.revokeProxyIfNoSessions(ctx, userID, username)
+	}
 	return nil
 }
 
@@ -367,6 +398,7 @@ func (s *Service) DeleteByAccessToken(ctx context.Context, accessToken string) e
 		return fmt.Errorf("delete session %d by token: %w", info.ID, err)
 	}
 	s.invalidateToken(accessToken)
+	s.evictor.revokeProxyIfNoSessions(ctx, info.UserID, info.Username)
 	return nil
 }
 
@@ -383,11 +415,13 @@ func (s *Service) DeleteOwnedByIDs(ctx context.Context, ownerUserID uint, sessio
 	}
 
 	actualIDs := make([]uint, 0, len(sessions))
+	username := ""
 	for _, sess := range sessions {
 		if sess.UserID != ownerUserID {
 			return ErrSessionAccessDenied
 		}
 		actualIDs = append(actualIDs, sess.ID)
+		username = sess.Username
 		s.invalidateToken(sess.Token)
 	}
 
@@ -396,13 +430,14 @@ func (s *Service) DeleteOwnedByIDs(ctx context.Context, ownerUserID uint, sessio
 	}); err != nil {
 		return fmt.Errorf("delete owned sessions %v: %w", actualIDs, err)
 	}
+	s.evictor.revokeProxyIfNoSessions(ctx, ownerUserID, username)
 	return nil
 }
 
 func (s *Service) DeleteOwnedByID(ctx context.Context, sessionID, ownerUserID uint) error {
 	session, err := s.sessionRepo.Get(ctx, sessionID)
 	if err != nil {
-		if errors.Is(err, common.ErrNotFound) {
+		if errors.Is(err, contract.ErrNotFound) {
 			return ErrSessionNotFound
 		}
 		return fmt.Errorf("get session %d: %w", sessionID, err)
@@ -427,6 +462,14 @@ func (s *Service) ListByUserID(ctx context.Context, userID uint) ([]model.Sessio
 		return nil, fmt.Errorf("list sessions for user %d: %w", userID, err)
 	}
 	return sessions, nil
+}
+
+func (s *Service) ListByUserIDPage(ctx context.Context, userID uint, limit, offset int) ([]model.Session, int64, error) {
+	sessions, total, err := s.sessionRepo.ListByUserIDPage(ctx, userID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list sessions for user %d: %w", userID, err)
+	}
+	return sessions, total, nil
 }
 
 // mergeUniqueModules merges two string slices in order, returning a new slice
@@ -454,19 +497,19 @@ func newSessionRecordWithTTL(userID uint, username, ip string, role model.Role, 
 		Token:              secret,
 		IP:                 ip,
 		Role:               role,
-		Type:               userType,
+		UserType:           userType,
 		AdminScopes:        adminScopes,
 		PasswordMustChange: passwordMustChange,
 		ExpiresAt:          now.Add(time.Duration(ttlSeconds) * time.Second),
 	}
 }
 
-func (s *Service) sessionTTLSeconds(ctx context.Context) int {
+func (s *Service) sessionTTLSeconds(ctx context.Context) (int, error) {
 	authSetting, err := s.settingsSvc.GetAuthSettings(ctx)
-	if err == nil && authSetting.SessionTTL >= 300 {
-		return authSetting.SessionTTL
+	if err != nil {
+		return 0, fmt.Errorf("load auth settings: %w", err)
 	}
-	return 86400
+	return authSetting.SessionTTL, nil
 }
 
 type FileLocationsLister interface {
@@ -475,8 +518,8 @@ type FileLocationsLister interface {
 
 func BuildAdminConsoleModules(sessionRecord *model.Session) []string {
 	if sessionRecord.Role == model.RoleSuperAdmin {
-		return []string{"dashboard", "node", "connection", "scheduler", "app", "settings", "license",
-			"ticket", "user", "file", "security", "audit", "storage", "status", "scope", "role"}
+		return []string{"overview", "node", "connection", "scheduler", "app", "settings", "license",
+			"ticket", "user", "file", "sessions", "security", "audit", "storage", "status", "scope", "role"}
 	}
 
 	type moduleRule struct {
@@ -496,10 +539,11 @@ func BuildAdminConsoleModules(sessionRecord *model.Session) []string {
 		{"storage", model.RoleSystemAdmin, []model.AdminScope{model.ScopeStorages}},
 		{"status", model.RoleSystemAdmin, []model.AdminScope{model.ScopeStatuses}},
 		{"file", model.RoleSecurityAdmin, []model.AdminScope{model.ScopeFiles}},
-		{"security", model.RoleSecurityAdmin, []model.AdminScope{model.ScopeSessions, model.ScopeBans}},
+		{"sessions", model.RoleSecurityAdmin, []model.AdminScope{model.ScopeSessions}},
+		{"security", model.RoleSecurityAdmin, []model.AdminScope{model.ScopeBans}},
 	}
 
-	modules := []string{"dashboard"} // 硬添加：无条件作为第一项，与任何权限无关
+	modules := []string{"overview"} // 硬添加：无条件作为第一项，与任何权限无关
 	for _, r := range rules {
 		if sessionRecord.Role == r.role || sessionRecord.AdminScopes.HasAny(r.scopes...) {
 			modules = append(modules, r.name)
@@ -541,7 +585,12 @@ func (s *Service) BuildSessionContextPayload(ctx context.Context, sessionRecord 
 
 	if s.settingsSvc != nil {
 		if pSettings, err := s.settingsSvc.GetPlatformSettings(ctx); err == nil {
-			globalDisabled = pSettings.DisabledModules
+			for module, disabled := range pSettings.DisabledModules {
+				if disabled {
+					globalDisabled = append(globalDisabled, module)
+				}
+			}
+			slices.Sort(globalDisabled)
 		}
 		if fSettings, err := s.settingsSvc.GetFileSettings(ctx); err == nil {
 			fileEnabled = fSettings.Enabled
@@ -565,14 +614,14 @@ func (s *Service) BuildSessionContextPayload(ctx context.Context, sessionRecord 
 
 	uiPayload := UIPayload{
 		AdminConsole: AdminConsolePayload{
-			Enabled:     hasAdminAccess,
-			IsWhitelist: true,
-			Modules:     adminModules,
+			Enabled: hasAdminAccess,
+			Mode:    UIModuleListAllow,
+			Modules: adminModules,
 		},
 		UserPortal: UserPortalPayload{
-			Enabled:     userPortalEnabled,
-			IsWhitelist: false,
-			Modules:     disabledModules,
+			Enabled: userPortalEnabled,
+			Mode:    UIModuleListDeny,
+			Modules: disabledModules,
 		},
 	}
 

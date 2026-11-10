@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/model"
 
+	"design-cloud-engine/internal/contract"
 	"gorm.io/gorm"
 )
 
@@ -27,7 +27,7 @@ func (r *LicenseRepo) Get(ctx context.Context, id uint) (model.LicenseService, e
 	var licService model.LicenseService
 	if err := r.store.db.WithContext(ctx).First(&licService, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return model.LicenseService{}, fmt.Errorf("license service %d: %w", id, common.ErrNotFound)
+			return model.LicenseService{}, fmt.Errorf("license service %d: %w", id, contract.ErrNotFound)
 		}
 		return model.LicenseService{}, err
 	}
@@ -42,13 +42,32 @@ func (r *LicenseRepo) List(ctx context.Context) ([]model.LicenseService, error) 
 	return licServices, nil
 }
 
+func (r *LicenseRepo) ListPage(ctx context.Context, limit, offset int, enabledOnly bool) ([]model.LicenseService, int64, error) {
+	if err := validateLimit(limit); err != nil {
+		return nil, 0, err
+	}
+	query := r.store.db.WithContext(ctx).Model(&model.LicenseService{})
+	if enabledOnly {
+		query = query.Where("enabled = ?", true)
+	}
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var licServices []model.LicenseService
+	if err := query.Order("id ASC").Limit(limit).Offset(offset).Find(&licServices).Error; err != nil {
+		return nil, 0, err
+	}
+	return licServices, total, nil
+}
+
 func (r *LicenseRepo) Delete(ctx context.Context, id uint) error {
 	db := r.store.db.WithContext(ctx).Delete(&model.LicenseService{}, id)
 	if db.Error != nil {
 		return db.Error
 	}
 	if db.RowsAffected == 0 {
-		return common.ErrNotFound
+		return contract.ErrNotFound
 	}
 	return nil
 }

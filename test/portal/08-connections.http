@@ -1,0 +1,142 @@
+# ========================================
+# ===== CONNECTIONS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录；自动化 runner 在首个请求前会做 admin cleanup + 用户连接清理 -----
+
+### 管理员清理僵尸连接（避免 VNC display 占用导致 POST 409）
+POST {{addr}}/api/admin/system/connections/cleanup
+Authorization: Bearer {{accessToken}}
+
+### 获取当前用户可用规格列表
+GET {{addr}}/api/connections/resources
+Authorization: Bearer {{accessToken}}
+
+> {%
+if (response.status !== 200) {
+  throw new Error(`Expected 200 for user resource list, got ${response.status}`);
+}
+const list = response.body?.data;
+const labName = "fixed-test-vnc-resource";
+const pick = Array.isArray(list)
+  ? list.find((r) => r && r.name === labName)
+  : null;
+if (pick?.id) {
+  client.global.set("userResourceID", String(pick.id));
+  client.log(`Stored userResourceID=${pick.id} (${labName})`);
+} else if (client.global.get("userResourceID")) {
+  client.log(`Keep userResourceID=${client.global.get("userResourceID")} (lab resource not in user list yet)`);
+} else {
+  throw new Error(`Expected public lab resource "${labName}" in user resource list`);
+}
+%}
+
+# @expect 200,404
+### 获取指定规格详情
+GET {{addr}}/api/connections/resources/{{userResourceID}}
+Authorization: Bearer {{accessToken}}
+
+
+# @expect 201,409
+### 用户启动新连接实例 (从规格拉起；依赖 08-connections-system-admin 的 fixed-test-vnc-resource)
+POST {{addr}}/api/connections
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "resourceId": {{userResourceID}}
+}
+
+> {%
+if (response.status === 201) {
+  const conn = response.body?.data;
+  if (conn?.id) {
+    client.global.set("testConnectionId", String(conn.id));
+    if (String(conn.protocol).toUpperCase() === "VNC") {
+      client.global.set("testVNCConnectionId", String(conn.id));
+    }
+    client.log(`Stored launched testConnectionId=${conn.id}`);
+  }
+}
+%}
+
+### 获取当前用户连接实例列表
+GET {{addr}}/api/connections
+Authorization: Bearer {{accessToken}}
+
+> {%
+if (response.status !== 200) {
+  throw new Error(`Expected 200 for user connection list, got ${response.status}`);
+}
+const connections = response.body?.data;
+if (!Array.isArray(connections)) {
+  throw new Error("Expected connection list response data to be an array");
+}
+const pickVNC = (c) => c && String(c.protocol).toUpperCase() === "VNC";
+const vnc = connections.find(pickVNC);
+if (vnc?.id) {
+  client.global.set("testVNCConnectionId", String(vnc.id));
+  client.global.set("testConnectionId", String(vnc.id));
+}
+client.log(`Verified: user connection list contains ${connections.length} connections`);
+%}
+
+# @probe
+# 404 = 启动失败后仍为占位 id=1；strict 模式按 probe 跳过
+### 获取连接实例详情
+GET {{addr}}/api/connections/{{testConnectionId}}
+Authorization: Bearer {{accessToken}}
+
+# @probe
+# 404 = 无存活连接（testConnectionId 未解析或已清理）；strict 模式按 probe 跳过
+### 连接上报使用活跃 (Touch)
+POST {{addr}}/api/connections/{{testConnectionId}}/touch
+Authorization: Bearer {{accessToken}}
+
+### 刷新当前用户连接状态
+POST {{addr}}/api/connections/refresh
+Authorization: Bearer {{accessToken}}
+
+# @probe
+### 生成 VNC OTP（需运行中的 VNC connection；无可用连接时可能 4xx）
+POST {{addr}}/api/connections/{{testVNCConnectionId}}/vnc-otp
+Authorization: Bearer {{accessToken}}
+
+### 批量删除连接 — 空 ids 应 400
+POST {{addr}}/api/connections/batch-delete
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "ids": []
+}
+
+> {%
+  if (response.status !== 400) {
+    throw new Error(`Expected 400 for empty batch-delete ids, got ${response.status}`);
+  }
+%}
+
+# @probe
+### 用户启动连接 (start)
+POST {{addr}}/api/connections/{{testConnectionId}}/start
+Authorization: Bearer {{accessToken}}
+
+# @probe
+### 用户停止连接 (stop)
+POST {{addr}}/api/connections/{{testConnectionId}}/stop
+Authorization: Bearer {{accessToken}}
+
+# @probe
+### 用户删除连接实例
+DELETE {{addr}}/api/connections/{{testConnectionId}}
+Authorization: Bearer {{accessToken}}
+
+# @probe
+### 管理员删除 VNC 测试规格 (套件末尾清理)
+DELETE {{addr}}/api/admin/system/connections/resources/{{testResourceID}}
+Authorization: Bearer {{accessToken}}
+
+# @probe
+### 管理员删除 RDP 测试规格 (套件末尾清理)
+DELETE {{addr}}/api/admin/system/connections/resources/{{testRDPResourceID}}
+Authorization: Bearer {{accessToken}}

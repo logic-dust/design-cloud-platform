@@ -16,41 +16,24 @@ var (
 	ErrAdminUsernamePrefixRequired = errors.New("admin username prefix required")
 )
 
-// UserRoleStore is the subset of db.UserRepo that role.Service needs.
-// This interface enables testing with a mock store.
-type UserRoleStore interface {
-	GetByName(ctx context.Context, username string) (model.User, error)
-	Update(ctx context.Context, user *model.User) error
-	ListMembersByRole(ctx context.Context, role model.Role, limit, offset int) ([]string, int64, error)
-}
-
 // Service handles role management (three-role mode: SecurityAdmin assigns roles).
 type Service struct {
-	userRepo                 UserRoleStore
-	auditSvc                 *audit.Service
-	deleteSessionsByUsername func(context.Context, string) error
+	userRepo UserRoleRepo
+	auditSvc *audit.Service
 }
 
 // NewService creates a role management service.
-func NewService(userRepo UserRoleStore, auditSvc *audit.Service) *Service {
+// Session eviction after role changes is orchestrated by the identity application layer
+// (identity.AssignRole), not by this service.
+func NewService(userRepo UserRoleRepo, auditSvc *audit.Service) *Service {
 	return &Service{
 		userRepo: userRepo,
 		auditSvc: auditSvc,
 	}
 }
 
-type SessionDeleter interface {
-	Delete(ctx context.Context, username string) error
-}
-
-// SetSessionInvalidator registers a deleter to evict a user's sessions on role mutation.
-func (s *Service) SetSessionInvalidator(deleter SessionDeleter) {
-	if deleter != nil {
-		s.deleteSessionsByUsername = deleter.Delete
-	}
-}
-
-// SetUserRole sets a single role for the target user.
+// SetUserRole sets a single role for the target user (atomic write only —
+// session eviction is orchestrated by identity.AssignRole).
 // Only callable from three-role mode (MW ensures SecurityAdmin).
 // SuperAdmin (RoleSuperAdmin) cannot be set — there is one default SuperAdmin.
 func (s *Service) SetUserRole(ctx context.Context, username string, role model.Role) (model.User, error) {
@@ -88,21 +71,11 @@ func (s *Service) SetUserRole(ctx context.Context, username string, role model.R
 	if err := s.userRepo.Update(ctx, &dbUser); err != nil {
 		return model.User{}, fmt.Errorf("update user %q role: %w", username, err)
 	}
-	if err := s.evictUserSessions(ctx, username); err != nil {
-		return model.User{}, fmt.Errorf("delete sessions after role update: %w", err)
-	}
 	s.auditSvc.LogUser(ctx, "USER_ROLE_UPDATE", "success", username, slog.LevelInfo, map[string]any{
 		"role":               role.String(),
 		"admin_scopes_clear": scopesCleared,
 	})
 	return dbUser, nil
-}
-
-func (s *Service) evictUserSessions(ctx context.Context, username string) error {
-	if s.deleteSessionsByUsername != nil {
-		return s.deleteSessionsByUsername(ctx, username)
-	}
-	return nil
 }
 
 // ListRoleMembers returns paginated members of a single role.

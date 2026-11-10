@@ -3,7 +3,7 @@ package command
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,10 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"design-cloud-engine/internal/common"
-	fsutil "design-cloud-engine/internal/common/fs"
-	"design-cloud-engine/internal/config"
-	"design-cloud-engine/internal/contract"
+	"design-cloud-engine/cmd/engine/console"
+	"design-cloud-engine/internal/platform/config"
+	fsutil "design-cloud-engine/internal/platform/fs"
 )
 
 const (
@@ -37,9 +36,9 @@ func runRegisterCommand(args []string) error {
 	fs.StringVar(&dataDir, "data-dir", "", "Certificate base directory (platform default when omitted)")
 	fs.BoolVar(&insecureHTTP, "insecure-http", false, "Allow unencrypted plain HTTP portal URL (INSECURE: transmits OTP token and private key in plaintext)")
 	fs.Usage = func() {
-		common.PrintStderr("Usage: node register --portal-url <url> --token <token> [--insecure-http] [--data-dir <dir>] [--hostname <nodeID>]\n\n")
-		common.PrintStderr("Bootstrap node certificate materials via OTP token and write cert/key/ca under the\n")
-		common.PrintStderr("conventional cluster cert layout. Does not read config.toml.\n\n")
+		console.PrintStderr("Usage: node register --portal-url <url> --token <token> [--insecure-http] [--data-dir <dir>] [--hostname <nodeID>]\n\n")
+		console.PrintStderr("Bootstrap node certificate materials via OTP token and write cert/key/ca under the\n")
+		console.PrintStderr("conventional cluster cert layout. Does not read config.toml.\n\n")
 		fs.PrintDefaults()
 	}
 
@@ -75,7 +74,7 @@ func runRegisterCommand(args []string) error {
 	}
 
 	apiURL := fmt.Sprintf("%s/api/nodes/%s/registration", strings.TrimRight(portalURL, "/"), nodeID)
-	common.PrintStdout("Registering node '%s' via %s...\n", nodeID, apiURL)
+	console.PrintStdout("Registering node '%s' via %s...\n", nodeID, apiURL)
 
 	// Pre-check target directories before sending the request, to avoid burning
 	// the one-time OTP token on a failed write. Must follow the permission
@@ -127,10 +126,18 @@ func runRegisterCommand(args []string) error {
 		return fmt.Errorf("bootstrap failed (%d)", resp.StatusCode)
 	}
 
+	// Portal bootstrap 响应只需要证书材料；用本地 DTO 而不是服务层类型，
+	// 因为 CLI 在这里是纯 HTTP 客户端，不应为三个字段 import 整个 node 服务包。
 	var result struct {
-		Data contract.BootstrapMaterials `json:"data"`
+		Data struct {
+			ServerAddr    string    `json:"serverAddr"`
+			CertPEM       string    `json:"certPem"`
+			KeyPEM        string    `json:"keyPem"`
+			CAPEM         string    `json:"caPem"`
+			CertExpiresAt time.Time `json:"certExpiresAt"`
+		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.UnmarshalRead(resp.Body, &result); err != nil {
 		return fmt.Errorf("decode bootstrap response: %w", err)
 	}
 	if result.Data.CertPEM == "" || result.Data.KeyPEM == "" || result.Data.CAPEM == "" {
@@ -147,12 +154,12 @@ func runRegisterCommand(args []string) error {
 		return fmt.Errorf("write CA file: %w", err)
 	}
 
-	common.PrintlnStdout("Successfully bootstrapped node materials:")
-	common.PrintStdout("   Server Addr : %s\n", result.Data.ServerAddr)
-	common.PrintStdout("   Cert        : %s\n", certPaths.Cert)
-	common.PrintStdout("   Key         : %s\n", certPaths.Key)
-	common.PrintStdout("   CA          : %s\n", certPaths.CA)
-	common.PrintStdout("   Expires     : %s\n", result.Data.CertExpiresAt.UTC().Format(time.RFC3339))
+	console.PrintlnStdout("Successfully bootstrapped node materials:")
+	console.PrintStdout("   Server Addr : %s\n", result.Data.ServerAddr)
+	console.PrintStdout("   Cert        : %s\n", certPaths.Cert)
+	console.PrintStdout("   Key         : %s\n", certPaths.Key)
+	console.PrintStdout("   CA          : %s\n", certPaths.CA)
+	console.PrintStdout("   Expires     : %s\n", result.Data.CertExpiresAt.UTC().Format(time.RFC3339))
 	return nil
 }
 
@@ -172,14 +179,14 @@ func validatePortalURL(raw string, insecureHTTP bool) error {
 	}
 	if u.Scheme == "http" {
 		if !insecureHTTP {
-			common.PrintStderr("SECURITY ERROR: --portal-url uses unencrypted 'http://' scheme (%s)!\n", raw)
-			common.PrintStderr("Transmitting OTP tokens and receiving node private keys/CA certificates\n")
-			common.PrintStderr("over plain HTTP is vulnerable to Man-in-the-Middle (MitM) eavesdropping and tampering.\n\n")
-			common.PrintStderr("Recommended: Use 'https://' with a valid SSL/TLS certificate.\n")
-			common.PrintStderr("To bypass this check and proceed at your own risk, pass '--insecure-http'.\n\n")
+			console.PrintStderr("SECURITY ERROR: --portal-url uses unencrypted 'http://' scheme (%s)!\n", raw)
+			console.PrintStderr("Transmitting OTP tokens and receiving node private keys/CA certificates\n")
+			console.PrintStderr("over plain HTTP is vulnerable to Man-in-the-Middle (MitM) eavesdropping and tampering.\n\n")
+			console.PrintStderr("Recommended: Use 'https://' with a valid SSL/TLS certificate.\n")
+			console.PrintStderr("To bypass this check and proceed at your own risk, pass '--insecure-http'.\n\n")
 			return fmt.Errorf("insecure http portal URL rejected: %q (use https:// or pass --insecure-http to override)", raw)
 		}
-		common.PrintStderr("SECURITY WARNING: Proceeding with unencrypted HTTP registration via %s (--insecure-http enabled). Credentials are NOT protected in transit!\n", raw)
+		console.PrintStderr("SECURITY WARNING: Proceeding with unencrypted HTTP registration via %s (--insecure-http enabled). Credentials are NOT protected in transit!\n", raw)
 	}
 	return nil
 }

@@ -36,10 +36,9 @@ type ControlServiceClient interface {
 	// Agent 通过此流发送心跳、执行结果等
 	// Server 通过此流下发命令、认证请求等
 	Sync(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentMessage, ServerCommand], error)
-	// ForwardDispatch allows a standby server node to ask the leader to dispatch
-	// a command-plane request on its behalf.
+	// ForwardDispatch：Standby Server 委托 Leader 代为派发控制面请求
 	ForwardDispatch(ctx context.Context, in *ForwardDispatchRequest, opts ...grpc.CallOption) (*ForwardDispatchResponse, error)
-	// ForwardClusterEvent allows server nodes to synchronize push notifications across the cluster.
+	// ForwardClusterEvent：跨 Server 节点同步 Portal 推送事件
 	ForwardClusterEvent(ctx context.Context, in *ForwardClusterEventRequest, opts ...grpc.CallOption) (*ForwardClusterEventResponse, error)
 }
 
@@ -96,10 +95,9 @@ type ControlServiceServer interface {
 	// Agent 通过此流发送心跳、执行结果等
 	// Server 通过此流下发命令、认证请求等
 	Sync(grpc.BidiStreamingServer[AgentMessage, ServerCommand]) error
-	// ForwardDispatch allows a standby server node to ask the leader to dispatch
-	// a command-plane request on its behalf.
+	// ForwardDispatch：Standby Server 委托 Leader 代为派发控制面请求
 	ForwardDispatch(context.Context, *ForwardDispatchRequest) (*ForwardDispatchResponse, error)
-	// ForwardClusterEvent allows server nodes to synchronize push notifications across the cluster.
+	// ForwardClusterEvent：跨 Server 节点同步 Portal 推送事件
 	ForwardClusterEvent(context.Context, *ForwardClusterEventRequest) (*ForwardClusterEventResponse, error)
 	mustEmbedUnimplementedControlServiceServer()
 }

@@ -1,0 +1,257 @@
+# ========================================
+# ===== TICKETS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+# ----- 需要先执行 21-tickets-system-admin.http 中的"获取项目列表"绑定 testProjectId -----
+# ----- 修改类请求带 version（乐观锁），由套件从上一次响应捕获到 testTicketVersion -----
+
+
+### 获取项目列表（未归档）
+GET {{addr}}/api/tickets/projects
+Authorization: Bearer {{accessToken}}
+
+# ========================================
+# ===== 普通用户 API =====
+# ========================================
+
+# @expect 201
+### 创建工单
+POST {{addr}}/api/tickets
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "projectId": {{testProjectId}},
+  "type": "bug",
+  "title": "修复登录页面 UI 错位",
+  "description": "在小屏幕上登录按钮位置错位",
+  "priority": "high",
+  "status": "todo",
+  "acceptanceCriteria": {
+    "description": "按钮在各种分辨率下应正确显示",
+    "checklist": [
+      {"text": "800x600 分辨率居中显示", "done": false},
+      {"text": "移动端适配正常", "done": false}
+    ]
+  }
+}
+
+> {%
+
+
+
+const payload = response.body;
+if (payload?.data?.id) {
+  client.global.set("testTicketId", String(payload.data.id));
+  client.global.set("testTicketVersion", String(payload.data.version));
+  client.log(`Stored testTicketId=${payload.data.id}`);
+}
+
+
+
+%}
+
+# @expect 422
+### 创建工单：枚举非法返回 422
+POST {{addr}}/api/tickets
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "projectId": {{testProjectId}},
+  "title": "非法优先级",
+  "priority": "urgent"
+}
+
+### 获取工单列表（多值过滤 + 排序）
+GET {{addr}}/api/tickets?projectId={{testProjectId}}&status=todo,inProgress&sort=updatedAt&order=desc&limit=20&offset=0
+Authorization: Bearer {{accessToken}}
+
+### 获取工单列表：标题搜索与未指派
+GET {{addr}}/api/tickets?q=登录&assigneeId=none
+Authorization: Bearer {{accessToken}}
+
+### 获取工单列表：sortOrder 首页（keyset 游标由响应 nextAfter* 给出）
+GET {{addr}}/api/tickets?projectId={{testProjectId}}&sort=sortOrder&order=asc&limit=200
+Authorization: Bearer {{accessToken}}
+
+> {%
+const page = response.body?.data;
+if (page?.nextAfterSort != null && page?.nextAfterId != null) {
+  client.global.set("testTicketAfterSort", String(page.nextAfterSort));
+  client.global.set("testTicketAfterId", String(page.nextAfterId));
+}
+%}
+
+### 获取工单列表：sortOrder keyset 续页
+GET {{addr}}/api/tickets?projectId={{testProjectId}}&sort=sortOrder&order=asc&limit=200&afterSort={{testTicketAfterSort}}&afterId={{testTicketAfterId}}
+Authorization: Bearer {{accessToken}}
+
+# @expect 422
+### 获取工单列表：limit 非法返回 422
+GET {{addr}}/api/tickets?limit=0
+Authorization: Bearer {{accessToken}}
+
+# @expect 422
+### 获取工单列表：limit 超上限返回 422
+GET {{addr}}/api/tickets?limit=2001
+Authorization: Bearer {{accessToken}}
+
+# @expect 422
+### 获取工单列表：sortOrder 深 offset 无游标返回 422
+GET {{addr}}/api/tickets?sort=sortOrder&offset=2000
+Authorization: Bearer {{accessToken}}
+
+# @expect 422
+### 获取工单列表：非 sortOrder 使用 keyset 返回 422
+GET {{addr}}/api/tickets?sort=updatedAt&afterSort=1&afterId=1
+Authorization: Bearer {{accessToken}}
+
+# @expect 422
+### 获取工单列表：只传 afterSort 返回 422
+GET {{addr}}/api/tickets?afterSort=10
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,404
+### 获取工单详情
+GET {{addr}}/api/tickets/{{testTicketId}}
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,403,404,409
+### 更新工单（带 version）
+PATCH {{addr}}/api/tickets/{{testTicketId}}
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "version": {{testTicketVersion}},
+  "priority": "medium",
+  "dueDate": null
+}
+
+# @expect 422
+### 更新工单：缺少 version 返回 422
+PATCH {{addr}}/api/tickets/{{testTicketId}}
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "title": "缺少版本号"
+}
+
+# @expect 200,403,404,409
+### 看板移动（移到 inProgress 列末尾）
+POST {{addr}}/api/tickets/{{testTicketId}}/move
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "version": {{testTicketVersion}},
+  "status": "inProgress"
+}
+
+# @expect 201,404
+### 发表评论
+POST {{addr}}/api/tickets/{{testTicketId}}/comments
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "body": "已复现，正在排查"
+}
+
+# @expect 200,404
+### 评论列表
+GET {{addr}}/api/tickets/{{testTicketId}}/comments?limit=50
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,403,404
+### 编辑评论（仅作者）
+PATCH {{addr}}/api/tickets/{{testTicketId}}/comments/{{testCommentId}}
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "body": "已复现，定位到 CSS 断点"
+}
+
+# @expect 204,403,404
+### 删除评论（作者或工单管理员）
+DELETE {{addr}}/api/tickets/{{testTicketId}}/comments/{{testCommentId}}
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,404
+### 变更记录
+GET {{addr}}/api/tickets/{{testTicketId}}/events
+Authorization: Bearer {{accessToken}}
+
+### 搜索指派人
+GET {{addr}}/api/tickets/assignees?q=te
+Authorization: Bearer {{accessToken}}
+
+# @expect 200
+### 搜索指派人：q 少于 2 个字符返回热点指派人（最多 10 条）
+GET {{addr}}/api/tickets/assignees?q=a
+Authorization: Bearer {{accessToken}}
+
+### 获取统计概览（按时区切分最近 7 天）
+GET {{addr}}/api/tickets/summary?projectId={{testProjectId}}&days=7&tz=Asia/Shanghai
+Authorization: Bearer {{accessToken}}
+
+# @expect 204,403,404
+### 批量删除工单（全有或全无）
+POST {{addr}}/api/tickets/batch-delete
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "ids": ["{{testTicketId}}"]
+}
+
+# @expect 204,403,404
+### 删除工单（已删除返回 404）
+DELETE {{addr}}/api/tickets/{{testTicketId}}
+Authorization: Bearer {{accessToken}}
+
+# ========================================
+# ===== 管理面收尾（可选批量清理） =====
+# ========================================
+
+### 获取所有工单（含已删除）
+GET {{addr}}/api/admin/system/tickets?includeDeleted=true&limit=100
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,404,409
+### 恢复软删工单
+POST {{addr}}/api/admin/system/tickets/{{testTicketId}}/restore
+Authorization: Bearer {{accessToken}}
+
+# @expect 204,404
+### 批量软删除工单（全有或全无）
+POST {{addr}}/api/admin/system/tickets/batch-delete
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "ids": ["{{testTicketId}}"]
+}
+
+# @expect 204,404
+### 批量永久删除工单（含评论与变更记录）
+POST {{addr}}/api/admin/system/tickets/batch-delete-permanent
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "ids": ["{{testTicketId}}"]
+}
+
+# @manual
+### 软删除任意工单（路由覆盖；常规套件已用用户 DELETE 清理）
+DELETE {{addr}}/api/admin/system/tickets/{{testTicketId}}
+Authorization: Bearer {{accessToken}}
+
+# @manual
+### 永久删除工单（路由覆盖）
+DELETE {{addr}}/api/admin/system/tickets/{{testTicketId}}/permanent
+Authorization: Bearer {{accessToken}}

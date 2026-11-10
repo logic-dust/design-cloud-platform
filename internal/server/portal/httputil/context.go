@@ -9,12 +9,13 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
-// CtxSessionKey is the context key for storing/retrieving the authenticated session.
+// CtxSessionKey stores the authenticated *model.Session on the Echo context.
+// Session is the portal session (token, user, expiry). It is not a Connection or a ProxyConnection.
 const CtxSessionKey = "session"
 
 const (
-	// PublicDashboardToken 专用于只读大屏页面的匿名鉴权（绕过强制登录和定期改密）
-	PublicDashboardToken = "__dc_public_dashboard_guest_token__"
+	// PublicOverviewToken 专用于只读大屏页面的匿名鉴权（绕过强制登录和定期改密）
+	PublicOverviewToken = "__dc_public_overview_guest_token__"
 )
 
 // ExtractBearerToken 从 HTTP 请求头 Authorization 中提取 Bearer Token。

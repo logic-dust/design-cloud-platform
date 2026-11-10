@@ -5,8 +5,7 @@ import (
 
 	"design-cloud-engine/internal/server/portal/httputil"
 
-	"design-cloud-engine/internal/server/service"
-	"design-cloud-engine/internal/server/service/system"
+	"design-cloud-engine/internal/server/application/system"
 
 	"github.com/labstack/echo/v5"
 )
@@ -15,8 +14,8 @@ type systemHandler struct {
 	system *system.Service
 }
 
-func newSystemHandler(svc *service.Container) *systemHandler {
-	return &systemHandler{system: svc.System}
+func newSystemHandler(systemSvc *system.Service) *systemHandler {
+	return &systemHandler{system: systemSvc}
 }
 
 // statusAPI registers the engine component health endpoint.

@@ -1,0 +1,115 @@
+# ========================================
+# ===== SCHEDULER Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+# ----- 自动化：hosts / queues / jobs 列表；单作业详情与 kill 为 @manual -----
+
+### 获取调度器静态元数据（推荐列、核心字段映射、状态动作集合）
+GET {{addr}}/api/scheduler/meta
+Authorization: Bearer {{accessToken}}
+
+> {%
+const payload = response.body;
+const meta = payload?.data;
+client.test("meta returns scheduler schema", function() {
+  client.assert(response.status === 200, "status is 200");
+  client.assert(typeof meta?.scheduler === "string" && meta.scheduler.length > 0, "scheduler is present");
+  client.assert(Array.isArray(meta?.fields) && meta.fields.length > 0, "fields is non-empty array");
+  client.assert(typeof meta?.keys?.id === "string" && meta.keys.id.length > 0, "keys.id is present");
+  client.assert(typeof meta?.keys?.user === "string" && meta.keys.user.length > 0, "keys.user is present");
+  client.assert(typeof meta?.keys?.status === "string" && meta.keys.status.length > 0, "keys.status is present");
+  client.assert(typeof meta?.keys?.submitTime === "string" && meta.keys.submitTime.length > 0, "keys.submitTime is present");
+  client.assert(typeof meta?.actions === "object" && meta.actions !== null, "actions object is present");
+});
+%}
+
+# @probe
+# 依赖 settings.scheduler.type 对应 CLI（如 LSF 的 bhosts）在 Server 节点 PATH；缺失时实现返回 500，strict 下仍计失败
+### 获取计算主机列表与在线状态汇总
+GET {{addr}}/api/scheduler/hosts
+Authorization: Bearer {{accessToken}}
+
+### 获取调度队列（分区）作业数汇总
+GET {{addr}}/api/scheduler/queues
+Authorization: Bearer {{accessToken}}
+
+### 全集群作业列表
+GET {{addr}}/api/scheduler/jobs
+Authorization: Bearer {{accessToken}}
+
+### 当前用户作业列表
+GET {{addr}}/api/scheduler/jobs/me
+Authorization: Bearer {{accessToken}}
+
+> {%
+const payload = response.body;
+const jobs = payload?.data?.jobs || [];
+
+client.test("jobs response returns jobs list", function() {
+  client.assert(response.status === 200, "status is 200");
+  client.assert(Array.isArray(jobs), "jobs is an array");
+});
+
+client.test("job records keep status/queue/user keys", function() {
+  if (jobs.length === 0) {
+    return;
+  }
+  const job = jobs[0];
+  const hasStatus = !!(job.STAT || job.job_state);
+  const hasQueue = !!(job.QUEUE || job.partition);
+  const hasUser = !!(job.USER || job.user_name);
+  client.assert(hasStatus && hasQueue && hasUser, "record carries status/queue/user fields");
+});
+
+if (jobs.length > 0) {
+  const job = jobs[0];
+  const jobID = job.JOBID || job.job_id || job.jobId || job.id;
+  if (jobID) {
+    client.global.set("testJobId", String(jobID));
+    client.log(`Stored testJobId=${jobID}`);
+  }
+}
+%}
+
+# @manual
+### 获取任务详情（需有效 testJobId；自动化套件只跑列表）
+GET {{addr}}/api/scheduler/jobs/{{testJobId}}
+Authorization: Bearer {{accessToken}}
+
+# @manual
+### 更新任务状态 (Kill - 动词收尾)
+POST {{addr}}/api/scheduler/jobs/{{testJobId}}/kill
+Authorization: Bearer {{accessToken}}
+
+# @manual
+### 修改作业名称（name 非空且不以 - 开头）
+PATCH {{addr}}/api/scheduler/jobs/{{testJobId}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "dc_http_renamed_job"
+}
+
+# @expect 400
+### 非法作业 ID 返回 400（作业 ID 须为正整数）
+GET {{addr}}/api/scheduler/jobs/0
+Authorization: Bearer {{accessToken}}
+
+# @manual
+### 批量更新任务状态
+# jobIds 最多支持 100 个作业。
+POST {{addr}}/api/scheduler/jobs/batch-control
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "jobIds": [
+    "{{testJobId}}"
+  ],
+  "operation": "kill"
+}
+
+# ----------------------------------------------------------------------
+# ----- 提示：管理员作业操作（全集群列表、?user= 过滤等）请参见 07-scheduler-system-admin.http -----
+# ----------------------------------------------------------------------

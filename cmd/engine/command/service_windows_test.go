@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	fsutil "design-cloud-engine/internal/common/fs"
+	fsutil "design-cloud-engine/internal/platform/fs"
 )
 
 // Windows-specific service management tests.

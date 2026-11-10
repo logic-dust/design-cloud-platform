@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/platform/config"
 )
 
 func flagsWith(names ...string) *Flags {

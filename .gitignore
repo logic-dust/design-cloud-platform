@@ -29,6 +29,7 @@
 .codex
 .antigravitycli/
 .workbuddy/
+.trae/
 
 
 ################################
@@ -37,7 +38,7 @@
 
 # Compiled binaries
 /engine
-/launcher
+/dcexec
 /dce-dev
 /build/
 
@@ -62,7 +63,7 @@ coverage.out
 
 # Certificates & sensitive files
 /certs/
-# deployment/gen-tls-files.sh 的默认输出目录 conf/certs/portal（含**私钥** *.key）
+# cert gen-portal 默认输出目录 conf/certs/portal（含**私钥** *.key）
 /conf/certs/
 # 兜底：任何位置生成的证书/私钥（当前仓库无此类跟踪文件，误提交请用 git add -f）
 *.key
@@ -70,9 +71,9 @@ coverage.out
 *.p12
 *.jks
 
-# HTTP client environment files
-http-client.env.json
-test/api/http-client.env.json
+# HTTP client local overrides. test/portal/http-client.env.json is a tracked lab fixture
+# (disposable passwords for cent7.dev.vm). That is intentional, not a secret leak.
+**/http-client.env.local.json
 
 # Credentials (development only)
 /dbpwd
@@ -110,6 +111,7 @@ __pycache__/
 /test/bin/
 /test-results/
 /.agents/test-results/
+/.agents/artifacts/
 
 # IDE's local configurations
 .hermes/

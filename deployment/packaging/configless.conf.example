@@ -3,7 +3,7 @@
 # Use when compute nodes must NOT ship /etc/design-cloud/config.toml
 # (avoids spreading DB/LDAP fields). Same package, same unit name.
 #
-#   1. runuser -u design-cloud -- /opt/design-cloud/design-cloud-engine node register \
+#   1. runuser -u dce -- /opt/dce/dc-engine node register \
 #        --portal-url https://portal.example:443 --token <OTP> \
 #        --data-dir /var/lib/design-cloud
 #   2. install this file as:
@@ -17,7 +17,7 @@
 # Clear the packaged --config ExecStart / ExecStartPre
 ExecStartPre=
 ExecStart=
-ExecStart=/opt/design-cloud/design-cloud-engine \
+ExecStart=/opt/dce/dc-engine \
   --servers mgt01,mgt02 \
   --port 52255 \
   --data-dir /var/lib/design-cloud \

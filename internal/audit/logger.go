@@ -9,17 +9,16 @@ import (
 	"sync"
 	"time"
 
-	"design-cloud-engine/internal/logger"
+	"design-cloud-engine/internal/platform/logger"
 )
 
 type auditLogger struct {
 	logger     *slog.Logger
 	closer     io.Closer
 	logPath    string
-	maxSizeMB  int
-	maxFiles   int
 	mu         sync.Mutex
 	eventCount int64
+	closed     bool
 }
 
 // sensitiveDetailKeys 是审计日志脱敏时需被遮盖的字段名（不区分大小写）。
@@ -46,31 +45,23 @@ func sanitizeDetails(details map[string]any) map[string]any {
 	return out
 }
 
-func newLogger(logPath string, maxSizeMB int, maxFiles int, nodeID string) (*auditLogger, error) {
+func newLogger(logPath string, nodeID string) (*auditLogger, error) {
 	slogger, closer, err := logger.NewLogger(logger.LogConfig{
-		Path:       logPath,
-		Host:       nodeID,
-		Level:      slog.LevelInfo,
-		MaxSize:    maxSizeMB,
-		MaxAge:     180,
-		MaxBackups: maxFiles,
+		Path:  logPath,
+		Host:  nodeID,
+		Level: slog.LevelInfo,
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	log := &auditLogger{
-		logger:    slogger,
-		closer:    closer,
-		logPath:   logPath,
-		maxSizeMB: maxSizeMB,
-		maxFiles:  maxFiles,
+		logger:  slogger,
+		closer:  closer,
+		logPath: logPath,
 	}
 
-	log.LogSystemEvent(context.Background(), "AUDIT_SYSTEM_START", slog.LevelDebug, map[string]any{
-		"max_size":  maxSizeMB,
-		"max_files": maxFiles,
-	})
+	log.LogSystemEvent(context.Background(), "AUDIT_SYSTEM_START", slog.LevelDebug, nil)
 
 	return log, nil
 }
@@ -154,6 +145,16 @@ func (al *auditLogger) LogNodeEvent(ctx context.Context, action, result, nodeID 
 }
 
 func (al *auditLogger) logEvent(ctx context.Context, event event) {
+	al.mu.Lock()
+	defer al.mu.Unlock()
+	if al.closed {
+		return
+	}
+	al.writeEvent(ctx, event)
+	al.eventCount++
+}
+
+func (al *auditLogger) writeEvent(ctx context.Context, event event) {
 	event.TraceID = cmp.Or(event.TraceID, extractTraceID(ctx))
 	event.SessionID = cmp.Or(event.SessionID, extractSessionID(ctx))
 
@@ -173,13 +174,15 @@ func (al *auditLogger) logEvent(ctx context.Context, event event) {
 		"details", sanitized,
 	)
 
-	al.mu.Lock()
-	al.eventCount++
-	al.mu.Unlock()
 }
 
 func (al *auditLogger) Close() error {
-	al.logEvent(context.Background(), event{
+	al.mu.Lock()
+	defer al.mu.Unlock()
+	if al.closed {
+		return nil
+	}
+	al.writeEvent(context.Background(), event{
 		Level:     slog.LevelInfo,
 		EventType: eventTypeSystem,
 		Component: "system",
@@ -187,12 +190,9 @@ func (al *auditLogger) Close() error {
 		Result:    "completed",
 		Details:   map[string]any{"total_events": al.eventCount},
 	})
-
-	al.mu.Lock()
-	closer := al.closer
-	al.mu.Unlock()
-	if closer != nil {
-		return closer.Close()
+	al.closed = true
+	if al.closer != nil {
+		return al.closer.Close()
 	}
 	return nil
 }

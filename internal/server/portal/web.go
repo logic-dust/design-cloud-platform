@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/platform/config"
 
 	"github.com/labstack/echo/v5"
 )
@@ -18,32 +18,37 @@ var webFS embed.FS
 // WebSettingsChecker provides dynamic check methods for embedded web pages.
 type WebSettingsChecker interface {
 	IsIndexEnabled(ctx context.Context) bool
-	IsDashboardEnabled(ctx context.Context) bool
+	IsOverviewEnabled(ctx context.Context) bool
 }
 
-// RegisterWebRoutes serves the embedded static web pages (homepage + dashboard).
-// Dynamic visibility is governed by webSettings (PlatformSettings.IndexEnabled and DashboardSettings.Enabled).
+// RegisterWebRoutes serves the embedded static web pages (homepage + overview).
+// Dynamic visibility is governed by webSettings (PlatformSettings.IndexEnabled and Website.OverviewEnabled).
 func RegisterWebRoutes(e *echo.Echo, webSettings WebSettingsChecker) {
 	subFS := echo.MustSubFS(webFS, "web")
 
+	indexHTML, indexErr := loadVersionedHTML(subFS, "index.html")
 	// 首页 URL：/ → index.html
 	e.GET("/", func(c *echo.Context) error {
+		if indexErr != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "index page unavailable")
+		}
 		if webSettings != nil && !webSettings.IsIndexEnabled(c.Request().Context()) {
 			return echo.NewHTTPError(http.StatusNotFound, "not found")
 		}
-		return c.FileFS("index.html", subFS)
+		c.Response().Header().Set(echo.HeaderCacheControl, "no-cache")
+		return c.HTML(http.StatusOK, indexHTML)
 	})
 
-	// Dashboard URL: /dashboard → dashboard.html
-	dashboardHTML, err := loadVersionedHTML(subFS, "dashboard.html")
-	e.GET("/dashboard", func(c *echo.Context) error {
-		if err != nil || (webSettings != nil && !webSettings.IsDashboardEnabled(c.Request().Context())) {
+	// Overview URL: /overview → overview.html
+	overviewHTML, err := loadVersionedHTML(subFS, "overview.html")
+	e.GET("/overview", func(c *echo.Context) error {
+		if err != nil || (webSettings != nil && !webSettings.IsOverviewEnabled(c.Request().Context())) {
 			return echo.NewHTTPError(http.StatusNotFound, "not found")
 		}
 		// no-cache：大屏长期驻留，若 HTML 被浏览器缓存则永远拿不到新版
 		// （内嵌资源的版本化由 __WEB_VERSION__ 占位符替换实现）。
 		c.Response().Header().Set(echo.HeaderCacheControl, "no-cache")
-		return c.HTML(http.StatusOK, dashboardHTML)
+		return c.HTML(http.StatusOK, overviewHTML)
 	})
 
 	// 统一挂载静态资源包目录路径 /static

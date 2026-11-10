@@ -3,16 +3,16 @@ package app
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 )
 
 type fakeLaunchScheduler struct {
@@ -91,7 +91,7 @@ func TestAppServiceSetUsersValidatesUserInService(t *testing.T) {
 	createTestUser(t, repos, "alice")
 
 	err := service.SetUsers(context.Background(), app.ID, []string{"alice", "missing"})
-	if !errors.Is(err, common.ErrNotFound) {
+	if !errors.Is(err, contract.ErrNotFound) {
 		t.Fatalf("set users error = %v, want ErrNotFound", err)
 	}
 
@@ -169,7 +169,7 @@ func TestAppServiceUserOperationsReturnAppNotFound(t *testing.T) {
 	createTestUser(t, repos, "alice")
 
 	err := service.AddUsers(context.Background(), 999, []string{"alice"})
-	if !errors.Is(err, common.ErrNotFound) {
+	if !errors.Is(err, contract.ErrNotFound) {
 		t.Fatalf("add users missing app error = %v, want ErrNotFound", err)
 	}
 }
@@ -239,8 +239,9 @@ func TestAppServiceFormValidationRejectsInvalidJSON(t *testing.T) {
 		Type:  model.FormApp,
 		Form:  "invalid-json",
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Fatalf("create with invalid form json err = %v, want fs.ErrInvalid", err)
+	var contractErr contract.DomainError
+	if !errors.As(err, &contractErr) || contractErr.HTTPStatus() != http.StatusUnprocessableEntity {
+		t.Fatalf("create with invalid form json err = %v, want 422 validation error", err)
 	}
 
 	_, err = service.Create(context.Background(), model.AppBase{
@@ -249,8 +250,8 @@ func TestAppServiceFormValidationRejectsInvalidJSON(t *testing.T) {
 		Type:  model.FormApp,
 		Form:  "",
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Fatalf("create with empty form err = %v, want fs.ErrInvalid", err)
+	if !errors.As(err, &contractErr) || contractErr.HTTPStatus() != http.StatusBadRequest {
+		t.Fatalf("create with empty form err = %v, want 400 invalid param error", err)
 	}
 }
 
@@ -264,8 +265,9 @@ func TestAppServiceCreateValidatesNameAndAlias(t *testing.T) {
 		Alias: "Alias",
 		Type:  model.BatchApp,
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Fatalf("create with bad name err = %v, want fs.ErrInvalid", err)
+	var contractErr contract.DomainError
+	if !errors.As(err, &contractErr) || contractErr.HTTPStatus() != http.StatusUnprocessableEntity {
+		t.Fatalf("create with bad name err = %v, want 422 validation error", err)
 	}
 
 	_, err = service.Create(context.Background(), model.AppBase{
@@ -273,8 +275,8 @@ func TestAppServiceCreateValidatesNameAndAlias(t *testing.T) {
 		Alias: strings.Repeat("测", 101),
 		Type:  model.BatchApp,
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Fatalf("create with long alias err = %v, want fs.ErrInvalid", err)
+	if !errors.As(err, &contractErr) || contractErr.HTTPStatus() != http.StatusUnprocessableEntity {
+		t.Fatalf("create with long alias err = %v, want 422 validation error", err)
 	}
 }
 
@@ -362,8 +364,8 @@ func TestAppServiceLaunchRejectsInaccessiblePrivateApp(t *testing.T) {
 	if err == nil {
 		t.Fatalf("launch private app should fail for unauthorized user")
 	}
-	var domErr common.DomainError
-	if !errors.As(err, &domErr) || domErr.HTTPStatus() != 403 {
+	domErr, ok := errors.AsType[contract.DomainError](err)
+	if !ok || domErr.HTTPStatus() != 403 {
 		t.Fatalf("launch private app error = %v, want 403 DomainError", err)
 	}
 	if scheduler.called {

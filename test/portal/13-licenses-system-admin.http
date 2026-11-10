@@ -1,0 +1,120 @@
+# ========================================
+# ===== SYSTEM-LICENSES Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录（需要 System Admin 权限） -----
+
+# @expect 200,201,409
+### 创建许可证服务（写入 testLicenseId）
+POST {{addr}}/api/admin/system/licenses
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "test-lic-service",
+  "type": "flexlm",
+  "address": "27000@127.0.0.1",
+  "comment": "test license service",
+  "enabled": true
+}
+
+> {%
+const payload = response.body;
+if (payload?.data?.id) {
+  client.global.set("testLicenseId", String(payload.data.id));
+  client.log(`Stored testLicenseId=${payload.data.id}`);
+}
+%}
+
+### 创建许可证服务（省略 enabled，缺省应为 true）
+POST {{addr}}/api/admin/system/licenses
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "test-lic-omit-enable",
+  "type": "flexlm",
+  "address": "27000@127.0.0.1",
+  "comment": "omit enabled defaults to true"
+}
+
+> {%
+client.test("Omit enabled defaults to true", function() {
+  client.assert(response.status === 201, "Response status is 201 Created");
+  client.assert(response.body?.data?.enabled === true, "enabled defaults to true when omitted");
+});
+const omitPayload = response.body;
+if (omitPayload?.data?.id) {
+  client.global.set("testLicenseIdOmitEnable", String(omitPayload.data.id));
+}
+%}
+
+# @probe
+### 删除省略 enabled 的测试记录
+DELETE {{addr}}/api/admin/system/licenses/{{testLicenseIdOmitEnable}}
+Authorization: Bearer {{accessToken}}
+
+### 获取许可证服务列表（管理员）
+GET {{addr}}/api/admin/system/licenses
+Authorization: Bearer {{accessToken}}
+
+### 获取许可证服务详情（管理员）
+GET {{addr}}/api/admin/system/licenses/{{testLicenseId}}
+Authorization: Bearer {{accessToken}}
+
+### 更新许可证服务
+PUT {{addr}}/api/admin/system/licenses/{{testLicenseId}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "updated-lic-service",
+  "type": "flexlm",
+  "address": "27001@127.0.0.1",
+  "lmutilPath": "/opt/flexnet/bin/lmutil",
+  "comment": "updated test license service",
+  "enabled": true
+}
+
+> {%
+client.test("Update accepts per-service lmutilPath", function() {
+  client.assert(response.status === 200, "Response status is 200");
+  client.assert(response.body?.data?.lmutilPath === "/opt/flexnet/bin/lmutil", "lmutilPath persisted");
+});
+%}
+
+### 负向用例：相对路径 lmutilPath 校验失败（断言 422）
+POST {{addr}}/api/admin/system/licenses
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "relative-lmutil-service",
+  "type": "flexlm",
+  "address": "27000@127.0.0.1",
+  "lmutilPath": "bin/lmutil"
+}
+
+> {%
+client.test("Relative lmutilPath returns 422", function() {
+  client.assert(response.status === 422, "Response status is 422 Unprocessable Entity");
+});
+%}
+
+### 负向用例：非法 type 校验失败（断言 422）
+POST {{addr}}/api/admin/system/licenses
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "invalid-type-service",
+  "type": "invalid_type",
+  "address": "27000@127.0.0.1"
+}
+
+> {%
+client.test("Invalid license type returns 422", function() {
+  client.assert(response.status === 422, "Response status is 422 Unprocessable Entity");
+});
+%}
+
+# 下线 / 用户 404 / 删除见 13-licenses.http 末尾（先跑用户侧只读 API）

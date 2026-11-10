@@ -25,6 +25,10 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
+# shellcheck source=resolve-go.sh
+source "${PROJECT_ROOT}/.agents/verifiers/resolve-go.sh"
+export_go_toolchain
+
 export GOOS="${GOOS:-linux}"
 export GOARCH="${GOARCH:-amd64}"
 
@@ -86,7 +90,7 @@ if [ -z "${CHANGED_FILES}" ]; then
   if [ -n "${MOD_CHANGED}" ]; then
     echo "=== Verifying Module Dependencies (go mod tidy) ==="
     MOD_HASH_BEFORE=$(sha256sum go.mod go.sum 2>/dev/null || true)
-    go mod tidy
+    "${GO_CMD}" mod tidy
     MOD_HASH_AFTER=$(sha256sum go.mod go.sum 2>/dev/null || true)
     if [ "${MOD_HASH_BEFORE}" != "${MOD_HASH_AFTER}" ]; then
       echo "❌ go.mod or go.sum is not tidy! 'go mod tidy' generated changes."
@@ -136,7 +140,7 @@ echo "✅ Format check passed."
 # [+] Check module tidiness
 echo "[+] Checking module dependencies (go mod tidy)..."
 MOD_HASH_BEFORE=$(sha256sum go.mod go.sum 2>/dev/null || true)
-go mod tidy
+"${GO_CMD}" mod tidy
 MOD_HASH_AFTER=$(sha256sum go.mod go.sum 2>/dev/null || true)
 if [ "${MOD_HASH_BEFORE}" != "${MOD_HASH_AFTER}" ]; then
   echo "❌ go.mod or go.sum is not tidy! 'go mod tidy' generated changes."
@@ -147,7 +151,7 @@ echo "✅ Module dependencies are tidy."
 
 # 2. Build changed packages
 echo "[2/5] Building changed packages..."
-if ! go build ${TARGET}; then
+if ! "${GO_CMD}" build ${TARGET}; then
   echo "❌ Build failed for: ${TARGET}"
   exit 1
 fi
@@ -155,7 +159,7 @@ echo "✅ Build passed."
 
 # 3. Vet changed packages
 echo "[3/5] Running go vet on changed packages..."
-if ! go vet ${TARGET}; then
+if ! "${GO_CMD}" vet ${TARGET}; then
   echo "❌ go vet failed for: ${TARGET}"
   exit 1
 fi
@@ -169,14 +173,14 @@ else
   if [ "$(uname -s)" != "Linux" ] && [ "${GOOS}" = "linux" ]; then
     echo "  ⚠️ Host OS is $(uname -s) (non-Linux) but target is Linux/amd64. Verifying test compilation..."
     for pkg in ${TARGET}; do
-      if ! go test -c "${pkg}" -o /dev/null; then
+      if ! "${GO_CMD}" test -c "${pkg}" -o /dev/null; then
         echo "❌ Test compilation failed in changed package: ${pkg}"
         exit 1
       fi
     done
     echo "✅ Test compilation passed for all changed packages."
   else
-    if ! go test ${RACE_FLAG} -v ${TARGET}; then
+    if ! "${GO_CMD}" test ${RACE_FLAG} -v ${TARGET}; then
       echo "❌ Unit tests failed in changed packages: ${TARGET}"
       exit 1
     fi
@@ -235,27 +239,30 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# [条件] API / doc sync — 仅在 portal/api 或 launcher actions 变更时触发
+# [条件] API route coverage / dc-exec action extraction — 源码变更时触发；文档仍需按 Skill 人工同步
 # ─────────────────────────────────────────────────────────────────────────────
 SYNC_FAILED=0
 API_CHANGED=$(echo "${CHANGED_FILES}" | grep -c '^internal/server/portal/api/.*\.go$' || true)
-ACTIONS_CHANGED=$(echo "${CHANGED_FILES}" | grep -cE '^(internal/execution/actions\.go|internal/launcher/.*\.go)$' || true)
+ACTIONS_CHANGED=$(echo "${CHANGED_FILES}" | grep -cE '^(internal/execution/actions\.go|internal/dcexec/.*\.go)$' || true)
 
 if [ "${API_CHANGED}" -gt 0 ] || [ "${ACTIONS_CHANGED}" -gt 0 ]; then
-  echo "[+] Checking API & documentation sync..."
+  echo "[+] Checking API route coverage and dc-exec Action extraction..."
 
   if [ "${API_CHANGED}" -gt 0 ]; then
     echo "  → Portal API changed; extracting API summary..."
-    "${PYTHON_CMD}" .agents/scripts/scan_portal_api.py > /dev/null 2>&1 || true
+    if ! "${PYTHON_CMD}" .agents/scripts/scan_portal_api.py > /dev/null; then
+      echo "❌ Portal API route extraction failed."
+      SYNC_FAILED=1
+    fi
     echo "  → Verifying .http test coverage (strict)..."
     if ! "${PYTHON_CMD}" .agents/scripts/verify_http_tests.py --strict; then
-      echo "❌ .http test files not synced with API routes. Update test/api/*.http."
+      echo "❌ .http test files not synced with API routes. Update test/portal/*.http."
       SYNC_FAILED=1
     fi
   fi
 
   if [ "${ACTIONS_CHANGED}" -gt 0 ]; then
-    echo "  → Launcher actions changed; extracting action docs..."
+    echo "  → dc-exec actions changed; extracting action docs..."
     if ! "${PYTHON_CMD}" .agents/scripts/extract_actions.py > /dev/null 2>&1; then
       echo "❌ extract_actions.py failed."
       SYNC_FAILED=1
@@ -263,12 +270,12 @@ if [ "${API_CHANGED}" -gt 0 ] || [ "${ACTIONS_CHANGED}" -gt 0 ]; then
   fi
 
   if [ "${SYNC_FAILED}" -eq 0 ]; then
-    echo "✅ API & documentation sync checks passed."
+    echo "✅ API route coverage and dc-exec extraction checks passed."
   else
     exit 1
   fi
 else
-  echo "[+] Skipping API/doc sync (no portal API or launcher action changes)."
+  echo "[+] Skipping API route / dc-exec extraction checks (no relevant source changes)."
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

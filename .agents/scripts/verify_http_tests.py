@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 verify_http_tests.py - Portal API vs .http Test Client Verifier
-Analyzes registered routes in internal/server/portal/api/*.go and verifies
-that corresponding endpoints exist in test/api/*.http test scripts.
+Reads registered routes from test/portal/portal_routes.txt and verifies
+that corresponding endpoints exist in test/portal/*.http test scripts.
 Also checks Auth Scope correctness and file domain placement.
 
 用法:
@@ -14,96 +14,95 @@ import argparse
 import os
 import re
 import sys
+from pathlib import Path
 
-API_DIR = "internal/server/portal/api"
-HTTP_DIR = "test/api"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+API_DIR = REPO_ROOT / "internal/server/portal/api"
+HTTP_DIR = REPO_ROOT / "test/portal"
 
-def parse_all_routes():
-    """Extract (METHOD, full_path) from all Go handler files in API_DIR."""
-    routes = set()
+sys.path.insert(0, str(HTTP_DIR))
+from portal_routes import http_covers_route, parse_route_templates  # noqa: E402
+from http_suite import load_all_http_requests  # noqa: E402
 
-    for root, _, files in os.walk(API_DIR):
-        for file in files:
-            if not file.endswith(".go") or file.endswith("_test.go"):
-                continue
-            filepath = os.path.join(root, file)
-            with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
-
-            # 1. Match explicit endpoint comments: // GET /api/... or // POST /api/...
-            explicit_comments = re.findall(r'//\s*(GET|POST|PUT|DELETE|PATCH)\s+(/api/[^\s\(\)]+)', content)
-            for m, p in explicit_comments:
-                routes.add((m.upper(), p))
-
-            # 2. Match block routes: // route: /api/... followed by func body with g.GET("..."), g.POST("..."), etc.
-            blocks = re.findall(r'//\s*route:\s*(/api/[^\s\(\)]+)[\s\S]*?func\s*\([^)]*\)\s*\w+\s*\([^)]*\)\s*\{([^}]+)\}', content)
-            for base_path, body in blocks:
-                base_path = base_path.rstrip("/")
-                calls = re.findall(r'g\.(GET|POST|PUT|DELETE|PATCH)\("([^"]*)"', body)
-                for m, sub_p in calls:
-                    # If sub_p is already full path, use it; otherwise append to base_path
-                    if sub_p.startswith("/api/"):
-                        routes.add((m.upper(), sub_p))
-                    elif sub_p == "":
-                        routes.add((m.upper(), base_path))
-                    else:
-                        sub_clean = sub_p if sub_p.startswith("/") else "/" + sub_p
-                        # Avoid duplicating if base_path already ends with sub_clean
-                        if base_path.endswith(sub_clean):
-                            routes.add((m.upper(), base_path))
-                        else:
-                            routes.add((m.upper(), base_path + sub_clean))
-
-    return sorted(list(routes))
 
 def verify_http_tests(strict=False):
-    if not os.path.exists(API_DIR):
+    if not API_DIR.is_dir():
         print(f"Error: {API_DIR} not found.")
         sys.exit(1)
 
-    routes_found = parse_all_routes()
+    routes_found = sorted(parse_route_templates())
 
     print("========================================================================")
     print("  Portal API vs HTTP Test Script Verification")
     print("========================================================================")
-    print(f"Found {len(routes_found)} unique route declarations in {API_DIR}/*.go.")
+    print(f"Found {len(routes_found)} unique route declarations in portal_routes.txt.")
 
-    # Read all .http files
-    http_files = [f for f in os.listdir(HTTP_DIR) if f.endswith(".http")]
-    file_contents = {}
-    all_http_content = ""
-    for f in http_files:
-        filepath = os.path.join(HTTP_DIR, f)
-        with open(filepath, "r", encoding="utf-8") as fh:
-            content = fh.read()
-            file_contents[f] = content
-            all_http_content += "\n" + content
+    http_requests = load_all_http_requests()
+    auto_requests = [r for r in http_requests if not r.manual]
+    print(f"Parsed {len(http_requests)} request block(s) from {HTTP_DIR}/*.http "
+          f"({len(auto_requests)} auto, {len(http_requests) - len(auto_requests)} @manual).")
 
-    # 1. Coverage Check
+    # 1. Coverage Check (template-aware; includes @manual blocks for strict gate)
     missing = []
+    manual_only_routes = []
+    auto_covered = 0
     for method, path in routes_found:
-        regex_path = re.sub(r':\w+', r'[^/\\s]+', path)
-        pattern = re.compile(rf'{method}\s+.*?{regex_path}', re.IGNORECASE)
-        if not pattern.search(all_http_content):
-            missing.append((method, path))
+        if any(http_covers_route(method, path, r.method, r.path_template) for r in http_requests):
+            if any(http_covers_route(method, path, r.method, r.path_template) for r in auto_requests):
+                auto_covered += 1
+            else:
+                manual_only_routes.append((method, path))
+            continue
+        missing.append((method, path))
+
+    print(
+        f"Runtime auto coverage (excludes # @manual): {auto_covered}/{len(routes_found)} route templates."
+    )
+    if manual_only_routes:
+        print(
+            f"ℹ️  {len(manual_only_routes)} route template(s) appear only in # @manual blocks "
+            f"(make test-api will not hit them):"
+        )
+        for m, p in manual_only_routes[:12]:
+            print(f"   - {m:<6} {p}")
+        if len(manual_only_routes) > 12:
+            print(f"   ... and {len(manual_only_routes) - 12} more")
+
+    # 1b. Stale check: every .http request must hit a registered route
+    stale = []
+    for r in http_requests:
+        if "/api/" not in r.path_template:
+            continue
+        if any(http_covers_route(m, p, r.method, r.path_template) for m, p in routes_found):
+            continue
+        stale.append((r.method, r.path_template))
 
     # 2. Scope & Location Quality Checks
     warnings = []
+    http_files = [f for f in os.listdir(HTTP_DIR) if f.endswith(".http")]
+    file_contents = {}
+    for f in http_files:
+        filepath = HTTP_DIR / f
+        with open(filepath, "r", encoding="utf-8") as fh:
+            file_contents[f] = fh.read()
 
-    # Check 01-public-api.http: Should not contain Authorization header
     public_file_content = file_contents.get("01-public-api.http", "")
     if "Authorization: Bearer" in public_file_content:
-        warnings.append("01-public-api.http contains 'Authorization: Bearer' header! Public API file should only contain unauthenticated endpoints.")
+        warnings.append(
+            "01-public-api.http contains 'Authorization: Bearer' header! "
+            "Public API file should only contain unauthenticated endpoints."
+        )
 
-    # Check if /api/settings/platform is in 01-public-api.http
     if "/api/settings/platform" in public_file_content:
-        warnings.append("01-public-api.http contains '/api/settings/platform'! Authenticated settings should be in 16-settings.http.")
+        warnings.append(
+            "01-public-api.http contains '/api/settings/platform'! "
+            "Authenticated settings should be in 16-settings.http."
+        )
 
-    # 3. HTTP Delimiter Syntax Check: ensure no `###` exists without an HTTP request method
     method_pattern = re.compile(r"^\s*(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s+", re.IGNORECASE)
     delimiter_errors = []
     for f in http_files:
-        filepath = os.path.join(HTTP_DIR, f)
+        filepath = HTTP_DIR / f
         with open(filepath, "r", encoding="utf-8") as fh:
             lines = fh.readlines()
         delim_indices = [i for i, line in enumerate(lines) if line.strip().startswith("###")]
@@ -115,20 +114,28 @@ def verify_http_tests(strict=False):
 
     if delimiter_errors:
         for err in delimiter_errors:
-            warnings.append(f"Invalid `###` block without HTTP request statement: {err} (use `#=====` for section or `#-----` for note)")
+            warnings.append(
+                f"Invalid `###` block without HTTP request statement: {err} "
+                "(use `#=====` for section or `#-----` for note)"
+            )
 
-    # Display Results
     if warnings:
         print("\n⚠️  Quality & Scope Warnings:")
         for w in warnings:
             print(f"   - {w}")
 
+    if stale:
+        print(f"\n⚠️  {len(stale)} .http request(s) target routes that are not registered:")
+        for m, p in sorted(set(stale)):
+            print(f"   - {m:<6} {p}")
+        missing.extend(sorted(set(stale)))
+
     if missing:
-        print(f"\n⚠️  {len(missing)} API route(s) currently missing from test/api/*.http:")
+        print(f"\n⚠️  {len(missing)} API route template(s) missing from test/portal/*.http:")
         for m, p in missing:
             print(f"   - {m:<6} {p}")
     else:
-        print("\n✅ All Portal API endpoints have test coverage in test/api/*.http!")
+        print("\n✅ All Portal API route templates have matching .http examples!")
 
     if not missing and not warnings:
         print("✅ Scope & Domain Placement checks passed successfully!")
@@ -141,8 +148,12 @@ def verify_http_tests(strict=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Verify Portal API routes have .http test coverage.")
-    parser.add_argument("--strict", action="store_true",
-                        help="exit non-zero when routes are missing or warnings exist")
+        description="Verify Portal API routes have .http test coverage."
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit non-zero when routes are missing or warnings exist",
+    )
     args = parser.parse_args()
     verify_http_tests(strict=args.strict)

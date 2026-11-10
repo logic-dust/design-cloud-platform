@@ -3,13 +3,13 @@ package execution
 import (
 	"cmp"
 	"context"
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
-	"design-cloud-engine/internal/common/crypto"
+	"design-cloud-engine/internal/platform/crypto"
 )
 
 var (
@@ -54,7 +54,7 @@ type ExecuteRequest struct {
 	TargetUser   string            `json:"targetUser,omitempty"`
 	Mode         RunMode           `json:"mode,omitempty"`
 	TargetNode   string            `json:"targetNode,omitempty"`
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	NodeSelector []string          `json:"nodeSelector,omitempty"`
 	NodeAffinity NodeAffinity      `json:"nodeAffinity,omitempty"`
 	Payload      any               `json:"payload,omitempty"`
 	Env          map[string]string `json:"env,omitempty"`
@@ -92,10 +92,10 @@ func (r *ExecuteRequest) Validate() error {
 //
 // Payload 是 any，两种来源形态并不一致：
 //   - 进程内构造（agent 直接调用）：类型化结构体或 json.RawMessage；
-//   - JSON 往返（launcher 从 stdin 解码）：payload 是 JSON 对象，必然解成 map[string]any。
+//   - JSON 往返（PrivilegedExec 从 stdin 解码）：payload 是 JSON 对象，必然解成 map[string]any。
 //
 // GetPayload 只接受类型化值、json.RawMessage、[]byte、string，故 JSON 解码得到的
-// map[string]any 会被判为未知类型而拒绝，使所有携带 payload 的 launcher 动作失败。
+// map[string]any 会被判为未知类型而拒绝，使所有携带 payload 的 PrivilegedExec 动作失败。
 // 在解码边界调用本方法，可让解码请求与进程内请求在 GetPayload 面前走同一条分支。
 func (r *ExecuteRequest) NormalizePayload() error {
 	if r == nil {
@@ -203,29 +203,29 @@ func generateTraceID() string {
 }
 
 // ============================================================================
-// Launcher I/O (stdin/stdout wrapper)
+// PrivilegedExec I/O (stdin/stdout wrapper)
 // ============================================================================
 
-// ExecuteInput is the JSON input sent to dc-launcher via stdin
+// ExecuteInput is the JSON input sent to PrivilegedExec via stdin
 type ExecuteInput struct {
-	// Version must exactly match the launcher binary's build version.
+	// Version must exactly match the PrivilegedExec binary's build version.
 	// Missing or mismatched values are rejected (no negotiation / fallback).
 	Version string          `json:"version"`
 	Token   string          `json:"token"`
 	Request *ExecuteRequest `json:"request"`
 }
 
-// MatchLauncherProtocolVersion rejects any engine↔launcher version skew (exact match only).
-func MatchLauncherProtocolVersion(engineVersion, launcherVersion string) error {
-	if engineVersion != launcherVersion {
+// MatchDcExecProtocolVersion rejects any engine↔PrivilegedExec version skew (exact match only).
+func MatchDcExecProtocolVersion(engineVersion, dcExecVersion string) error {
+	if engineVersion != dcExecVersion {
 		return fmt.Errorf(
-			"protocol version mismatch: engine sent %q, launcher is %q — install matching design-cloud-engine package",
-			engineVersion, launcherVersion)
+			"protocol version mismatch: engine sent %q, PrivilegedExec is %q — install matching design-cloud-engine package",
+			engineVersion, dcExecVersion)
 	}
 	return nil
 }
 
-// ExecuteOutput defines the JSON response received from the dc-launcher
+// ExecuteOutput defines the JSON response received from the PrivilegedExec
 type ExecuteOutput struct {
 	Success bool   `json:"success"`
 	Output  string `json:"output,omitempty"`

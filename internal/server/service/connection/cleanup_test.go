@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"design-cloud-engine/internal/config"
 	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 )
 
 func newConnectionReposForCleanupTest(t *testing.T) *db.Repos {
@@ -35,65 +35,65 @@ func newConnectionReposForCleanupTest(t *testing.T) *db.Repos {
 	return db.NewRepos(store)
 }
 
-func TestConnectionCleanupDeletesStaleManagedConnections(t *testing.T) {
+func TestConnectionCleanupSkipsOfflineNodesWithoutWritingUnknown(t *testing.T) {
 	t.Parallel()
 
 	repos := newConnectionReposForCleanupTest(t)
-	now := time.Now()
 
-	managedStopped := model.Connection{
-		Name:     "managed-stopped",
-		Username: "alice",
-		Status:   model.ConnectionStopped,
-		Source:   model.ConnectionSourceDiscovered,
-		Protocol: contract.VNCProtocol,
+	node := model.Node{
+		NodeID: "node-online",
+		Status: model.NodeStatusOnline,
 	}
-	managedUnknown := model.Connection{
-		Name:     "managed-unknown",
-		Username: "alice",
-		Status:   model.ConnectionUnknown,
-		Source:   model.ConnectionSourceDiscovered,
-		Protocol: contract.VNCProtocol,
+	if err := repos.Node.Create(context.Background(), &node); err != nil {
+		t.Fatalf("create node: %v", err)
 	}
-	manualStopped := model.Connection{
-		Name:     "manual-stopped",
+
+	onlinePID := uint(11)
+	offlinePID := uint(22)
+	runningVNC := model.Connection{
 		Username: "alice",
-		Status:   model.ConnectionStopped,
-		Source:   model.ConnectionSourceManual,
+		NodeID:   "node-online",
+		Status:   model.ConnectionRunning,
 		Protocol: contract.VNCProtocol,
+		PID:      &onlinePID,
 	}
-	for _, conn := range []*model.Connection{&managedStopped, &managedUnknown, &manualStopped} {
-		if err := repos.Connection.Create(context.Background(), conn); err != nil {
-			t.Fatalf("create connection %s: %v", conn.Name, err)
-		}
+	offlineVNC := model.Connection{
+		Username: "bob",
+		NodeID:   "node-offline",
+		Status:   model.ConnectionRunning,
+		Protocol: contract.VNCProtocol,
+		PID:      &offlinePID,
+	}
+	if err := repos.Connection.Create(context.Background(), &runningVNC); err != nil {
+		t.Fatalf("create running vnc: %v", err)
+	}
+	if err := repos.Connection.Create(context.Background(), &offlineVNC); err != nil {
+		t.Fatalf("create offline vnc: %v", err)
 	}
 
 	svc := &Service{
 		connectionRepo: repos.Connection,
+		nodeRepo:       repos.Node,
 		leaseRepo:      repos.TaskLease,
 		ownerID:        "node-a",
 		logger:         slog.Default(),
-		connListCache:  testConnListCache(),
-		now:            func() time.Time { return now.Add(10 * 24 * time.Hour) },
+		// execSvc nil → online node check skipped without error
 	}
 
 	run, err := svc.ExecuteCleanup(context.Background())
 	if err != nil {
 		t.Fatalf("execute cleanup: %v", err)
 	}
-	if run.Deleted != 2 {
-		t.Fatalf("deleted = %d, want 2", run.Deleted)
+	if run.Updated != 0 {
+		t.Fatalf("updated = %d, want 0 (no exec, no offline writes)", run.Updated)
 	}
 
-	list, _, err := repos.Connection.List(context.Background(), 0, 0)
+	c2, err := repos.Connection.GetByID(context.Background(), offlineVNC.ID)
 	if err != nil {
-		t.Fatalf("list connections: %v", err)
+		t.Fatalf("get c2: %v", err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("connections after cleanup = %d, want 1", len(list))
-	}
-	if list[0].Name != "manual-stopped" {
-		t.Fatalf("remaining connection = %s, want manual-stopped", list[0].Name)
+	if c2.Status != model.ConnectionRunning {
+		t.Fatalf("c2 status = %v, want running (offline no longer written to unknown)", c2.Status)
 	}
 }
 
@@ -101,87 +101,21 @@ func TestConnectionCleanupSkipsWhenLeaseHeldElsewhere(t *testing.T) {
 	t.Parallel()
 
 	repos := newConnectionReposForCleanupTest(t)
-
-	managedStopped := model.Connection{
-		Name:     "managed-stopped",
-		Username: "alice",
-		Status:   model.ConnectionStopped,
-		Source:   model.ConnectionSourceDiscovered,
-		Protocol: contract.VNCProtocol,
-	}
-	if err := repos.Connection.Create(context.Background(), &managedStopped); err != nil {
-		t.Fatalf("create connection: %v", err)
-	}
-
-	acquired, err := repos.TaskLease.TryAcquire(context.Background(), "connection_cleanup", "node-b", time.Hour)
-	if err != nil {
-		t.Fatalf("acquire lease: %v", err)
-	}
-	if !acquired {
-		t.Fatalf("expected lease to be acquired by node-b")
+	ctx := context.Background()
+	ok, _, err := repos.TaskLease.TryAcquire(ctx, "connection_cleanup", "other-owner", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("seed lease: ok=%v err=%v", ok, err)
 	}
 
 	svc := &Service{
 		connectionRepo: repos.Connection,
+		nodeRepo:       repos.Node,
 		leaseRepo:      repos.TaskLease,
 		ownerID:        "node-a",
 		logger:         slog.Default(),
-		connListCache:  testConnListCache(),
-		now:            func() time.Time { return time.Now().Add(48 * time.Hour) },
 	}
-
 	_, err = svc.ExecuteCleanup(context.Background())
 	if !errors.Is(err, ErrCleanupLeaseHeld) {
 		t.Fatalf("err = %v, want ErrCleanupLeaseHeld", err)
-	}
-
-	list, _, err := repos.Connection.List(context.Background(), 0, 0)
-	if err != nil {
-		t.Fatalf("list connections: %v", err)
-	}
-	if len(list) != 1 {
-		t.Fatalf("connections after skipped cleanup = %d, want 1", len(list))
-	}
-}
-
-func TestConnectionCleanupExecute(t *testing.T) {
-	t.Parallel()
-
-	repos := newConnectionReposForCleanupTest(t)
-	managedStopped := model.Connection{
-		Name:     "managed-execute",
-		Username: "alice",
-		Status:   model.ConnectionStopped,
-		Source:   model.ConnectionSourceDiscovered,
-		Protocol: contract.VNCProtocol,
-	}
-	if err := repos.Connection.Create(context.Background(), &managedStopped); err != nil {
-		t.Fatalf("create connection: %v", err)
-	}
-
-	now := time.Now()
-	svc := &Service{
-		connectionRepo: repos.Connection,
-		leaseRepo:      repos.TaskLease,
-		ownerID:        "node-a",
-		logger:         slog.Default(),
-		connListCache:  testConnListCache(),
-		now:            func() time.Time { return now.Add(10 * 24 * time.Hour) },
-	}
-
-	run, err := svc.ExecuteCleanup(context.Background())
-	if err != nil {
-		t.Fatalf("execute cleanup: %v", err)
-	}
-	if run.Deleted != 1 {
-		t.Fatalf("deleted = %d, want 1", run.Deleted)
-	}
-
-	list, _, err := repos.Connection.List(context.Background(), 0, 0)
-	if err != nil {
-		t.Fatalf("list connections: %v", err)
-	}
-	if len(list) != 0 {
-		t.Fatalf("connections after execute = %d, want 0", len(list))
 	}
 }

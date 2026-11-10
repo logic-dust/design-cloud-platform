@@ -10,8 +10,8 @@ import (
 // 控制面（control）仅依赖该契约执行告警评估，具体实现在 service/alert 包，
 // 由 service 容器组装后注入——避免控制面反向依赖业务层（见 arch-rules.yaml）。
 type AlertEvaluator interface {
-	// EvalResource 对节点资源上报执行告警评估（内存/磁盘/CPU/负载）。
-	EvalResource(ctx context.Context, nodeID string, report *pb.ResourceReport) error
+	// EvalMetrics 对节点资源指标执行告警评估（内存/磁盘/CPU/负载）。
+	EvalMetrics(ctx context.Context, nodeID string, metrics *pb.Metrics) error
 	// EvalStorage 对共享存储 probe 上报执行告警评估（使用率/最小可用空间）。
 	EvalStorage(ctx context.Context, report *pb.StorageProbeItem) error
 }
@@ -20,9 +20,9 @@ type AlertEvaluator interface {
 type CollectTarget string
 
 const (
-	CollectTargetVNC      CollectTarget = "vnc"
-	CollectTargetResource CollectTarget = "resource"
-	CollectTargetStorage  CollectTarget = "storage"
+	CollectTargetConnection CollectTarget = "connection"
+	CollectTargetMetrics    CollectTarget = "metrics"
+	CollectTargetStorage    CollectTarget = "storage"
 )
 
 // CollectTrigger is the unified facade interface for broadcasting on-demand
@@ -32,7 +32,7 @@ type CollectTrigger interface {
 }
 
 // ClusterEventPublisher defines the notification publisher interface for control plane
-// to push node status and lifecycle notifications to system admins without introducing a reverse dependency on service/push.
+// to push node status and lifecycle notifications to system admins without introducing a reverse dependency on the push hub.
 type ClusterEventPublisher interface {
 	PublishNodeEvent(ctx context.Context, role int, nodeID, action, title, message, level string)
 	DeliverRemoteEvent(ctx context.Context, targetType string, userIDs []string, role int, eventName string, payloadJSON string)

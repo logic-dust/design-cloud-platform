@@ -1,30 +1,40 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 	"design-cloud-engine/internal/server/portal/httputil"
-	"design-cloud-engine/internal/server/service"
 	"design-cloud-engine/internal/server/service/role"
 	usersvc "design-cloud-engine/internal/server/service/user"
 	userprovider "design-cloud-engine/internal/server/service/user/provider"
 
+	"design-cloud-engine/internal/contract"
 	"github.com/labstack/echo/v5"
 )
 
-type userHandler struct {
-	user    *usersvc.Service
-	roleSvc *role.Service
-	logger  *slog.Logger
-	cfg     *config.Config
+// identityUseCases is the narrow identity use-case port consumed by userHandler.
+// application/identity.Service implements it; the handler depends only on this API.
+type identityUseCases interface {
+	DeleteUser(ctx context.Context, username string) error
+	UpdateUserStatus(ctx context.Context, operator *model.Session, username string, req usersvc.AdminUserUpdateRequest) (*model.User, error)
+	AssignRole(ctx context.Context, username string, role model.Role) (model.User, error)
 }
 
-func newUserHandler(svc *service.Container, cfg *config.Config, logger *slog.Logger) *userHandler {
-	return &userHandler{user: svc.User, roleSvc: svc.Role, logger: logger, cfg: cfg}
+type userHandler struct {
+	user     *usersvc.Service
+	roleSvc  *role.Service
+	identity identityUseCases
+	logger   *slog.Logger
+	cfg      *config.Config
+}
+
+func newUserHandler(userSvc *usersvc.Service, roleSvc *role.Service, identity identityUseCases, cfg *config.Config, logger *slog.Logger) *userHandler {
+	return &userHandler{user: userSvc, roleSvc: roleSvc, identity: identity, logger: logger, cfg: cfg}
 }
 
 // route: /api/users
@@ -51,7 +61,7 @@ func (h *userHandler) resolveIDMappings(c *echo.Context) error {
 func (h *userHandler) getMyProfile(c *echo.Context) error {
 	userInfo, err := h.user.Get(c.Request().Context(), httputil.CurrentUsername(c))
 	if err != nil {
-		if errors.Is(err, userprovider.ErrUserNotFound) || errors.Is(err, common.ErrNotFound) {
+		if errors.Is(err, userprovider.ErrUserNotFound) || errors.Is(err, contract.ErrNotFound) {
 			return c.JSON(http.StatusNotFound, httputil.Response{Message: "User profile not found"})
 		}
 		return httputil.RespondError(c, err)
@@ -81,7 +91,7 @@ func (h *userHandler) updateMyPassword(c *echo.Context) error {
 			return c.JSON(http.StatusForbidden, httputil.Response{Message: "User account is not active"})
 		case errors.Is(err, userprovider.ErrLDAPPasswordNotSupported):
 			return c.JSON(http.StatusForbidden, httputil.Response{Message: err.Error()})
-		case errors.Is(err, userprovider.ErrUserNotFound) || errors.Is(err, common.ErrNotFound):
+		case errors.Is(err, userprovider.ErrUserNotFound) || errors.Is(err, contract.ErrNotFound):
 			return c.JSON(http.StatusNotFound, httputil.Response{Message: "User not found"})
 		default:
 			return httputil.RespondError(c, err)

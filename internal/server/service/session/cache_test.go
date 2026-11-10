@@ -11,10 +11,10 @@ func TestSessionInfoCacheEvictExpiredHandlesNilEntry(t *testing.T) {
 	cache := newSessionInfoCache()
 	cache.byToken["orphan-token"] = nil
 
-	if got := cache.evictExpired(time.Now()); got != 1 {
-		t.Fatalf("evicted entries = %d, want 1", got)
+	if got := cache.invalidateExpired(time.Now()); got != 1 {
+		t.Fatalf("invalidated entries = %d, want 1", got)
 	}
 	if _, ok := cache.byToken["orphan-token"]; ok {
-		t.Fatalf("nil token entry remained after eviction")
+		t.Fatalf("nil token entry remained after invalidation")
 	}
 }

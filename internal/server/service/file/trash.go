@@ -2,14 +2,15 @@ package file
 
 import (
 	"context"
-	"encoding/json"
+	"design-cloud-engine/internal/contract"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"fmt"
-	"io/fs"
+	"strings"
 
 	"design-cloud-engine/internal/execution/payload"
 
-	commonfs "design-cloud-engine/internal/common/fs"
 	"design-cloud-engine/internal/execution"
+	commonfs "design-cloud-engine/internal/platform/fs"
 )
 
 // trashFileEntry describes a single file/dir inside a user's trash directory.
@@ -31,14 +32,14 @@ func (s *Service) ListTrash(ctx context.Context, trashPath, username string) (Tr
 	}
 
 	result, err := s.execute(ctx, execution.ActionTrashList,
-		payload.TrashList{TrashPath: cleanPath}, username)
+		payload.TrashList{TrashPath: cleanPath, Limit: s.listMaxEntries(ctx)}, username)
 	if err != nil {
 		return TrashDirInfo{}, execution.HandleError(s.logger, err, "trash.list")
 	}
 
 	var out TrashDirInfo
 	if err := json.Unmarshal([]byte(result), &out); err != nil {
-		return TrashDirInfo{}, fmt.Errorf("invalid trash list response from launcher: %w", err)
+		return TrashDirInfo{}, fmt.Errorf("invalid trash list response from PrivilegedExec: %w", err)
 	}
 	return out, nil
 }
@@ -49,7 +50,19 @@ func (s *Service) MoveToTrash(ctx context.Context, dirPath string, files []strin
 		Dir:   dirPath,
 		Files: files,
 	}
+	if s.settingsSvc != nil {
+		if fileSettings, err := s.settingsSvc.GetFileSettings(ctx); err == nil {
+			trashReq.MaxBytes = fileSettings.TrashMaxItemSizeBytes
+			trashReq.MaxCount = fileSettings.TrashMaxItemCount
+		}
+	}
 	if _, err := s.execute(ctx, execution.ActionTrashMove, trashReq, requestUser); err != nil {
+		if strings.Contains(err.Error(), ErrTrashTooLarge.Error()) {
+			return ErrTrashTooLarge
+		}
+		if strings.Contains(err.Error(), ErrTrashTooManyFiles.Error()) {
+			return ErrTrashTooManyFiles
+		}
 		return execution.HandleError(s.logger, err, "trash.move")
 	}
 	return nil
@@ -73,6 +86,19 @@ func (s *Service) MoveLocationPathsToTrash(ctx context.Context, locationName str
 
 func (s *Service) DeleteTrashItem(ctx context.Context, trashName, requestUser string) error {
 	return s.DeleteTrashItems(ctx, []string{trashName}, requestUser)
+}
+
+func (s *Service) RestoreTrashItems(ctx context.Context, trashNames []string, requestUser string) error {
+	cleanNames, err := normalizeTrashNames(trashNames)
+	if err != nil {
+		return err
+	}
+
+	trashPayload := payload.TrashRestoreMany{TrashNames: cleanNames}
+	if _, err := s.execute(ctx, execution.ActionTrashRestoreMany, trashPayload, requestUser); err != nil {
+		return execution.HandleError(s.logger, err, "trash.restore_many")
+	}
+	return nil
 }
 
 func (s *Service) DeleteTrashItems(ctx context.Context, trashNames []string, requestUser string) error {
@@ -105,7 +131,7 @@ func (s *Service) EmptyTrash(ctx context.Context, requestUser string) error {
 
 func normalizeTrashNames(trashNames []string) ([]string, error) {
 	if len(trashNames) == 0 {
-		return nil, fmt.Errorf("%w: missing trash names", fs.ErrInvalid)
+		return nil, contract.NewInvalidParamError("missing trash names")
 	}
 
 	out := make([]string, 0, len(trashNames))
@@ -122,7 +148,7 @@ func normalizeTrashNames(trashNames []string) ([]string, error) {
 		out = append(out, cleanName)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("%w: missing trash names", fs.ErrInvalid)
+		return nil, contract.NewInvalidParamError("missing trash names")
 	}
 	return out, nil
 }

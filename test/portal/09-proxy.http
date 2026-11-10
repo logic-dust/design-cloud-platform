@@ -1,0 +1,33 @@
+# ========================================
+# ===== PROXY Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+# ----- VNC/RDP：先创建连接并获取 testVNCConnectionId（参见 08-connections.http） -----
+# ----- SSH：用可访问的 SSH 规格 id（如 lab ssh-login），无需 POST /api/connections -----
+# ----- 断开隧道：桌面关闭 WebSocket 即可；不提供 DELETE proxy 路由 -----
+
+# @expect 200,404
+### 查询本机活跃代理会话（多节点下仅反映当前 Engine；勿用于轮询探测隧道存活）
+GET {{addr}}/api/connections/{{testVNCConnectionId}}/proxy-connection
+Authorization: Bearer {{accessToken}}
+
+# ----- WebSocket 代理：一次握手 GET .../proxy-connection + Upgrade + Portal Session Bearer -----
+# ----- 桌面客户端以 WebSocket 断开为隧道结束事实；完整二进制流测试见 internal/server/portal/api/connection_proxy_ws_test.go -----
+
+# @manual
+### WebSocket 代理数据面握手（需 WebSocket 客户端，REST Client 仅示例）
+GET {{addr}}/api/connections/{{testVNCConnectionId}}/proxy-connection
+Authorization: Bearer {{accessToken}}
+Connection: Upgrade
+Upgrade: websocket
+Sec-WebSocket-Version: 13
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+
+# @manual
+### SSH WebSocket 代理（选机 + 拨号，不写 connections 行；桌面关 WS 即结束）
+GET {{addr}}/api/connections/ssh?resourceId={{testSSHResourceID}}
+Authorization: Bearer {{accessToken}}
+Connection: Upgrade
+Upgrade: websocket
+Sec-WebSocket-Version: 13
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==

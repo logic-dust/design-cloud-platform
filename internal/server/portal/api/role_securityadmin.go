@@ -39,7 +39,7 @@ func (h *userHandler) listRoleMembers(c *echo.Context) error {
 		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
 	}
 
-	p := httputil.ParsePagination(c, 50, 200)
+	p := httputil.ParsePage(c)
 	members, total, err := h.roleSvc.ListRoleMembers(c.Request().Context(), parsedRole, p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)
@@ -62,7 +62,7 @@ func (h *userHandler) setUserRole(c *echo.Context) error {
 		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
 	}
 
-	updatedUser, err := h.roleSvc.SetUserRole(c.Request().Context(), targetUser, parsedRole)
+	updatedUser, err := h.identity.AssignRole(c.Request().Context(), targetUser, parsedRole)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}

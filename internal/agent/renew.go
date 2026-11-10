@@ -13,8 +13,8 @@ import (
 	"os"
 	"time"
 
-	fsutil "design-cloud-engine/internal/common/fs"
 	pb "design-cloud-engine/internal/contract/proto"
+	fsutil "design-cloud-engine/internal/platform/fs"
 )
 
 // errCertRenewed ends the stream session on purpose so connectLoop reconnects and

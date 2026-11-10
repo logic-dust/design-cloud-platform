@@ -6,11 +6,11 @@ import (
 	"design-cloud-engine/internal/execution"
 )
 
-// NewService creates a service with both launcher and direct executors for Linux.
-func NewService(launcherExec, directExec execution.Executor, logger *slog.Logger) *Service {
+// NewService creates a service with both PrivilegedExec and direct executors for Linux.
+func NewService(dcexecExec, directExec execution.Executor, logger *slog.Logger) *Service {
 	return &Service{
-		launcherExec: launcherExec,
-		directExec:   directExec,
-		logger:       logger,
+		dcexecExec: dcexecExec,
+		directExec: directExec,
+		logger:     logger,
 	}
 }

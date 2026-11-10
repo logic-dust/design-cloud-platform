@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"design-cloud-engine/internal/config"
 	"design-cloud-engine/internal/db"
+	"design-cloud-engine/internal/platform/config"
 
 	"github.com/go-ldap/ldap/v3"
 )
@@ -129,7 +129,7 @@ func (p *ldapProvider) ListUsers(ctx context.Context) ([]SystemUser, error) {
 		return nil, err
 	}
 	dbIDByName := make(map[string]uint)
-	if dbUsers, _, err := p.db.List(ctx, 0, 0); err == nil {
+	if dbUsers, err := p.db.ListAll(ctx); err == nil {
 		for _, u := range dbUsers {
 			dbIDByName[u.Username] = u.ID
 		}

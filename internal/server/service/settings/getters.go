@@ -2,11 +2,11 @@ package settings
 
 import (
 	"context"
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"fmt"
 	"log/slog"
 
-	"design-cloud-engine/internal/server/service/settings/schema"
+	"design-cloud-engine/internal/contract/schema"
 )
 
 // loadTyped reads a settings domain and validates it with the same constraints
@@ -66,13 +66,23 @@ func (s *Service) IsIndexEnabled(ctx context.Context) bool {
 	return p.Website.IndexEnabled
 }
 
-// IsDashboardEnabled returns whether the dashboard (/dashboard) and guest access are enabled.
-func (s *Service) IsDashboardEnabled(ctx context.Context) bool {
+// IsOverviewEnabled returns whether the overview page (/overview) and guest access are enabled.
+func (s *Service) IsOverviewEnabled(ctx context.Context) bool {
 	p, err := s.GetPlatformSettings(ctx)
 	if err != nil {
 		return true
 	}
-	return p.Website.DashboardEnabled
+	return p.Website.OverviewEnabled
+}
+
+// IsAllowUserClusterOverview returns whether ordinary users may access cluster overview APIs.
+// Defaults to true when settings cannot be loaded.
+func (s *Service) IsAllowUserClusterOverview(ctx context.Context) bool {
+	o, err := s.GetOverviewSettings(ctx)
+	if err != nil {
+		return true
+	}
+	return o.AllowUserCluster
 }
 
 // GetAuthSettings returns typed auth settings.
@@ -85,17 +95,13 @@ func (s *Service) GetConnectionSettings(ctx context.Context) (schema.ConnectionS
 	return loadTyped[schema.ConnectionSettings](ctx, s, schema.DomainConnection)
 }
 
-func (s *Service) MaxConnectionsPerUser(ctx context.Context) (int, error) {
+// MaxPerUserCap returns the configured upper bound for a resource's max_per_user.
+func (s *Service) MaxPerUserCap(ctx context.Context) (int, error) {
 	settings, err := s.GetConnectionSettings(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return settings.MaxConnectionsPerUser, nil
-}
-
-// GetTunnelSettings returns typed tunnel settings.
-func (s *Service) GetTunnelSettings(ctx context.Context) (schema.TunnelSettings, error) {
-	return loadTyped[schema.TunnelSettings](ctx, s, schema.DomainTunnel)
+	return settings.MaxPerUserCap, nil
 }
 
 // GetFileSettings returns typed file settings.
@@ -103,9 +109,9 @@ func (s *Service) GetFileSettings(ctx context.Context) (schema.FileSettings, err
 	return loadTyped[schema.FileSettings](ctx, s, schema.DomainFile)
 }
 
-// GetDashboardSettings returns typed dashboard settings.
-func (s *Service) GetDashboardSettings(ctx context.Context) (schema.DashboardSettings, error) {
-	return loadTyped[schema.DashboardSettings](ctx, s, schema.DomainDashboard)
+// GetOverviewSettings returns typed overview settings.
+func (s *Service) GetOverviewSettings(ctx context.Context) (schema.OverviewSettings, error) {
+	return loadTyped[schema.OverviewSettings](ctx, s, schema.DomainOverview)
 }
 
 // GetStorageSettings returns typed storage settings.
@@ -136,6 +142,24 @@ func (s *Service) GetAlertSettings(ctx context.Context) (schema.AlertSettings, e
 // GetDesktopSettings returns typed desktop settings.
 func (s *Service) GetDesktopSettings(ctx context.Context) (schema.DesktopSettings, error) {
 	return loadTyped[schema.DesktopSettings](ctx, s, schema.DomainDesktop)
+}
+
+// GetDesktopSettingsStrict loads desktop settings without falling back to
+// defaults when stored values fail validation.
+func (s *Service) GetDesktopSettingsStrict(ctx context.Context) (schema.DesktopSettings, error) {
+	var settings schema.DesktopSettings
+	if defaultVal, ok := schema.DefaultSettings(schema.DomainDesktop); ok {
+		if typed, ok := defaultVal.(schema.DesktopSettings); ok {
+			settings = typed
+		}
+	}
+	if err := s.settingsRepo.Load(ctx, schema.DomainDesktop.String(), &settings); err != nil {
+		return schema.DesktopSettings{}, err
+	}
+	if err := validateLoaded(schema.DomainDesktop, settings); err != nil {
+		return schema.DesktopSettings{}, err
+	}
+	return settings, nil
 }
 
 // GetCertSettings returns typed certificate lifecycle settings.

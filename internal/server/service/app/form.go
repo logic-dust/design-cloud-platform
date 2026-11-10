@@ -1,9 +1,8 @@
 package app
 
 import (
-	"encoding/json"
-	"fmt"
-	"io/fs"
+	"design-cloud-engine/internal/contract"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -21,10 +20,10 @@ func applyAppForm(app *model.App, form model.AppBase) {
 
 func validateReqAppForm(form model.AppBase) error {
 	if !appNamePattern.MatchString(form.Name) {
-		return fmt.Errorf("name must match [A-Za-z0-9_] and be 1-32 characters: %w", fs.ErrInvalid)
+		return contract.NewValidationError("name must match [A-Za-z0-9_] and be 1-32 characters")
 	}
 	if utf8.RuneCountInString(form.Alias) > maxAliasRuneCount {
-		return fmt.Errorf("alias must be at most %d characters: %w", maxAliasRuneCount, fs.ErrInvalid)
+		return contract.NewValidationError("alias must be at most 100 characters")
 	}
 
 	switch form.Type {
@@ -32,13 +31,13 @@ func validateReqAppForm(form model.AppBase) error {
 		return nil
 	case model.FormApp:
 		if strings.TrimSpace(form.Form) == "" {
-			return fmt.Errorf("form app must have a form: %w", fs.ErrInvalid)
+			return contract.NewInvalidParamError("form app must have a form")
 		}
 		if !json.Valid([]byte(form.Form)) {
-			return fmt.Errorf("form app must provide valid JSON form: %w", fs.ErrInvalid)
+			return contract.NewValidationError("form app must provide valid JSON form")
 		}
 		return nil
 	default:
-		return fmt.Errorf("invalid app type %q: %w", form.Type, fs.ErrInvalid)
+		return contract.NewValidationError("invalid app type " + string(form.Type))
 	}
 }

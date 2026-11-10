@@ -1,9 +1,10 @@
 package license
 
 import (
+	"design-cloud-engine/internal/contract"
 	"fmt"
-	"io/fs"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -115,7 +116,7 @@ func parseFlexAllStatusOutput(allStatusOutput string) ([]featureInfo, error) {
 		// Fallback: some lmstat versions omit the trailing space before the newline.
 		outputParts = strings.Split(allStatusOutput, "NOTE: lmstat -i")
 		if len(outputParts) < 2 {
-			return nil, fmt.Errorf("%w: missing NOTE: lmstat -i token in output", fs.ErrInvalid)
+			return nil, contract.NewValidationError("missing NOTE: lmstat -i token in output")
 		}
 	}
 
@@ -175,7 +176,7 @@ func parseFlexAllStatusOutput(allStatusOutput string) ([]featureInfo, error) {
 
 // parseFlexServerStatus parses lmstat -c <lic_file> output
 func parseFlexServerStatus(statusOutputStr string) (isServerUp, isVendorDaemonUp bool) {
-	lines := strings.Split(strings.Trim(statusOutputStr, "\n"), "\n")
+	lines := slices.Collect(strings.Lines(strings.Trim(statusOutputStr, "\n")))
 
 	for index, line := range lines {
 		if strings.Contains(line, "license server UP") {

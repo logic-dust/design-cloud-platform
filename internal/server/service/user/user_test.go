@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 	"design-cloud-engine/internal/server/service/settings"
-	"design-cloud-engine/internal/server/service/settings/schema"
 	userprovider "design-cloud-engine/internal/server/service/user/provider"
 
 	"github.com/stretchr/testify/assert"
@@ -50,7 +50,7 @@ func setupTestCore(t *testing.T) (*Service, *db.Repos, *settings.Service, *db.St
 	}
 	t.Cleanup(func() { _ = auditSvc.Close() })
 
-	settingsSvc, err := settings.NewService(repos.Setting, auditSvc, nil)
+	settingsSvc, err := settings.NewService(repos.Setting, slog.Default(), auditSvc, nil, repos.CacheVersion, repos.Node)
 	if err != nil {
 		t.Fatalf("new settings service: %v", err)
 	}
@@ -62,7 +62,7 @@ func setupTestCore(t *testing.T) (*Service, *db.Repos, *settings.Service, *db.St
 		leaseRepo:      repos.TaskLease,
 		cacheVersion:   repos.CacheVersion,
 		auditSvc:       auditSvc,
-		settingsSvc:    settingsSvc,
+		authSettings:   settingsSvc,
 		idMappingCache: newIDMappingCache(),
 	}
 	return svc, repos, settingsSvc, store
@@ -315,9 +315,9 @@ func TestServiceChangePassword_AppUser_Success(t *testing.T) {
 		"userBanDuration": 600,
 		"ipBanDuration":   3600,
 		"sessionTTL":      3600,
-		"maxIPLoginAttempts": 5,
-		"maxUserLoginAttempts": 5,
-		"maxLoginSessionsPerUser": 10,
+		"maxIPLoginAttempts": 15,
+		"maxUserLoginAttempts": 7,
+		"maxSessionsPerUser": 5,
 		"idMappingFoundCacheTTL": 86400,
 		"idMappingNotFoundCacheTTL": 600
 	}`)
@@ -358,7 +358,7 @@ func TestServiceChangePassword_EvictsSessions(t *testing.T) {
 			Type: model.UserTypeApp, Password: string(hashed),
 		}))
 		require.NoError(t, settingsSvc.UpdateByDomain(context.Background(), schema.DomainAuth,
-			[]byte(`{"userBanDuration":600,"ipBanDuration":3600,"sessionTTL":3600,"maxIPLoginAttempts":5,"maxUserLoginAttempts":5,"maxLoginSessionsPerUser":10,"idMappingFoundCacheTTL":86400,"idMappingNotFoundCacheTTL":600}`)))
+			[]byte(`{"userBanDuration":600,"ipBanDuration":3600,"sessionTTL":3600,"maxIPLoginAttempts":15,"maxUserLoginAttempts":7,"maxSessionsPerUser":5,"idMappingFoundCacheTTL":86400,"idMappingNotFoundCacheTTL":600}`)))
 
 		require.NoError(t, core.ChangePassword(context.Background(), username, oldPwd, newPwd))
 		assert.True(t, evicted, "app user password change must evict sessions")
@@ -453,7 +453,6 @@ func TestServiceAdminUpdate_Success(t *testing.T) {
 		Status:         model.UserActive,
 		DownloadAccess: true,
 		UploadAccess:   true,
-		TerminalAccess: true,
 	}
 	err := repos.User.Create(context.Background(), &u)
 	require.NoError(t, err)
@@ -462,7 +461,6 @@ func TestServiceAdminUpdate_Success(t *testing.T) {
 		Status:         new(int(model.UserDisabled)),
 		DownloadAccess: new(false),
 		UploadAccess:   new(false),
-		TerminalAccess: new(false),
 		MaxConnections: new(uint(5)),
 	}
 
@@ -479,7 +477,6 @@ func TestServiceAdminUpdate_Success(t *testing.T) {
 	assert.Equal(t, model.UserDisabled, dbUser.Status)
 	assert.False(t, dbUser.DownloadAccess)
 	assert.False(t, dbUser.UploadAccess)
-	assert.False(t, dbUser.TerminalAccess)
 	assert.Equal(t, uint(5), dbUser.MaxConnections)
 
 	// Test reset to inherit (0)
@@ -546,11 +543,13 @@ func TestSetScope_DeletesExistingSessions(t *testing.T) {
 		Token:     "scoped_user-token",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}))
-	core.SetSessionInvalidator(mockSessionInvalidator{
+	revoker := mockSessionInvalidator{
 		deleteFn: func(ctx context.Context, username string) error {
 			return repos.Session.DeleteByUsername(ctx, username)
 		},
-	})
+	}
+	core.deleteSessionsByUsername = revoker.Delete
+	core.invalidateSessionsByUsername = revoker.InvalidateByUsername
 
 	err = core.SetScopes(ctx, "scoped_user", model.AdminScopes(model.ScopeAll))
 	require.NoError(t, err)

@@ -10,8 +10,8 @@ import (
 
 	"design-cloud-engine/internal/agent/executor/direct"
 	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/common/fs"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/platform/config"
+	"design-cloud-engine/internal/platform/fs"
 )
 
 // Manager manages agent and its dependencies.
@@ -22,14 +22,21 @@ type Manager struct {
 }
 
 // NewManager creates and initializes the agent manager.
-func NewManager(logger *slog.Logger, cfg *config.Config) (*Manager, error) {
+func NewManager(ctx context.Context, logger *slog.Logger, cfg *config.Config) (*Manager, error) {
 	agentLog := logger.With("component", "agent")
+	if _, _, err := loadTLSMaterial(TLSClientConfig{
+		CertPath: cfg.ClusterNodeCertPath(cfg.Runtime.NodeID),
+		KeyPath:  cfg.ClusterNodeKeyPath(cfg.Runtime.NodeID),
+		CAPath:   cfg.ClusterCACertPath(),
+	}); err != nil {
+		return nil, fmt.Errorf("invalid agent TLS material: %w", err)
+	}
 
 	if err := fs.MkdirPrivate(fs.RuntimeDir()); err != nil {
 		return nil, fmt.Errorf("failed to create runtime directory: %w", err)
 	}
 
-	if err := initLauncher(logger); err != nil {
+	if err := initExecBin(logger); err != nil {
 		return nil, err
 	}
 
@@ -58,6 +65,12 @@ func NewManager(logger *slog.Logger, cfg *config.Config) (*Manager, error) {
 		},
 	}, agentLog)
 	executorService := createExecutorService(settingsMgr, directExec, agentLog, onAudit)
+	executorService.SetSchedulerEnvScript(func() string {
+		if s := settingsMgr.Get(); s != nil {
+			return s.SchedulerEnvScript
+		}
+		return ""
+	})
 
 	agentLog.Debug("Creating cluster agent", "node_id", cfg.Runtime.NodeID, "servers", cfg.Runtime.Servers)
 
@@ -75,7 +88,7 @@ func NewManager(logger *slog.Logger, cfg *config.Config) (*Manager, error) {
 			CAPath:     cfg.ClusterCACertPath(),
 		},
 	}
-	clusterAgent := NewAgent(executorService, agentCfg, agentLog, settingsMgr)
+	clusterAgent := NewAgent(ctx, executorService, agentCfg, agentLog, settingsMgr)
 
 	agentLog.Debug("Agent manager initialization complete")
 	return &Manager{

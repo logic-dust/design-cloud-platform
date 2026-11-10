@@ -24,12 +24,12 @@ type APIPolicy int
 const (
 	PolicyGuest APIPolicy = iota
 	PolicyUser
-	PolicyDashboard
+	PolicyOverviewClusterStream
 	PolicyFileTransfer
 	PolicyAuditAdmin
 	PolicySysAdmin
 	PolicySecurityAdmin
-	PolicyWebSocket
+	PolicyProxyTunnel
 	PolicySSE
 )
 
@@ -37,7 +37,7 @@ const (
 // 作为 api → middleware 的 DTO，保持 middleware 与 config 包及具体路由路径解耦。
 type PolicyConfig struct {
 	EnableThreeRoles              bool                           // 三员管理员模式（false = 单管理员）
-	IsDashboardEnabled            func(ctx context.Context) bool // 是否开启嵌入式数据大屏（动态判定函数）
+	IsOverviewEnabled             func(ctx context.Context) bool // 是否开启嵌入式数据大屏（动态判定函数）
 	RestrictedSessionAllowedPaths []string                       // 密码需修改的受限会话允许放行的 API 路由白名单（由 api 层注入）
 	RateLimit                     float64                        // 公共 API IP 级速率限制 (req/s)
 	RateBurst                     int                            // 公共 API 突发上限
@@ -54,13 +54,9 @@ func BuildRoutePolicies(
 	securityMgr SecurityManager,
 	cfg PolicyConfig,
 ) map[APIPolicy][]echo.MiddlewareFunc {
-	// --- 请求超时中间件：适用于所有 API，防止长时间运行的请求占用资源
-	// Skipper: stream=true 的 SSE 长连接跳过 60s 超时（dashboard/审计流共享路径）
+	// --- 请求超时中间件：仅加入需要有限响应时间的策略链。
 	requestTimeoutMW := echoMW.ContextTimeoutWithConfig(echoMW.ContextTimeoutConfig{
 		Timeout: DefaultRequestContextTimeout,
-		Skipper: func(c *echo.Context) bool {
-			return c.QueryParam("stream") == "true"
-		},
 	})
 
 	// --- 请求 Body 大小限制中间件：适用于所有需要处理 JSON 请求体的 API，防止过大的请求导致资源耗尽
@@ -136,27 +132,29 @@ func BuildRoutePolicies(
 
 	// ---
 	// 1. 基础构件 (Atomic Building Blocks)
+	// - bodyLimitBase: [bodyLimitMW]
 	// - publicBase: [requestTimeoutMW, bodyLimitMW]
 	// - authBase:   [sessionAuthMW, adminModeMW]
-	publicBase := []echo.MiddlewareFunc{requestTimeoutMW, bodyLimitMW}
+	bodyLimitBase := []echo.MiddlewareFunc{bodyLimitMW}
+	publicBase := slices.Concat([]echo.MiddlewareFunc{requestTimeoutMW}, bodyLimitBase)
 	authBase := []echo.MiddlewareFunc{sessionAuthMW, adminModeMW}
 
 	// 2. 派生基础链 (Derived Base Chains)
 	// - publicWithRateLimit: IP 限流 + 公共基础（超时 + Body 限制）
 	// - authenticatedChain:  公共基础 + 认证基础 + 用户级限流
-	// - dashboardChain:      公共基础 + 大屏专属鉴权 + 用户级限流
+	// - overviewClusterStreamChain: Body 限制 + 大屏实时流鉴权 + 用户级限流（无请求超时）
 	// - fileTransferChain:   关闭读超时 + 认证基础 + 文件传输限流
 	// - sseChain:            认证基础（无超时 + 无 Body 限制）
-	// - webSocketChain:      WebSocket 握手限流
 	publicWithRateLimit := slices.Concat([]echo.MiddlewareFunc{publicRateLimitMW}, publicBase)
 	authenticatedChain := slices.Concat(publicBase, authBase, []echo.MiddlewareFunc{userRateLimitMW})
-	dashboardChain := slices.Concat(publicBase, []echo.MiddlewareFunc{
-		dashboardAuthMW(sm, securityMgr, cfg.IsDashboardEnabled),
+	// EventSource 长连接显式不加请求超时；不要依赖路由名后缀隐式豁免。
+	overviewClusterStreamChain := slices.Concat(bodyLimitBase, []echo.MiddlewareFunc{
+		overviewClusterStreamAuthMW(sm, securityMgr, cfg.IsOverviewEnabled),
 		userRateLimitMW,
 	})
 	fileTransferChain := slices.Concat([]echo.MiddlewareFunc{disableReadTimeoutMW}, authBase, []echo.MiddlewareFunc{fileTransferRateLimitMW})
+	proxyTunnelChain := slices.Concat([]echo.MiddlewareFunc{disableReadTimeoutMW}, authBase, []echo.MiddlewareFunc{wsRateLimitMW, userRateLimitMW})
 	sseChain := authBase
-	webSocketChain := []echo.MiddlewareFunc{wsRateLimitMW}
 
 	// 辅助函数：基于认证基础链添加特定的授权中间件
 	extendAuthChain := func(mws ...echo.MiddlewareFunc) []echo.MiddlewareFunc {
@@ -199,14 +197,14 @@ func BuildRoutePolicies(
 	}
 
 	return map[APIPolicy][]echo.MiddlewareFunc{
-		PolicyGuest:         publicWithRateLimit,
-		PolicyUser:          authenticatedChain,
-		PolicyDashboard:     dashboardChain,
-		PolicyFileTransfer:  fileTransferChain,
-		PolicyAuditAdmin:    auditAdminChain,
-		PolicySysAdmin:      sysAdminChain,
-		PolicySecurityAdmin: securityAdminChain,
-		PolicyWebSocket:     webSocketChain,
-		PolicySSE:           sseChain,
+		PolicyGuest:                 publicWithRateLimit,
+		PolicyUser:                  authenticatedChain,
+		PolicyOverviewClusterStream: overviewClusterStreamChain,
+		PolicyFileTransfer:          fileTransferChain,
+		PolicyAuditAdmin:            auditAdminChain,
+		PolicySysAdmin:              sysAdminChain,
+		PolicySecurityAdmin:         securityAdminChain,
+		PolicyProxyTunnel:           proxyTunnelChain,
+		PolicySSE:                   sseChain,
 	}
 }

@@ -6,20 +6,20 @@ import (
 	"log/slog"
 	"time"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/execution"
+	"design-cloud-engine/internal/platform/config"
 )
 
 var (
-	ErrUserNotFound             = common.NewNotFoundError("user not found")
-	ErrGroupNotFound            = common.NewNotFoundError("Group not found")
+	ErrUserNotFound             = contract.NewNotFoundError("user not found")
+	ErrGroupNotFound            = contract.NewNotFoundError("Group not found")
 	ErrUserNotActive            = errors.New("this user account is not active")
 	ErrUserPasswordIncorrect    = errors.New("user or password is incorrect")
 	ErrUserPasswordExpired      = errors.New("user password has expired and must be changed")
 	ErrUserPasswordSameAsOld    = errors.New("new password cannot be the same as the old password")
-	ErrLDAPPasswordNotSupported = common.NewInvalidParamError("password change is not supported for LDAP users; please use your organization's LDAP management portal")
+	ErrLDAPPasswordNotSupported = contract.NewInvalidParamError("password change is not supported for LDAP users; please use your organization's LDAP management portal")
 )
 
 type SystemUser struct {

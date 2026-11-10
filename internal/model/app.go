@@ -2,8 +2,6 @@ package model
 
 import (
 	"time"
-
-	"gorm.io/gorm"
 )
 
 type AppType string
@@ -31,8 +29,9 @@ type App struct {
 	ID      uint `json:"id" gorm:"primarykey"`
 	AppBase `gorm:"embedded"`
 	// WARNING: Do NOT use nested Preload like Preload("Users.Apps") to avoid circular JSON serialization. Keep Preload depth to 1 level.
-	Users     []User         `json:"-" gorm:"many2many:user_apps;"`
-	CreatedAt time.Time      `json:"createdAt"`
-	UpdatedAt time.Time      `json:"updatedAt"`
-	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
+	Users []User `json:"-" gorm:"many2many:user_apps;"`
+	// App 采用**硬删除**（无 DeletedAt）：Name 上的唯一约束要求删除即物理移除，
+	// 否则软删行会永久占用唯一索引，导致同名应用无法重建。
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }

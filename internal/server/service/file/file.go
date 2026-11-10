@@ -3,55 +3,44 @@ package file
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"path/filepath"
-	"sync"
 	"time"
 
-	"design-cloud-engine/internal/common"
+	"design-cloud-engine/internal/contract"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/execution"
 	"design-cloud-engine/internal/execution/payload"
-	"design-cloud-engine/internal/server/service/settings"
-	"design-cloud-engine/internal/server/service/settings/schema"
 	"design-cloud-engine/internal/server/service/user"
 )
 
-var ErrFileDisabled = common.NewForbiddenError("file service disabled")
+var ErrFileDisabled = contract.NewForbiddenError("file service disabled")
 
 type Service struct {
-	fileRepo    *db.FileRepo
-	logger      *slog.Logger
-	execSvc     execution.Executor
-	userSvc     *user.Service
-	settingsSvc *settings.Service
-	cfg         Config
-	streamExec  *StreamExecutor
-
-	downloadTokensMu sync.Mutex
-	downloadTokens   map[string]downloadTokenEntry
-	lastTokenCleanup time.Time
+	downloadRepo *db.DownloadRequestRepo
+	logger       *slog.Logger
+	userSvc      *user.Service
+	settingsSvc  SettingsReader
+	cfg          Config
+	streamExec   *StreamExecutor
 }
 
 type Config struct {
-	GetLauncherPath      func(context.Context) string
+	GetExecBinPath       func(context.Context) string
 	GetDesktopReleaseDir func(context.Context) string
 }
 
 const defaultFileActionTimeout = 25 * time.Second
 
-func NewService(execSvc execution.Executor, userSvc *user.Service, settingsSvc *settings.Service, cfg Config, fileRepo *db.FileRepo, logger *slog.Logger) *Service {
+func NewService(userSvc *user.Service, settingsSvc SettingsReader, cfg Config, downloadRepo *db.DownloadRequestRepo, logger *slog.Logger) *Service {
 	return &Service{
-		fileRepo:    fileRepo,
-		logger:      logger,
-		execSvc:     execSvc,
-		userSvc:     userSvc,
-		settingsSvc: settingsSvc,
-		cfg:         cfg,
-		streamExec:  newStreamExecutor(cfg.GetLauncherPath),
-
-		downloadTokens: make(map[string]downloadTokenEntry),
+		downloadRepo: downloadRepo,
+		logger:       logger,
+		userSvc:      userSvc,
+		settingsSvc:  settingsSvc,
+		cfg:          cfg,
+		streamExec:   newStreamExecutor(cfg.GetExecBinPath),
 	}
 }
 
@@ -71,7 +60,7 @@ func (s *Service) IsEnabled(ctx context.Context) bool {
 	}
 	fileSetting, err := s.settingsSvc.GetFileSettings(ctx)
 	if err != nil {
-		return true
+		return false
 	}
 	return fileSetting.Enabled
 }
@@ -82,7 +71,7 @@ func (s *Service) downloadPolicy(ctx context.Context) DownloadPermission {
 	}
 	fileSetting, err := s.settingsSvc.GetFileSettings(ctx)
 	if err != nil {
-		return DownloadPermissionAllow
+		return DownloadPermissionDeny
 	}
 	if !fileSetting.Enabled || !fileSetting.DownloadEnabled {
 		return DownloadPermissionDeny
@@ -94,22 +83,24 @@ func (s *Service) downloadPolicy(ctx context.Context) DownloadPermission {
 }
 
 func (s *Service) defaultUploadMaxSizeBytes(ctx context.Context) int64 {
-	if fileSetting, err := s.settingsSvc.GetFileSettings(ctx); err == nil && fileSetting.UploadMaxSizeBytes > 0 {
-		return fileSetting.UploadMaxSizeBytes
+	if s.settingsSvc != nil {
+		if fileSetting, err := s.settingsSvc.GetFileSettings(ctx); err == nil && fileSetting.UploadMaxSizeBytes > 0 {
+			return fileSetting.UploadMaxSizeBytes
+		}
 	}
 	return schema.UploadMaxSizeBytesDefault
 }
 
 func (s *Service) downloadApprovalTTL(ctx context.Context) time.Duration {
-	if fileSetting, err := s.settingsSvc.GetFileSettings(ctx); err == nil && fileSetting.DownloadApprovalTTL > 0 {
-		return time.Duration(fileSetting.DownloadApprovalTTL) * time.Second
+	if s.settingsSvc != nil {
+		if fileSetting, err := s.settingsSvc.GetFileSettings(ctx); err == nil && fileSetting.DownloadApprovalTTL > 0 {
+			return time.Duration(fileSetting.DownloadApprovalTTL) * time.Second
+		}
 	}
 	return 86400 * time.Second
 }
 
-// execute is a helper to run file actions via dc-launcher.
-// When s.execSvc is non-nil (e.g. injected in tests), it delegates to execution.Run(ctx, s.execSvc, req).
-// Otherwise, it runs directly via s.streamExec on the local host.
+// execute is a helper to run file actions via PrivilegedExec.
 func (s *Service) execute(ctx context.Context, actionType execution.ActionName, payload any, runUser string) (string, error) {
 	executionID := fmt.Sprintf("%s-%d", actionType, time.Now().UnixNano())
 
@@ -120,9 +111,6 @@ func (s *Service) execute(ctx context.Context, actionType execution.ActionName, 
 	}
 
 	req := execution.NewExecuteRequest(actionType, executionID, opts...)
-	if s.execSvc != nil {
-		return execution.Run(ctx, s.execSvc, req)
-	}
 	return s.streamExec.Execute(ctx, req)
 }
 
@@ -167,7 +155,7 @@ func (s *Service) RenameLocationPath(ctx context.Context, locationName, relPath,
 		return err
 	}
 	if cleanRel == "" {
-		return fmt.Errorf("%w: path is required", fs.ErrInvalid)
+		return contract.NewInvalidParamError("path is required")
 	}
 	if err := validateEntryName(newName); err != nil {
 		return err

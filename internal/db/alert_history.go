@@ -21,8 +21,8 @@ func (r *AlertHistoryRepo) Create(ctx context.Context, item *model.AlertHistory)
 
 // List 查出最新的告警历史记录。
 func (r *AlertHistoryRepo) List(ctx context.Context, limit int) ([]model.AlertHistory, error) {
-	if limit <= 0 {
-		limit = 100
+	if err := validateLimit(limit); err != nil {
+		return nil, err
 	}
 	var items []model.AlertHistory
 	err := r.store.db.WithContext(ctx).Order("id desc").Limit(limit).Find(&items).Error

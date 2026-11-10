@@ -11,13 +11,13 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
-	"design-cloud-engine/internal/config"
-	"design-cloud-engine/internal/logger"
+	"design-cloud-engine/internal/platform/config"
+	"design-cloud-engine/internal/platform/logger"
 	"design-cloud-engine/internal/server/portal/api"
 	"design-cloud-engine/internal/server/portal/httputil"
-	"design-cloud-engine/internal/server/service"
 
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
@@ -27,15 +27,19 @@ import (
 // The second return value is an io.Closer for the access log writer; callers must
 // call Close() when the server is shut down to flush and release file handles.
 // The closer may be nil if the log path is empty (logs go to stdout).
-func CreateEchoServer(log *slog.Logger, cfg *config.Config, serviceReg *service.Container) (*echo.Echo, io.Closer, error) {
+func CreateEchoServer(log *slog.Logger, cfg *config.Config, deps api.Dependencies) (*echo.Echo, io.Closer, error) {
 	e := echo.New()
 
 	// 若 Portal 前端有反向代理（Nginx / HAProxy / 云 LB），则从 X-Forwarded-For 头获取
-	if cfg.Portal.BehindReverseProxy {
-		e.IPExtractor = echo.ExtractIPFromXFFHeader(echo.TrustLoopback(true))
+	extractor, err := newIPExtractor(&cfg.Portal)
+	if err != nil {
+		return nil, nil, err
+	}
+	if extractor != nil {
+		e.IPExtractor = extractor
 	}
 
-	requestLogger, logCloser, err := createRequestLogger(&cfg.Log, cfg.AccessLogPath(), cfg.Runtime.NodeID)
+	requestLogger, logCloser, err := createRequestLogger(&cfg.Log, cfg.Runtime.NodeID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -49,13 +53,32 @@ func CreateEchoServer(log *slog.Logger, cfg *config.Config, serviceReg *service.
 		e.Use(middleware.Secure())
 	}
 
-	// 初始化服务管理器实例（依赖注入的根）
 	appLogger := log.With("component", "portal_server")
-	// 嵌入式 Web 静态页面（主页 + Dashboard 大屏）——须在 API 路由前注册
-	RegisterWebRoutes(e, serviceReg.Settings)
-	api.NewHandler(serviceReg, cfg, appLogger).InitRouter(e)
+	// 嵌入式 Web 静态页面（主页 + Overview 大屏）——须在 API 路由前注册
+	RegisterWebRoutes(e, deps.Settings)
+	api.NewHandler(deps, cfg, appLogger).InitRouter(e)
 
 	return e, logCloser, nil
+}
+
+// newIPExtractor 构造客户端 IP 提取器。未启用 behind_reverse_proxy 时返回 nil
+// （echo 默认直接使用 TCP 远端地址）；启用时仅信任 trusted_proxy_cidr 网段内的代理跳——
+// echo 默认信任 loopback/link-local/私网，意味着任意私网来源都能在 X-Forwarded-For
+// 前置伪造 IP 绕过 IP 封禁/限流，因此这里显式收窄信任边界。
+func newIPExtractor(portalCfg *config.Portal) (echo.IPExtractor, error) {
+	if !portalCfg.BehindReverseProxy {
+		return nil, nil
+	}
+	_, proxyNet, err := net.ParseCIDR(portalCfg.TrustedProxyCIDR)
+	if err != nil {
+		return nil, fmt.Errorf("portal.trusted_proxy_cidr invalid CIDR: %w", err)
+	}
+	return echo.ExtractIPFromXFFHeader(
+		echo.TrustLoopback(false),
+		echo.TrustLinkLocal(false),
+		echo.TrustPrivateNet(false),
+		echo.TrustIPRange(proxyNet),
+	), nil
 }
 
 // StartServer 启动 Portal 的 HTTP/HTTPS 服务。
@@ -95,34 +118,52 @@ func StartServer(ctx context.Context, e *echo.Echo, portalCfg config.Portal, rea
 		}
 	}()
 
-	if ready != nil {
-		// ready 表示“监听 socket 已经绑定成功”，并不代表已经处理了第一个请求。
-		close(ready)
-	}
-
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-
+	var serveListener net.Listener = listener
 	if portalCfg.TLS {
 		cert, err := tls.LoadX509KeyPair(portalCfg.Cert, portalCfg.Key)
 		if err != nil {
 			return fmt.Errorf("load https key pair: %w", err)
 		}
-		tlsListener := tls.NewListener(listener, &tls.Config{
+		serveListener = tls.NewListener(listener, &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS12,
 		})
-		// 从这里开始 listener 的生命周期由 http.Server.Serve 管理。
-		listenerOwned = false
-		return srv.Serve(tlsListener)
 	}
-	// 非 TLS 模式下同样交由 Serve 接管 listener 生命周期。
+
+	// ready 表示监听器及 TLS 配置均已准备完成；证书加载失败不会提前报告就绪。
+	if ready != nil {
+		close(ready)
+	}
+
+	shutdownDone := make(chan struct{})
+	var shutdownOnce sync.Once
+	shutdown := func() {
+		shutdownOnce.Do(func() {
+			go func() {
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := srv.Shutdown(shutdownCtx); err != nil {
+					// Shutdown's timeout leaves active connections open. Force-close them
+					// so the server cannot outlive the owning services during teardown.
+					_ = srv.Close()
+				}
+				close(shutdownDone)
+			}()
+		})
+	}
+	go func() {
+		<-ctx.Done()
+		shutdown()
+	}()
+
+	// Serve returns as soon as Shutdown closes the listener, before Shutdown has
+	// necessarily drained active requests. Wait here so the owner can safely close
+	// services and the database only after HTTP shutdown has completed.
 	listenerOwned = false
-	return srv.Serve(listener)
+	serveErr := srv.Serve(serveListener)
+	shutdown()
+	<-shutdownDone
+	return serveErr
 }
 
 // genRequestLoggerConfig generates the request logger configuration
@@ -187,23 +228,11 @@ func sanitizeURI(rawURI string) string {
 	return u.String()
 }
 
-// createRequestLogger 创建用于 Portal API 请求的日志记录器
-// 返回的 io.Closer 用于在服务器关闭时关闭底层文件句柄；当 logPath 为空时为 nil。
-func createRequestLogger(logCfg *config.Log, logPath, nodeID string) (*slog.Logger, io.Closer, error) {
-	rotateCfg := logger.RotateConfig{
-		MaxSize:     logCfg.MaxSize,
-		MaxAge:      logCfg.MaxAge,
-		MaxBackups:  logCfg.MaxBackups,
-		Compression: "zstd",
-	}
-	logWriter, err := logger.NewLogWriter(logPath, &rotateCfg)
+// createRequestLogger 创建用于 Portal API 请求的日志记录器（始终写 stdout，由 journald/采集器接管）。
+func createRequestLogger(logCfg *config.Log, nodeID string) (*slog.Logger, io.Closer, error) {
+	logWriter, err := logger.NewLogWriter("")
 	if err != nil {
 		return nil, nil, fmt.Errorf("create log writer error: %w", err)
-	}
-
-	var logCloser io.Closer
-	if c, ok := logWriter.(io.Closer); ok {
-		logCloser = c
 	}
 
 	return logger.WithGlobalAttrs(slog.New(slog.NewJSONHandler(logWriter, &slog.HandlerOptions{
@@ -216,5 +245,5 @@ func createRequestLogger(logCfg *config.Log, logPath, nodeID string) (*slog.Logg
 			}
 			return a
 		},
-	})), nodeID), logCloser, nil
+	})), nodeID), nil, nil
 }

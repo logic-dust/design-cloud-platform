@@ -18,12 +18,12 @@ func NewStatusProbe() *StatusProbe {
 	return &StatusProbe{cpuState: &cpuUsageState{}}
 }
 
-// Collect gathers a full resource report for the current cycle.
+// Collect gathers a full metrics snapshot for the current cycle.
 //
 //   - activeTasks: number of currently running jobs (reported verbatim)
 //   - nvidiaSmiPath: override path for nvidia-smi; pass "" to use auto-discovery
 //   - mounts: list of mount targets to probe for disk usage
-func (p *StatusProbe) Collect(ctx context.Context, activeTasks int, nvidiaSmiPath string, mounts []*pb.MountTarget) (*pb.ResourceReport, error) {
+func (p *StatusProbe) Collect(ctx context.Context, activeTasks int, nvidiaSmiPath string, mounts []*pb.MountTarget) (*pb.Metrics, error) {
 	cpuUsage, err := p.cpuState.readCPUUsage()
 	if err != nil {
 		return nil, err
@@ -49,7 +49,7 @@ func (p *StatusProbe) Collect(ctx context.Context, activeTasks int, nvidiaSmiPat
 
 	diskUsages, _ := CollectDiskUsage(ctx, mounts)
 
-	return &pb.ResourceReport{
+	return &pb.Metrics{
 		CpuUtil:     cpuUsage,
 		MemTotal:    memInfo["MemTotal"],
 		MemUsed:     memInfo["MemTotal"] - memInfo["MemAvailable"],

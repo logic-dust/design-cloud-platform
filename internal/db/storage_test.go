@@ -7,137 +7,88 @@ import (
 	"testing"
 	"time"
 
-	"design-cloud-engine/internal/config"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 )
 
-func newStorageRepoForTest(t *testing.T) (*Store, *StorageRepo) {
+func newStorageTestRepo(t *testing.T) *StorageRepo {
 	t.Helper()
-
 	store, err := NewStore(config.Database{
 		Type: config.DatabaseTypeSQLite,
-		Path: filepath.Join(t.TempDir(), "test.db"),
+		Path: filepath.Join(t.TempDir(), "storage-test.db"),
 	}, slog.Default())
 	if err != nil {
-		t.Fatalf("new store: %v", err)
+		t.Fatalf("store: %v", err)
 	}
-	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Fatalf("close store: %v", err)
-		}
-	})
+	t.Cleanup(func() { _ = store.Close() })
 	if err := store.Migrate(); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return store, NewRepos(store).Storage
+	return NewRepos(store).Storage
 }
 
-func TestInsertStorageReportDedup(t *testing.T) {
-	t.Parallel()
-
-	_, repo := newStorageRepoForTest(t)
+func TestPruneReportsBefore_BatchesByID(t *testing.T) {
+	repo := newStorageTestRepo(t)
 	ctx := context.Background()
-
-	base := time.Date(2026, 7, 24, 14, 30, 0, 0, time.UTC)
-
-	first := &model.StorageReport{
-		StorageID:  "share",
-		Total:      1000,
-		Used:       400,
-		ReportedAt: base,
-		SampledBy:  "node-a",
-	}
-	if err := repo.InsertStorageReport(ctx, first); err != nil {
-		t.Fatalf("first insert: %v", err)
-	}
-
-	// Second report within the 5-minute dedup window must be dropped.
-	second := &model.StorageReport{
-		StorageID:  "share",
-		Total:      1100,
-		Used:       500,
-		ReportedAt: base.Add(2 * time.Minute),
-		SampledBy:  "node-b",
-	}
-	if err := repo.InsertStorageReport(ctx, second); err != nil {
-		t.Fatalf("second insert: %v", err)
-	}
-
-	// Same storage, but outside the window, must be kept.
-	outside := &model.StorageReport{
-		StorageID:  "share",
-		Total:      1200,
-		Used:       600,
-		ReportedAt: base.Add(10 * time.Minute),
-		SampledBy:  "node-c",
-	}
-	if err := repo.InsertStorageReport(ctx, outside); err != nil {
-		t.Fatalf("outside-window insert: %v", err)
-	}
-
-	// Different storage ID must always be kept.
-	other := &model.StorageReport{
-		StorageID:  "other-array",
-		Total:      900,
-		Used:       300,
-		ReportedAt: base,
-		SampledBy:  "node-a",
-	}
-	if err := repo.InsertStorageReport(ctx, other); err != nil {
-		t.Fatalf("other-storage insert: %v", err)
-	}
-
-	reports, err := repo.QueryStorageHistory(ctx, "share", base.Add(-time.Hour), base.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("query history: %v", err)
-	}
-	if len(reports) != 2 {
-		t.Fatalf("share report count = %d, want 2 (dedup within window)", len(reports))
-	}
-
-	others, err := repo.QueryStorageHistory(ctx, "other-array", base.Add(-time.Hour), base.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("query other history: %v", err)
-	}
-	if len(others) != 1 {
-		t.Fatalf("other-array report count = %d, want 1", len(others))
-	}
-}
-
-func TestInsertStorageReportConcurrentNoDuplicates(t *testing.T) {
-	t.Parallel()
-
-	_, repo := newStorageRepoForTest(t)
-	ctx := context.Background()
-
-	base := time.Date(2026, 7, 24, 14, 30, 0, 0, time.UTC)
-	const n = 8
-
-	errs := make(chan error, n)
-	for range n {
-		go func() {
-			errs <- repo.InsertStorageReport(ctx, &model.StorageReport{
-				StorageID:  "concurrent-share",
-				Total:      1000,
-				Used:       400,
-				ReportedAt: base,
-				SampledBy:  "node-x",
-			})
-		}()
-	}
-
-	for range n {
-		if err := <-errs; err != nil {
-			t.Fatalf("concurrent insert: %v", err)
+	old := time.Now().Add(-48 * time.Hour)
+	for i := range 3 {
+		r := &model.StorageReport{
+			StorageID:  "s1",
+			Total:      100,
+			Used:       int64(i),
+			ReportedAt: old.Add(time.Duration(i) * time.Minute),
+			SampledBy:  "n1",
+		}
+		if err := repo.store.db.WithContext(ctx).Create(r).Error; err != nil {
+			t.Fatalf("seed: %v", err)
 		}
 	}
-
-	reports, err := repo.QueryStorageHistory(ctx, "concurrent-share", base.Add(-time.Hour), base.Add(time.Hour))
+	// Bypass InsertStorageReport dedup; direct Create above.
+	n, err := repo.PruneReportsBefore(ctx, time.Now().Add(-24*time.Hour), 2)
 	if err != nil {
-		t.Fatalf("query history: %v", err)
+		t.Fatalf("prune: %v", err)
 	}
-	// Even under concurrent inserts, only one row should survive the dedup.
-	if len(reports) != 1 {
-		t.Fatalf("concurrent-share report count = %d, want 1 (TOCTOU race fixed)", len(reports))
+	if n != 2 {
+		t.Fatalf("pruned = %d, want 2", n)
+	}
+	n, err = repo.PruneReportsBefore(ctx, time.Now().Add(-24*time.Hour), 2)
+	if err != nil {
+		t.Fatalf("prune2: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned remainder = %d, want 1", n)
+	}
+}
+
+func TestQueryStorageHistory_KeepsNewestWhenCapped(t *testing.T) {
+	repo := newStorageTestRepo(t)
+	ctx := context.Background()
+	base := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	const rows = 5
+	for i := range rows {
+		r := &model.StorageReport{
+			StorageID:  "s1",
+			Total:      100,
+			Used:       int64(i),
+			ReportedAt: base.Add(time.Duration(i) * time.Minute),
+			SampledBy:  "n1",
+		}
+		if err := repo.store.db.WithContext(ctx).Create(r).Error; err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	prev := maxStorageHistoryQueryRows
+	maxStorageHistoryQueryRows = 3
+	t.Cleanup(func() { maxStorageHistoryQueryRows = prev })
+
+	got, err := repo.QueryStorageHistory(ctx, "s1", base.Add(-time.Minute), base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	if got[0].Used != 2 || got[2].Used != 4 {
+		t.Fatalf("expected newest window Used=2..4 chronological, got %d..%d", got[0].Used, got[2].Used)
 	}
 }

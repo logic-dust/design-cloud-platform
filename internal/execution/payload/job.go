@@ -1,44 +1,30 @@
 package payload
 
-// --- Scheduler Actions ---
-
-// JobQuery for JOB_QUERY
+// JobQuery is a scheduler read command (bjobs, bhosts, squeue, sinfo, sacct).
+// The command line already carries every scheduler-specific argument.
 type JobQuery struct {
 	Command   *CommandSpec      `json:"command,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
 	EnvScript string            `json:"envScript,omitempty"`
-	JobID     string            `json:"jobId"`
-	User      string            `json:"user"`
-	Queue     string            `json:"queue"`
 }
 
-// JobSubmit for JOB_SUBMIT
+// JobSubmit is a scheduler submit command (bsub, sbatch).
+// Job name, queue, directories and the user command are arguments of Command.
 type JobSubmit struct {
 	Command   *CommandSpec      `json:"command,omitempty"`
-	Username  string            `json:"username"`
-	JobName   string            `json:"jobName"`
-	Queue     string            `json:"queue"`
-	WorkDir   string            `json:"workDir"`
-	LogDir    string            `json:"logDir"`
 	Env       map[string]string `json:"env,omitempty"`
 	EnvScript string            `json:"envScript,omitempty"`
 }
 
-// JobControl for JOB_CONTROL
+// JobControl is a scheduler control command (bkill, scancel, scontrol, ...).
 type JobControl struct {
-	Command     *CommandSpec      `json:"command,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
-	EnvScript   string            `json:"envScript,omitempty"`
-	Operation   string            `json:"operation"`
-	JobID       string            `json:"jobId"`
-	TargetQueue string            `json:"targetQueue,omitempty"`
+	Command   *CommandSpec      `json:"command,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	EnvScript string            `json:"envScript,omitempty"`
 }
 
-// JobModify for JOB_MODIFY
+// JobModify is a scheduler modify command (bmod, scontrol update).
 type JobModify struct {
 	Command   *CommandSpec `json:"command,omitempty"`
 	EnvScript string       `json:"envScript,omitempty"`
-	JobID     string       `json:"jobId"`
-	Queue     *string      `json:"queue,omitempty"`
-	Name      *string      `json:"name,omitempty"`
 }

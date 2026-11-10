@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/server/service/settings/schema"
+	"design-cloud-engine/internal/contract/schema"
 	userprovider "design-cloud-engine/internal/server/service/user/provider"
 
+	"design-cloud-engine/internal/contract"
 	"github.com/stretchr/testify/require"
 )
 
@@ -130,7 +130,7 @@ func TestResolveIDMappings_FailClosedOnProviderError(t *testing.T) {
 
 	_, err := core.ResolveIDMappings(context.Background(), IDMappingsRequest{UIDs: []uint32{1000}})
 	require.Error(t, err)
-	var domainErr common.DomainError
+	var domainErr contract.DomainError
 	require.ErrorAs(t, err, &domainErr)
 	require.Equal(t, http.StatusServiceUnavailable, domainErr.HTTPStatus())
 	// Must not have cached a notFound result.
@@ -199,7 +199,7 @@ func TestInvalidateIDMappingFromSystemUsers(t *testing.T) {
 func TestIDMappingCacheTTLs_ReadFailureKeepsBaselineAndCache(t *testing.T) {
 	t.Parallel()
 	core, _, _, _ := setupTestCore(t)
-	core.settingsSvc = nil
+	core.authSettings = nil
 
 	// 上次成功读取到的配置：700/600（均不同于 schema 默认值）
 	require.False(t, core.idMappingCache.noteTTLs(700, 600), "首次观察不算变化")

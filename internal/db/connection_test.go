@@ -6,13 +6,11 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 )
 
 func newConnRepoForTest(t *testing.T) (*Store, *ConnectionRepo) {
@@ -34,289 +32,233 @@ func newConnRepoForTest(t *testing.T) (*Store, *ConnectionRepo) {
 	return store, NewRepos(store).Connection
 }
 
-func TestConnectionRepo_CreateWithQuota_Sequential(t *testing.T) {
+func seedConnectionResource(t *testing.T, store *Store, id uint, maxPerUser int, nodes []string) {
+	t.Helper()
+	res := &model.ConnectionResource{
+		ID:         id,
+		Name:       "pool",
+		Protocol:   contract.VNCProtocol,
+		Nodes:      nodes,
+		NodeGroups: []string{},
+		MaxPerUser: maxPerUser,
+	}
+	if err := NewRepos(store).ConnectionResource.Create(context.Background(), res); err != nil {
+		t.Fatalf("seed resource: %v", err)
+	}
+}
+
+func TestConnectionRepo_CreateWithResourceQuota(t *testing.T) {
 	t.Parallel()
 
-	_, repo := newConnRepoForTest(t)
+	store, repo := newConnRepoForTest(t)
 	ctx := context.Background()
 
 	username := "alice"
-	quota := 2
+	resID := uint(101)
+	maxQuota := 2
+	seedConnectionResource(t, store, resID, maxQuota, []string{"node-1"})
 
-	// 1. Insert 1st connection within quota -> OK
+	// 1. First insert under quota -> OK
 	c1 := &model.Connection{
-		Username: username,
-		Host:     "192.168.1.10",
-		Port:     5900,
-		Protocol: "VNC",
-		Shared:   false,
+		ResourceID: &resID,
+		Username:   username,
+		Port:       5901,
+		Protocol:   contract.VNCProtocol,
+		NodeID:     "node-1",
+		Status:     model.ConnectionRunning,
 	}
-	if err := repo.CreateWithQuota(ctx, c1, quota); err != nil {
+	if err := repo.CreateWithResourceQuota(ctx, c1); err != nil {
 		t.Fatalf("unexpected error on 1st insert: %v", err)
 	}
 
-	// 2. Insert 2nd connection within quota -> OK
+	// 2. Second insert under quota -> OK
 	c2 := &model.Connection{
-		Username: username,
-		Host:     "192.168.1.10",
-		Port:     5901,
-		Protocol: "VNC",
-		Shared:   false,
+		ResourceID: &resID,
+		Username:   username,
+		Port:       5902,
+		Protocol:   contract.VNCProtocol,
+		NodeID:     "node-1",
+		Status:     model.ConnectionRunning,
 	}
-	if err := repo.CreateWithQuota(ctx, c2, quota); err != nil {
+	if err := repo.CreateWithResourceQuota(ctx, c2); err != nil {
 		t.Fatalf("unexpected error on 2nd insert: %v", err)
 	}
 
-	// 3. Insert 3rd connection exceeding quota -> QuotaExceededError (429)
+	// 3. Third insert exceeding quota -> Error
 	c3 := &model.Connection{
-		Username: username,
-		Host:     "192.168.1.10",
-		Port:     5902,
-		Protocol: "VNC",
-		Shared:   false,
+		ResourceID: &resID,
+		Username:   username,
+		Port:       5903,
+		Protocol:   contract.VNCProtocol,
+		NodeID:     "node-1",
+		Status:     model.ConnectionRunning,
 	}
-	err := repo.CreateWithQuota(ctx, c3, quota)
+	err := repo.CreateWithResourceQuota(ctx, c3)
 	if err == nil {
-		t.Fatalf("expected error on 3rd insert exceeding quota, got nil")
+		t.Fatal("expected error on 3rd insert exceeding quota, got nil")
 	}
-	var appErr interface{ HTTPStatus() int }
-	if errors.As(err, &appErr) {
-		if appErr.HTTPStatus() != http.StatusTooManyRequests {
-			t.Errorf("expected HTTP 429 StatusTooManyRequests, got %d", appErr.HTTPStatus())
-		}
-	} else {
-		t.Errorf("expected appError with HTTPStatus(), got: %v", err)
+	domain, ok := errors.AsType[contract.DomainError](err)
+	if !ok || domain.HTTPStatus() != http.StatusConflict {
+		t.Fatalf("quota error = %v, want HTTP 409", err)
 	}
-
-	// 4. Shared connection does not count against quota and succeeds even when quota is full
-	cShared := &model.Connection{
-		Username: username,
-		Host:     "192.168.1.10",
-		Port:     5903,
-		Protocol: "VNC",
-		Shared:   true,
-	}
-	if err := repo.CreateWithQuota(ctx, cShared, quota); err != nil {
-		t.Fatalf("unexpected error inserting shared connection: %v", err)
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("quota error = %v, want ErrQuotaExceeded", err)
 	}
 
-	// 5. Connection with quota <= 0 (unlimited) succeeds
-	cUnlimited := &model.Connection{
-		Username: username,
-		Host:     "192.168.1.10",
-		Port:     5904,
-		Protocol: "VNC",
-		Shared:   false,
-	}
-	if err := repo.CreateWithQuota(ctx, cUnlimited, 0); err != nil {
-		t.Fatalf("unexpected error with quota=0: %v", err)
-	}
-
-	// 6. Other user is not affected by alice's quota
+	// 4. Other user not affected
 	cBob := &model.Connection{
-		Username: "bob",
-		Host:     "192.168.1.10",
-		Port:     5905,
-		Protocol: "VNC",
-		Shared:   false,
+		ResourceID: &resID,
+		Username:   "bob",
+		Port:       5904,
+		Protocol:   contract.VNCProtocol,
+		NodeID:     "node-1",
+		Status:     model.ConnectionRunning,
 	}
-	if err := repo.CreateWithQuota(ctx, cBob, quota); err != nil {
+	if err := repo.CreateWithResourceQuota(ctx, cBob); err != nil {
 		t.Fatalf("unexpected error for bob: %v", err)
 	}
 }
 
-func TestConnectionRepo_CreateWithQuota_Concurrent(t *testing.T) {
+func TestConnectionRepo_DisplayLock(t *testing.T) {
 	t.Parallel()
 
 	store, repo := newConnRepoForTest(t)
 	ctx := context.Background()
 
-	username := "charlie"
-	quota := 3
-	concurrency := 12
+	disp := 5
+	resID := uint(101)
+	seedConnectionResource(t, store, resID, 1, []string{"eda-srv-01", "eda-srv-02"})
 
-	var successCount int64
-	var quotaExceededCount int64
-	var otherErrCount int64
-
-	var wg sync.WaitGroup
-	start := make(chan struct{})
-
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			<-start // synchronize start
-
-			conn := &model.Connection{
-				Username: username,
-				Host:     "192.168.1.100",
-				Port:     uint(6000 + idx),
-				Protocol: "VNC",
-				Shared:   false,
-			}
-
-			// Retry with slight backoff on SQLite busy / lock contention
-			var insertErr error
-			for attempt := 0; attempt < 10; attempt++ {
-				insertErr = repo.CreateWithQuota(ctx, conn, quota)
-				if insertErr == nil {
-					atomic.AddInt64(&successCount, 1)
-					return
-				}
-				var appErr interface{ HTTPStatus() int }
-				if errors.As(insertErr, &appErr) && appErr.HTTPStatus() == http.StatusTooManyRequests {
-					atomic.AddInt64(&quotaExceededCount, 1)
-					return
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			atomic.AddInt64(&otherErrCount, 1)
-			t.Logf("goroutine %d failed with: %v", idx, insertErr)
-		}(i)
+	c1 := &model.Connection{
+		ResourceID: &resID,
+		Username:   "alice",
+		NodeID:     "eda-srv-01",
+		Port:       5905,
+		Display:    &disp,
+		Protocol:   contract.VNCProtocol,
+		Status:     model.ConnectionRunning,
+	}
+	if err := repo.CreateWithResourceQuota(ctx, c1); err != nil {
+		t.Fatalf("insert c1: %v", err)
 	}
 
-	close(start) // trigger all goroutines
-	wg.Wait()
-
-	if otherErrCount > 0 {
-		t.Fatalf("encountered %d unexpected errors (e.g. database locked after retries)", otherErrCount)
+	// Same display on same node -> should conflict
+	c2 := &model.Connection{
+		ResourceID: &resID,
+		Username:   "bob",
+		NodeID:     "eda-srv-01",
+		Port:       5905,
+		Display:    &disp,
+		Protocol:   contract.VNCProtocol,
+		Status:     model.ConnectionRunning,
+	}
+	if err := repo.CreateWithResourceQuota(ctx, c2); err == nil {
+		t.Fatal("expected error on duplicate display on same node, got nil")
+	} else if !errors.Is(err, ErrDisplayOccupied) {
+		t.Fatalf("display error = %v, want ErrDisplayOccupied", err)
 	}
 
-	if successCount != int64(quota) {
-		t.Errorf("expected exactly %d successful inserts matching quota, got %d", quota, successCount)
+	// Same display on different node -> allowed
+	c3 := &model.Connection{
+		ResourceID: &resID,
+		Username:   "bob",
+		NodeID:     "eda-srv-02",
+		Port:       5905,
+		Display:    &disp,
+		Protocol:   contract.VNCProtocol,
+		Status:     model.ConnectionRunning,
 	}
-
-	if quotaExceededCount != int64(concurrency)-int64(quota) {
-		t.Errorf("expected %d quota exceeded errors, got %d", concurrency-quota, quotaExceededCount)
-	}
-
-	// Verify DB record count for charlie
-	var dbCount int64
-	if err := store.db.Model(&model.Connection{}).Where("username = ? AND shared = ?", username, false).Count(&dbCount).Error; err != nil {
-		t.Fatalf("count connections: %v", err)
-	}
-	if dbCount != int64(quota) {
-		t.Errorf("expected DB count to be %d, got %d", quota, dbCount)
+	if err := repo.CreateWithResourceQuota(ctx, c3); err != nil {
+		t.Fatalf("insert c3 on different node: %v", err)
 	}
 }
 
-func TestConnectionRepo_CreateWithQuota_NodeAdmissionAndCapacity(t *testing.T) {
+func TestConnectionRepo_ZeroMaxPerUserRejects(t *testing.T) {
+	t.Parallel()
+
+	store, repo := newConnRepoForTest(t)
+	ctx := context.Background()
+	resID := uint(202)
+	seedConnectionResource(t, store, resID, 1, []string{"node-1"})
+	if err := store.DB().Model(&model.ConnectionResource{}).Where("id = ?", resID).
+		Update("max_per_user", 0).Error; err != nil {
+		t.Fatalf("set max_per_user 0: %v", err)
+	}
+
+	err := repo.CreateWithResourceQuota(ctx, &model.Connection{
+		ResourceID: &resID,
+		Username:   "alice",
+		Port:       5901,
+		Protocol:   contract.VNCProtocol,
+		NodeID:     "node-1",
+		Status:     model.ConnectionRunning,
+	})
+	if err == nil {
+		t.Fatal("expected quota rejection when max_per_user is 0")
+	}
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("quota error = %v, want ErrQuotaExceeded", err)
+	}
+}
+
+func TestConnectionRepo_CreateWithResourceMaxTotalQuota(t *testing.T) {
 	t.Parallel()
 
 	store, repo := newConnRepoForTest(t)
 	ctx := context.Background()
 
-	// 1. Create test nodes
-	nodeBlocked := model.Node{
-		NodeID:           "node-blocked",
-		AllowConnections: false,
-		Status:           model.NodeStatusOnline,
+	resID := uint(202)
+	// 单人最多 2 个，全集群总实例最多 3 个
+	res := &model.ConnectionResource{
+		ID:         resID,
+		Name:       "limited-pool",
+		Protocol:   contract.VNCProtocol,
+		Nodes:      []string{"node-1"},
+		NodeGroups: []string{},
+		MaxPerUser: 2,
+		MaxTotal:   3,
 	}
-	nodeLimited := model.Node{
-		NodeID:           "node-limited",
-		AllowConnections: true,
-		MaxConnections:   1,
-		Status:           model.NodeStatusOnline,
-	}
-	if err := store.db.Create(&nodeBlocked).Error; err != nil {
-		t.Fatalf("create nodeBlocked: %v", err)
-	}
-	if err := store.db.Model(&nodeBlocked).Update("allow_connections", false).Error; err != nil {
-		t.Fatalf("update nodeBlocked: %v", err)
-	}
-	if err := store.db.Create(&nodeLimited).Error; err != nil {
-		t.Fatalf("create nodeLimited: %v", err)
+	if err := NewRepos(store).ConnectionResource.Create(ctx, res); err != nil {
+		t.Fatalf("create resource: %v", err)
 	}
 
-	// 2. Reject non-existent node
-	cMissing := &model.Connection{
-		Username:     "alice",
-		TargetNodeID: "node-missing",
-		Host:         "192.168.1.10",
-		Port:         5900,
-		Protocol:     "VNC",
+	// 1. Alice 连 2 个 (OK)
+	c1 := &model.Connection{ResourceID: &resID, Username: "alice", Port: 5901, Protocol: contract.VNCProtocol, NodeID: "node-1", Status: model.ConnectionRunning}
+	c2 := &model.Connection{ResourceID: &resID, Username: "alice", Port: 5902, Protocol: contract.VNCProtocol, NodeID: "node-1", Status: model.ConnectionRunning}
+	if err := repo.CreateWithResourceQuota(ctx, c1); err != nil {
+		t.Fatalf("alice c1: %v", err)
 	}
-	err := repo.CreateWithQuota(ctx, cMissing, 0)
+	if err := repo.CreateWithResourceQuota(ctx, c2); err != nil {
+		t.Fatalf("alice c2: %v", err)
+	}
+
+	// 2. Bob 连 1 个 (当前总数 2 -> 3，满足 MaxTotal=3，OK)
+	c3 := &model.Connection{ResourceID: &resID, Username: "bob", Port: 5903, Protocol: contract.VNCProtocol, NodeID: "node-1", Status: model.ConnectionRunning}
+	if err := repo.CreateWithResourceQuota(ctx, c3); err != nil {
+		t.Fatalf("bob c3: %v", err)
+	}
+
+	// 3. Bob 连第 2 个 (虽然 Bob 自己未达 MaxPerUser=2，但集群总数已达 3，应该报 ErrQuotaExceeded)
+	c4 := &model.Connection{ResourceID: &resID, Username: "bob", Port: 5904, Protocol: contract.VNCProtocol, NodeID: "node-1", Status: model.ConnectionRunning}
+	err := repo.CreateWithResourceQuota(ctx, c4)
 	if err == nil {
-		t.Fatal("expected error for non-existent node, got nil")
+		t.Fatal("expected quota rejection when max_total is reached")
 	}
-	var appErr interface{ HTTPStatus() int }
-	if !errors.As(err, &appErr) || appErr.HTTPStatus() != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 for missing node, got %v", err)
-	}
-
-	// 3. Reject connection on node with AllowConnections=false
-	cBlocked := &model.Connection{
-		Username:     "alice",
-		TargetNodeID: "node-blocked",
-		Host:         "192.168.1.10",
-		Port:         5900,
-		Protocol:     "VNC",
-	}
-	err = repo.CreateWithQuota(ctx, cBlocked, 0)
-	if err == nil {
-		t.Fatal("expected error for blocked node, got nil")
-	}
-	if !errors.As(err, &appErr) || appErr.HTTPStatus() != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 for blocked node, got %v", err)
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("expected ErrQuotaExceeded, got %v", err)
 	}
 
-	// 4. Accept 1st connection on node with MaxConnections=1
-	cLimited1 := &model.Connection{
-		Username:     "alice",
-		TargetNodeID: "node-limited",
-		Host:         "192.168.1.10",
-		Port:         5901,
-		Protocol:     "VNC",
-		Shared:       false,
-	}
-	if err := repo.CreateWithQuota(ctx, cLimited1, 0); err != nil {
-		t.Fatalf("unexpected error on 1st node connection: %v", err)
+	// 4. Carol 尝试创建连接也应因总配额耗尽被拒
+	c5 := &model.Connection{ResourceID: &resID, Username: "carol", Port: 5905, Protocol: contract.VNCProtocol, NodeID: "node-1", Status: model.ConnectionRunning}
+	if err := repo.CreateWithResourceQuota(ctx, c5); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("carol connection expected ErrQuotaExceeded, got %v", err)
 	}
 
-	// 5. Reject 2nd non-shared connection on node with MaxConnections=1 (even with different user and quota=0)
-	cLimited2 := &model.Connection{
-		Username:     "bob",
-		TargetNodeID: "node-limited",
-		Host:         "192.168.1.10",
-		Port:         5902,
-		Protocol:     "VNC",
-		Shared:       false,
+	// 5. Alice 释放 1 个连接后，Bob 再次尝试成功
+	if err := repo.DeleteByID(ctx, c1.ID); err != nil {
+		t.Fatalf("delete alice c1: %v", err)
 	}
-	err = repo.CreateWithQuota(ctx, cLimited2, 0)
-	if err == nil {
-		t.Fatal("expected error for exceeded node capacity, got nil")
-	}
-	if !errors.As(err, &appErr) || appErr.HTTPStatus() != http.StatusTooManyRequests {
-		t.Fatalf("expected 429 for exceeded node capacity, got %v", err)
-	}
-
-	// 6. Shared connection bypasses MaxConnections limit on node-limited
-	cShared := &model.Connection{
-		TargetNodeID: "node-limited",
-		Host:         "192.168.1.10",
-		Port:         3389,
-		Protocol:     "RDP",
-		Shared:       true,
-	}
-	if err := repo.CreateWithQuota(ctx, cShared, 0); err != nil {
-		t.Fatalf("unexpected error for shared connection on node-limited: %v", err)
-	}
-
-	// 7. Shared connection still rejected if AllowConnections=false
-	cSharedBlocked := &model.Connection{
-		TargetNodeID: "node-blocked",
-		Host:         "192.168.1.10",
-		Port:         3389,
-		Protocol:     "RDP",
-		Shared:       true,
-	}
-	err = repo.CreateWithQuota(ctx, cSharedBlocked, 0)
-	if err == nil {
-		t.Fatal("expected error for shared connection on blocked node, got nil")
-	}
-	if !errors.As(err, &appErr) || appErr.HTTPStatus() != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 for shared connection on blocked node, got %v", err)
+	if err := repo.CreateWithResourceQuota(ctx, c4); err != nil {
+		t.Fatalf("bob c4 should succeed after quota released, got %v", err)
 	}
 }

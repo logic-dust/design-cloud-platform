@@ -1,66 +1,69 @@
 package proxy
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/common/crypto"
 	"design-cloud-engine/internal/contract"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/settings"
-	"design-cloud-engine/internal/server/service/settings/schema"
 )
+
+const bridgeWriteDeadline = 20 * time.Second
 
 var (
-	ErrConnectionNotFound            = errors.New("proxy connection not found")
-	ErrProxyTunnelNotFound           = errors.New("proxy tunnel not found")
-	ErrProxyServiceDisabled          = errors.New("proxy service is disabled")
-	ErrProxyProtocolNotAllowed       = errors.New("proxy protocol is not allowed")
-	ErrProxyMaxTunnelsReached        = errors.New("proxy max tunnels reached")
-	ErrProxyMaxTunnelsPerUserReached = errors.New("proxy max tunnels per user reached")
-	ErrProxyTunnelActivateFailed     = errors.New("proxy tunnel activation failed: OTP invalid, expired, or already used")
+	ErrConnectionNotFound             = errors.New("connection not found")
+	ErrProxyConnectionNotFound        = errors.New("proxy connection not found")
+	ErrProxyServiceDisabled           = errors.New("proxy service is disabled")
+	ErrProxyProtocolNotAllowed        = errors.New("proxy protocol is not allowed")
+	ErrProxyMaxSessionsReached        = errors.New("proxy max sessions reached")
+	ErrProxyMaxSessionsPerUserReached = errors.New("proxy max sessions per user reached")
+	ErrNotProxyable                   = errors.New("connection is not proxyable")
+	ErrProxyConnectionForbidden       = errors.New("proxy connection access denied")
+	ErrNodeConnectionsDisallowed      = errors.New("target node does not allow connections")
+	ErrNodeInMaintenance              = errors.New("target node is in maintenance")
+	ErrSSHUsesResourceProxy           = errors.New("SSH proxy uses GET /api/connections/ssh?resourceId=")
+	ErrSSHDialResolverUnavailable     = errors.New("SSH dial resolver is not configured")
 )
 
-// Status represents the lifecycle state of a proxy tunnel.
+// SSHDialTargetResolver selects a live dial target for an SSH resource without
+// creating a connections row. Implemented by connection.Service.
+type SSHDialTargetResolver interface {
+	ResolveSSHDialTarget(ctx context.Context, username string, resourceID uint) (host string, port uint, err error)
+}
+
+// Status represents the lifecycle state of a ProxyConnection.
 type Status string
 
 const (
-	StatusPending Status = "pending"
-	StatusActive  Status = "active"
+	StatusActive Status = "active"
 )
 
-// Tunnel is a runtime-only proxy tunnel channel.
-// Protocol, Host, Port, and Username are snapshotted from the Connection
-// at creation time so the OTP phase can proceed without a DB round-trip.
-type Tunnel struct {
-	ConnectionID uint              `json:"connectionId"`
-	OTP          string            `json:"otp,omitempty"`
+// ProxyConnection is a runtime-only mediated access session (代理访问会话).
+// Connection-backed tunnels set ConnectionID; SSH resource tunnels set ResourceID
+// only (no connections row). The two anchors are mutually exclusive.
+type ProxyConnection struct {
+	ID           uint              `json:"id"`
+	ConnectionID uint              `json:"connectionId,omitempty"`
+	ResourceID   uint              `json:"resourceId,omitempty"`
+	Requester    string            `json:"requester"`
 	Status       Status            `json:"status"`
-	ExpiresAt    time.Time         `json:"expiresAt"`
+	StartedAt    time.Time         `json:"startedAt"`
 	Protocol     contract.Protocol `json:"-"`
 	Host         string            `json:"-"`
 	Port         uint              `json:"-"`
 	Username     string            `json:"-"`
 }
 
-func (t *Tunnel) IsExpired() bool {
-	return time.Now().After(t.ExpiresAt)
-}
-
 // ProtocolHandler defines the interface for protocol-specific proxy behavior.
 type ProtocolHandler interface {
-	// Name returns the protocol name (e.g., "VNC", "RDP", "SSH")
 	Name() string
-
-	// Connect establishes a TCP connection to the backend target
 	Connect(ctx context.Context, target string) (net.Conn, error)
 }
 
@@ -82,9 +85,7 @@ func (h *BaseProtocolHandler) Name() string {
 }
 
 func (h *BaseProtocolHandler) Connect(ctx context.Context, target string) (net.Conn, error) {
-	var d net.Dialer
-	d.Timeout = h.dialTimeout
-	return d.DialContext(ctx, "tcp", target)
+	return dialTCPWithRefusedRetry(ctx, target, h.dialTimeout)
 }
 
 // ProtocolRegistry manages available protocol handlers
@@ -96,17 +97,16 @@ func newProtocolRegistry() *ProtocolRegistry {
 	r := &ProtocolRegistry{
 		handlers: make(map[contract.Protocol]ProtocolHandler),
 	}
-
-	// Register built-in protocols
-	r.Register(newBaseProtocolHandler(string(contract.VNCProtocol)))
-	r.Register(newBaseProtocolHandler(string(contract.RDPProtocol)))
-	r.Register(newBaseProtocolHandler(string(contract.SSHProtocol)))
-
+	r.Register(contract.VNCProtocol, newBaseProtocolHandler(contract.VNCProtocol.String()))
+	r.Register(contract.RDPProtocol, newBaseProtocolHandler(contract.RDPProtocol.String()))
+	r.Register(contract.SSHProtocol, newBaseProtocolHandler(contract.SSHProtocol.String()))
+	// XRDP speaks RDP on the wire; reuse the RDP byte-tunnel handler.
+	r.Register(contract.XRDPProtocol, newBaseProtocolHandler(contract.XRDPProtocol.String()))
 	return r
 }
 
-func (r *ProtocolRegistry) Register(handler ProtocolHandler) {
-	r.handlers[contract.Protocol(handler.Name())] = handler
+func (r *ProtocolRegistry) Register(protocol contract.Protocol, handler ProtocolHandler) {
+	r.handlers[protocol] = handler
 }
 
 func (r *ProtocolRegistry) Get(protocol contract.Protocol) (ProtocolHandler, error) {
@@ -117,31 +117,51 @@ func (r *ProtocolRegistry) Get(protocol contract.Protocol) (ProtocolHandler, err
 	return handler, nil
 }
 
-// CreateTunnelRequest carries the caller-supplied inputs for opening a new proxy tunnel.
-// Target host and protocol are resolved internally from the Connection record.
-type CreateTunnelRequest struct {
+// OpenDataPlaneRequest carries caller inputs for opening a proxy data plane.
+// Set either ConnectionID (VNC/RDP/XRDP) or ResourceID (SSH resource proxy).
+type OpenDataPlaneRequest struct {
 	ConnectionID uint
+	ResourceID   uint
+	Requester    string
+}
+
+// PreparedDataPlaneOpen is a validated open plan: session template plus quota
+// captured from settings at prepare time (single GetConnectionSettings for the open path).
+type PreparedDataPlaneOpen struct {
+	Session ProxyConnection
+	quota   sessionQuota
 }
 
 type Service struct {
 	connectionRepo   *db.ConnectionRepo
-	store            *tunnelStore
+	nodeRepo         *db.NodeRepo
+	store            *proxySessionRegistry
 	protocolRegistry *ProtocolRegistry
-	settingsSvc      *settings.Service
+	settingsSvc      SettingsReader
+	sshDial          SSHDialTargetResolver
 	logger           *slog.Logger
+
+	touchMu     sync.Mutex
+	lastTouchAt map[uint]time.Time
 }
 
-// NewService initializes the proxy service in WebSocket-only mode.
-func NewService(settingsSvc *settings.Service, connectionRepo *db.ConnectionRepo, logger *slog.Logger) (*Service, error) {
-	s := &Service{
+func NewService(settingsSvc SettingsReader, connectionRepo *db.ConnectionRepo, nodeRepo *db.NodeRepo, logger *slog.Logger) (*Service, error) {
+	return &Service{
 		connectionRepo:   connectionRepo,
-		store:            newTunnelStore(),
+		nodeRepo:         nodeRepo,
+		store:            newProxySessionRegistry(),
 		settingsSvc:      settingsSvc,
 		logger:           logger,
 		protocolRegistry: newProtocolRegistry(),
-	}
+		lastTouchAt:      make(map[uint]time.Time),
+	}, nil
+}
 
-	return s, nil
+// SetSSHDialResolver wires SSH resource placement (called after connection.Service exists).
+func (s *Service) SetSSHDialResolver(r SSHDialTargetResolver) {
+	if s != nil {
+		s.sshDial = r
+	}
 }
 
 func (s *Service) Start() error {
@@ -150,215 +170,309 @@ func (s *Service) Start() error {
 }
 
 func (s *Service) Stop() error {
+	handles := s.store.RemoveAll()
+	for _, handle := range handles {
+		tcp, ws := handle.Close()
+		CloseDetachedSockets(tcp, ws)
+	}
 	s.logger.Info("Proxy service stopped")
 	return nil
 }
 
-// Create provisions a new proxy tunnel for WebSocket proxying.
-// Target host and protocol are derived from the Connection record to avoid caller redundancy.
-func (s *Service) Create(ctx context.Context, req *CreateTunnelRequest) (*Tunnel, error) {
-	protocol, targetHost, targetPort, conn, err := s.resolveConnectionTarget(ctx, req.ConnectionID)
-	if err != nil {
-		return nil, err
-	}
-
-	tunnelSettings, err := s.settingsSvc.GetTunnelSettings(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("get tunnel settings error: %w", err)
-	}
-	if err := ensureProtocolAllowed(tunnelSettings, protocol); err != nil {
-		return nil, err
-	}
-
-	existingTunnel, existingErr := s.store.GetByConnectionID(req.ConnectionID)
-	hasCurrentTunnel := existingErr == nil &&
-		(existingTunnel.Status == StatusPending || existingTunnel.Status == StatusActive)
-	if err := s.checkTunnelQuota(tunnelSettings, conn, hasCurrentTunnel); err != nil {
-		return nil, err
-	}
-
-	// Replace any existing active/pending tunnel for this connection (silent replacement)
-	if err := s.store.CloseByConnectionID(req.ConnectionID); err != nil {
-		if !errors.Is(err, common.ErrNotFound) {
-			return nil, err
-		}
-	}
-
-	return s.newProxyTunnel(ctx, req.ConnectionID, conn.Username, protocol, targetHost, targetPort, tunnelSettings.OtpTTL)
+// BridgeWriteDeadline is the per-write deadline for proxy data-plane copies.
+func (s *Service) BridgeWriteDeadline() time.Duration {
+	return bridgeWriteDeadline
 }
 
-// resolveConnectionTarget loads the connection and validates the protocol, host,
-// and port needed for proxying.
-func (s *Service) resolveConnectionTarget(ctx context.Context, connectionID uint) (contract.Protocol, string, uint, model.Connection, error) {
+// PrepareDataPlaneOpen validates settings, authorization, and quota without registering a session.
+// Quota limits are snapshotted here so RegisterDataPlaneSession does not re-read settings.
+func (s *Service) PrepareDataPlaneOpen(ctx context.Context, req *OpenDataPlaneRequest) (*PreparedDataPlaneOpen, error) {
+	if req == nil || req.Requester == "" {
+		return nil, contract.NewInvalidParamError("requester is required")
+	}
+	if req.ConnectionID != 0 && req.ResourceID != 0 {
+		return nil, contract.NewInvalidParamError("connectionId and resourceId are mutually exclusive")
+	}
+	if req.ResourceID != 0 {
+		return s.prepareResourceDataPlaneOpen(ctx, req)
+	}
+	if req.ConnectionID == 0 {
+		return nil, contract.NewInvalidParamError("connectionId or resourceId is required")
+	}
+
+	protocol, targetHost, targetPort, conn, err := s.resolveAuthorizedConnectionTarget(ctx, req.Requester, req.ConnectionID)
+	if err != nil {
+		return nil, err
+	}
+
+	connectionSettings, err := s.settingsSvc.GetConnectionSettings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get connection settings error: %w", err)
+	}
+	proxySettings := connectionSettings.Proxy
+	if err := ensureProtocolAllowed(proxySettings, protocol); err != nil {
+		return nil, err
+	}
+
+	quota := sessionQuota{
+		MaxGlobal:    proxySettings.MaxProxyConnections,
+		MaxPerUser:   proxySettings.MaxProxyConnectionsPerUser,
+		ConnectionID: req.ConnectionID,
+		Requester:    req.Requester,
+	}
+	if err := s.store.CheckQuota(quota); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	return &PreparedDataPlaneOpen{
+		Session: ProxyConnection{
+			ConnectionID: req.ConnectionID,
+			Requester:    req.Requester,
+			Status:       StatusActive,
+			StartedAt:    now,
+			Protocol:     protocol,
+			Host:         targetHost,
+			Port:         targetPort,
+			Username:     conn.Username,
+		},
+		quota: quota,
+	}, nil
+}
+
+func (s *Service) prepareResourceDataPlaneOpen(ctx context.Context, req *OpenDataPlaneRequest) (*PreparedDataPlaneOpen, error) {
+	if s.sshDial == nil {
+		return nil, ErrSSHDialResolverUnavailable
+	}
+	host, port, err := s.sshDial.ResolveSSHDialTarget(ctx, req.Requester, req.ResourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	connectionSettings, err := s.settingsSvc.GetConnectionSettings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get connection settings error: %w", err)
+	}
+	proxySettings := connectionSettings.Proxy
+	if err := ensureProtocolAllowed(proxySettings, contract.SSHProtocol); err != nil {
+		return nil, err
+	}
+
+	quota := sessionQuota{
+		MaxGlobal:  proxySettings.MaxProxyConnections,
+		MaxPerUser: proxySettings.MaxProxyConnectionsPerUser,
+		ResourceID: req.ResourceID,
+		Requester:  req.Requester,
+	}
+	if err := s.store.CheckQuota(quota); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	return &PreparedDataPlaneOpen{
+		Session: ProxyConnection{
+			ResourceID: req.ResourceID,
+			Requester:  req.Requester,
+			Status:     StatusActive,
+			StartedAt:  now,
+			Protocol:   contract.SSHProtocol,
+			Host:       host,
+			Port:       port,
+			Username:   req.Requester,
+		},
+		quota: quota,
+	}, nil
+}
+
+// RegisterDataPlaneSession records an active session after the target TCP dial succeeds.
+// Uses the quota snapshot from PrepareDataPlaneOpen (no second settings read).
+func (s *Service) RegisterDataPlaneSession(ctx context.Context, prepared *PreparedDataPlaneOpen, handle *ProxyConnectionLifecycle) (*ProxyConnection, error) {
+	if prepared == nil || handle == nil {
+		return nil, contract.NewInvalidParamError("session template is required")
+	}
+
+	template := &prepared.Session
+	stored, replacedHandle, err := s.store.RegisterActive(prepared.quota, template, handle)
+	if err != nil {
+		tcp, ws := handle.Close()
+		CloseDetachedSockets(tcp, ws)
+		return nil, err
+	}
+	if replacedHandle != nil {
+		tcp, ws := replacedHandle.Close()
+		CloseDetachedSockets(tcp, ws)
+	}
+
+	if template.ConnectionID != 0 {
+		s.touchConnectionAccess(ctx, template.ConnectionID, template.StartedAt)
+	}
+
+	s.logger.Info("Proxy session active",
+		"connection", template.ConnectionID,
+		"resource", template.ResourceID,
+		"requester", template.Requester,
+		"protocol", template.Protocol,
+		"host", template.Host,
+		"port", template.Port,
+	)
+
+	return cloneSession(&stored.session), nil
+}
+
+func (s *Service) touchConnectionAccess(ctx context.Context, connectionID uint, now time.Time) {
+	s.touchMu.Lock()
+	if s.lastTouchAt == nil {
+		s.lastTouchAt = make(map[uint]time.Time)
+	}
+	for id, touched := range s.lastTouchAt {
+		if now.Sub(touched) >= 60*time.Second {
+			delete(s.lastTouchAt, id)
+		}
+	}
+	if last, ok := s.lastTouchAt[connectionID]; ok && now.Sub(last) < 60*time.Second {
+		s.touchMu.Unlock()
+		return
+	}
+	s.lastTouchAt[connectionID] = now
+	s.touchMu.Unlock()
+
+	if err := s.connectionRepo.UpdateFields(ctx, connectionID, map[string]any{"last_accessed_at": now}); err != nil && s.logger != nil {
+		s.logger.Warn("touch connection access time failed", "connection", connectionID, "error", err)
+	}
+}
+
+func (s *Service) resolveAuthorizedConnectionTarget(ctx context.Context, requester string, connectionID uint) (contract.Protocol, string, uint, model.Connection, error) {
 	conn, err := s.connectionRepo.GetByID(ctx, connectionID)
 	if err != nil {
-		if errors.Is(err, common.ErrNotFound) {
-			return "", "", 0, model.Connection{}, ErrConnectionNotFound
+		if errors.Is(err, contract.ErrNotFound) {
+			return contract.ProtocolUnknown, "", 0, model.Connection{}, ErrConnectionNotFound
 		}
-		return "", "", 0, model.Connection{}, fmt.Errorf("get connection error: %w", err)
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, fmt.Errorf("get connection error: %w", err)
+	}
+	if err := authorizeConnectionForProxy(requester, conn); err != nil {
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, err
+	}
+	return s.resolveConnectionTargetFromConn(ctx, conn)
+}
+
+func (s *Service) resolveConnectionTargetFromConn(ctx context.Context, conn model.Connection) (contract.Protocol, string, uint, model.Connection, error) {
+	if conn.Status == model.ConnectionPending {
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, fmt.Errorf("%w: connection is still starting", ErrNotProxyable)
+	}
+	if conn.Status == model.ConnectionStopped {
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, fmt.Errorf("%w: connection is stopped", ErrNotProxyable)
 	}
 
 	protocol := conn.Protocol
-	if protocol == "" {
-		return "", "", 0, model.Connection{}, fmt.Errorf("%w: proxy protocol not defined", fs.ErrInvalid)
+	if protocol == contract.SSHProtocol {
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, ErrSSHUsesResourceProxy
+	}
+	if !protocol.Valid() {
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, contract.NewInvalidParamError("proxy protocol not defined")
 	}
 	if _, err := s.protocolRegistry.Get(protocol); err != nil {
-		return "", "", 0, model.Connection{}, fmt.Errorf("%w: proxy protocol %s is not supported", fs.ErrInvalid, protocol)
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, contract.NewValidationError("proxy protocol " + protocol.String() + " is not supported")
 	}
 
-	targetHost := conn.Host
-	if targetHost == "" || targetHost == "127.0.0.1" || targetHost == "localhost" {
-		s.logger.Debug("Proxy target host falls back to target node", "connection", conn.ID, "original_host", conn.Host, "target_node", conn.TargetNodeID)
-		targetHost = conn.TargetNodeID
+	if conn.NodeID == "" {
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, contract.NewInvalidParamError("proxy target host not defined")
 	}
+	if s.nodeRepo == nil {
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, contract.NewInvalidParamError("proxy target host not defined")
+	}
+	node, err := s.nodeRepo.GetByNodeID(ctx, conn.NodeID)
+	if err != nil {
+		if errors.Is(err, contract.ErrNotFound) {
+			return contract.ProtocolUnknown, "", 0, model.Connection{}, contract.NewInvalidParamError("proxy target host not defined")
+		}
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, fmt.Errorf("get target node: %w", err)
+	}
+	if node.Status == model.NodeStatusMaintenance {
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, fmt.Errorf("%w: node %s", ErrNodeInMaintenance, node.NodeID)
+	}
+	if !node.AllowConnections {
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, fmt.Errorf("%w: node %s", ErrNodeConnectionsDisallowed, node.NodeID)
+	}
+	targetHost := model.DialHostFor(node.DialHost, node.NodeID)
 	if targetHost == "" {
-		return "", "", 0, model.Connection{}, fmt.Errorf("%w: proxy target host not defined", fs.ErrInvalid)
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, contract.NewInvalidParamError("proxy target host not defined")
 	}
 
 	targetPort := conn.Port
 	if targetPort <= 0 || targetPort > 65535 {
-		return "", "", 0, model.Connection{}, fmt.Errorf("%w: proxy target port is invalid: %d", fs.ErrInvalid, targetPort)
+		return contract.ProtocolUnknown, "", 0, model.Connection{}, contract.NewValidationError(fmt.Sprintf("proxy target port is invalid: %d", targetPort))
 	}
 
 	return protocol, targetHost, targetPort, conn, nil
 }
 
-// checkTunnelQuota enforces global MaxTunnels and per-user MaxTunnelsPerUser limits.
-func (s *Service) checkTunnelQuota(tunnelSettings schema.TunnelSettings, conn model.Connection, hasCurrentTunnel bool) error {
-	if tunnelSettings.MaxTunnels > 0 {
-		activeCount := s.store.CountActive()
-		if hasCurrentTunnel && activeCount > 0 {
-			activeCount--
-		}
-		if activeCount >= int64(tunnelSettings.MaxTunnels) {
-			return ErrProxyMaxTunnelsReached
-		}
+func authorizeConnectionForProxy(requester string, conn model.Connection) error {
+	if requester == "" {
+		return contract.NewInvalidParamError("requester is required")
 	}
-
-	if tunnelSettings.MaxTunnelsPerUser > 0 {
-		userCount := s.countActiveByUser(conn.Username)
-		if hasCurrentTunnel && userCount > 0 {
-			userCount--
-		}
-		if userCount >= int64(tunnelSettings.MaxTunnelsPerUser) {
-			return ErrProxyMaxTunnelsPerUserReached
-		}
+	if !canAccessConnection(requester, conn) {
+		return ErrProxyConnectionForbidden
 	}
 	return nil
 }
 
-// newProxyTunnel creates the in-memory tunnel, persists it, and updates the
-// connection's last access time.
-func (s *Service) newProxyTunnel(ctx context.Context, connectionID uint, username string, protocol contract.Protocol, targetHost string, targetPort uint, otpTTL int) (*Tunnel, error) {
-	otpTTL = cmp.Or(otpTTL, 60)
-
-	now := time.Now()
-	tunnel := &Tunnel{
-		ConnectionID: connectionID,
-		OTP:          crypto.GenSecret(24), // 256-bit cryptographically secure random OTP
-		Status:       StatusPending,
-		ExpiresAt:    now.Add(time.Duration(otpTTL) * time.Second),
-		Protocol:     protocol,
-		Host:         targetHost,
-		Port:         targetPort,
-		Username:     username,
-	}
-
-	s.store.Create(tunnel)
-	if err := s.connectionRepo.UpdateFields(ctx, connectionID, map[string]any{"last_accessed_at": now}); err != nil {
-		return nil, fmt.Errorf("touch connection access time: %w", err)
-	}
-
-	s.logger.Info("Proxy tunnel created", "connection", connectionID, "protocol", protocol, "host", targetHost, "port", targetPort)
-
-	return tunnel, nil
+func canAccessConnection(username string, conn model.Connection) bool {
+	return conn.Username == username
 }
 
-func (s *Service) CloseByConnectionID(connectionID uint) error {
-	if err := s.store.CloseByConnectionID(connectionID); err != nil {
-		if errors.Is(err, common.ErrNotFound) {
-			return ErrProxyTunnelNotFound
+// CloseByID terminates exactly one ProxyConnection by identity (data-plane exit / error paths).
+func (s *Service) CloseByID(sessionID uint) error {
+	handle, err := s.store.RemoveByID(sessionID)
+	if err != nil {
+		if errors.Is(err, contract.ErrNotFound) {
+			return ErrProxyConnectionNotFound
 		}
 		return err
 	}
+	if handle != nil {
+		tcp, ws := handle.Close()
+		CloseDetachedSockets(tcp, ws)
+	}
 	return nil
 }
 
-// GetByOTP retrieves a tunnel by its one-time password.
-func (s *Service) GetByOTP(otp string) (*Tunnel, error) {
-	tunnel, err := s.store.GetByOTP(otp)
-	if errors.Is(err, common.ErrNotFound) {
-		return nil, ErrProxyTunnelNotFound
+// CloseAllByConnectionID terminates every ProxyConnection on the connection (admin delete/stop).
+func (s *Service) CloseAllByConnectionID(connectionID uint) error {
+	handles := s.store.RemoveAllByConnectionID(connectionID)
+	for _, handle := range handles {
+		tcp, ws := handle.Close()
+		CloseDetachedSockets(tcp, ws)
 	}
-	return tunnel, err
+	return nil
 }
 
-// Activate transitions a pending tunnel to active status.
-func (s *Service) Activate(otp string) (*Tunnel, error) {
-	now := time.Now()
-	tunnel, err := s.store.Activate(otp, now)
-	if err != nil {
-		if errors.Is(err, ErrProxyTunnelActivateFailed) {
-			return nil, fmt.Errorf("%w: proxy tunnel is no longer valid", fs.ErrPermission)
-		}
-		if errors.Is(err, common.ErrNotFound) {
-			return nil, ErrProxyTunnelNotFound
-		}
-		return nil, err
+// CloseAllByRequester terminates every ProxyConnection owned by the requester (logout / ban).
+func (s *Service) CloseAllByRequester(requester string) error {
+	handles := s.store.RemoveAllByRequester(requester)
+	for _, handle := range handles {
+		tcp, ws := handle.Close()
+		CloseDetachedSockets(tcp, ws)
 	}
-	return tunnel, nil
+	return nil
 }
 
-// GetProtocolHandler returns the handler for a specific proxy protocol.
 func (s *Service) GetProtocolHandler(protocol contract.Protocol) (ProtocolHandler, error) {
 	return s.protocolRegistry.Get(protocol)
 }
 
-func (s *Service) EnsureProtocolAllowed(ctx context.Context, protocol contract.Protocol) error {
-	tunnelSettings, err := s.settingsSvc.GetTunnelSettings(ctx)
-	if err != nil {
-		return fmt.Errorf("get tunnel settings error: %w", err)
+func (s *Service) GetActiveByConnectionIDAndRequester(connID uint, requester string) (*ProxyConnection, error) {
+	session, err := s.store.GetByConnectionIDAndRequester(connID, requester)
+	if errors.Is(err, contract.ErrNotFound) {
+		return nil, ErrProxyConnectionNotFound
 	}
-	return ensureProtocolAllowed(tunnelSettings, protocol)
+	return session, err
 }
 
-// GetActiveByConnectionID returns the current tunnel for a connection.
-func (s *Service) GetActiveByConnectionID(connID uint) (*Tunnel, error) {
-	tunnel, err := s.store.GetByConnectionID(connID)
-	if errors.Is(err, common.ErrNotFound) {
-		return nil, ErrProxyTunnelNotFound
-	}
-	return tunnel, err
-}
-
-// PruneExpiredPending removes expired pending tunnels from the in-memory store.
-// Intended to be called periodically by the cleanup service on every node.
-func (s *Service) PruneExpiredPending(now time.Time) int {
-	return s.store.PruneExpiredPending(now)
-}
-
-// countActiveByUser counts active/pending proxy tunnels for a user.
-// Username is snapshotted onto Tunnel at creation time, so no DB
-// round-trip is needed.
-func (s *Service) countActiveByUser(username string) int64 {
-	tunnels := s.store.List()
-	var count int64
-	for _, tunnel := range tunnels {
-		if tunnel.Status != StatusPending && tunnel.Status != StatusActive {
-			continue
-		}
-		if tunnel.Username == username {
-			count++
-		}
-	}
-	return count
-}
-
-func ensureProtocolAllowed(tunnelSettings schema.TunnelSettings, protocol contract.Protocol) error {
-	if !tunnelSettings.Enabled {
+func ensureProtocolAllowed(proxySettings schema.ProxySettings, protocol contract.Protocol) error {
+	if !proxySettings.Enabled {
 		return ErrProxyServiceDisabled
 	}
-	if !tunnelSettings.IsProtocolAllowed(protocol) {
+	if !proxySettings.IsProtocolAllowed(protocol) {
 		return fmt.Errorf("%w: %s", ErrProxyProtocolNotAllowed, protocol)
 	}
 	return nil

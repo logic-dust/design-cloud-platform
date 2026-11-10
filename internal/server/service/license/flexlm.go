@@ -16,7 +16,10 @@ import (
 
 // flexLMStatus checks the FlexLM license server status
 func (s *Service) flexLMStatus(ctx context.Context, licInfo *model.LicenseService) (model.LicenseServiceStatus, error) {
-	result, err := s.executeAction(ctx, execution.ActionLicenseStatus, payload.LicenseStatus{LicensePath: licInfo.Address}, licInfo.Server)
+	result, err := s.executeAction(ctx, execution.ActionLicenseStatus, payload.LicenseStatus{
+		LicensePath: licInfo.Address,
+		LmutilPath:  licInfo.LmutilPath,
+	}, licInfo.Server)
 	if err != nil {
 		return model.LicenseServiceStatusUnknown, err
 	}
@@ -30,7 +33,10 @@ func (s *Service) flexLMStatus(ctx context.Context, licInfo *model.LicenseServic
 
 // flexLMListFeatures retrieves FlexLM feature information
 func (s *Service) flexLMListFeatures(ctx context.Context, licInfo *model.LicenseService) ([]featureInfo, error) {
-	result, err := s.executeAction(ctx, execution.ActionLicenseFeatures, payload.LicenseFeatures{LicensePath: licInfo.Address}, licInfo.Server)
+	result, err := s.executeAction(ctx, execution.ActionLicenseFeatures, payload.LicenseFeatures{
+		LicensePath: licInfo.Address,
+		LmutilPath:  licInfo.LmutilPath,
+	}, licInfo.Server)
 	if err != nil {
 		return nil, err
 	}

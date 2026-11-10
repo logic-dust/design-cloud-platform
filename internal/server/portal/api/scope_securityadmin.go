@@ -4,11 +4,11 @@ import (
 	"errors"
 	"net/http"
 
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/portal/httputil"
 	usersvc "design-cloud-engine/internal/server/service/user"
 
+	"design-cloud-engine/internal/contract"
 	"github.com/labstack/echo/v5"
 )
 
@@ -71,7 +71,7 @@ func (h *userHandler) listAdminScopes(c *echo.Context) error {
 }
 
 func scopeErrorResponse(c *echo.Context, err error) error {
-	if errors.Is(err, common.ErrNotFound) {
+	if errors.Is(err, contract.ErrNotFound) {
 		return c.JSON(http.StatusNotFound, httputil.Response{Message: "user not found"})
 	}
 	if errors.Is(err, usersvc.ErrScopeRequiresNormalRole) ||

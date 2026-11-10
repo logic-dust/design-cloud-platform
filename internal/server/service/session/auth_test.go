@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/config"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 	"design-cloud-engine/internal/server/service/security"
 	"design-cloud-engine/internal/server/service/settings"
 	userprovider "design-cloud-engine/internal/server/service/user/provider"
@@ -35,7 +35,7 @@ type trackedSecMgr struct {
 func (f *trackedSecMgr) IsBanned(_ context.Context, _, _ string) (bool, security.BannedRecord) {
 	return f.banned, f.bannedRec
 }
-func (f *trackedSecMgr) AddFailedCount(_ context.Context, keyName string, _ model.BanType, _, _ string) {
+func (f *trackedSecMgr) RecordFailure(_ context.Context, keyName string, _ model.BanSubject, _ model.BanSource, _, _ string) {
 	f.addedCounts = append(f.addedCounts, keyName)
 }
 func (f *trackedSecMgr) DeleteByKey(_ context.Context, keyName string) {
@@ -151,7 +151,7 @@ func newAuthManagerForTest(t *testing.T) (*AuthManager, *db.SessionRepo, *db.Use
 	t.Cleanup(func() { _ = auditSvc.Close() })
 
 	// Real settings service backed by the same DB
-	settingsSvc, err := settings.NewService(repos.Setting, auditSvc, nil)
+	settingsSvc, err := settings.NewService(repos.Setting, slog.Default(), auditSvc, nil, repos.CacheVersion, repos.Node)
 	if err != nil {
 		t.Fatalf("new settings service: %v", err)
 	}
@@ -254,7 +254,6 @@ func TestAuthNonExistentUser(t *testing.T) {
 // TestAuth_BannedIP verifies that a banned IP is rejected before any user lookup.
 func TestAuth_BannedIP(t *testing.T) {
 	t.Parallel()
-
 	store := newUserStoreForTest(t)
 	sec := &trackedSecMgr{
 		banned:    true,
@@ -364,6 +363,28 @@ func TestAuth_OSUser_WrongPassword(t *testing.T) {
 	}
 	if len(sec.addedCounts) < 2 {
 		t.Fatalf("expected at least 2 AddFailedCount calls, got %d", len(sec.addedCounts))
+	}
+}
+
+// TestAuth_OSUser_StaleDBExpired trusts LDAP success over stale portal DB status (e.g. IPA admin reset).
+func TestAuth_OSUser_StaleDBExpired(t *testing.T) {
+	t.Parallel()
+
+	store := newUserStoreForTest(t)
+	user := &model.User{Username: "osuser", Status: model.UserPasswordExpired, Type: model.UserTypeSystem}
+	if err := store.Create(context.Background(), user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	sec := &trackedSecMgr{}
+	mgr := newAuthManagerWithMocks(t, store, fixedVerifier{err: nil}, sec)
+
+	result, err := mgr.Authenticate(context.Background(), "osuser", "pw", "1.2.3.4")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.PasswordMustChange {
+		t.Fatal("expected PasswordMustChange = false when LDAP verifier succeeded despite stale DB expired status")
 	}
 }
 

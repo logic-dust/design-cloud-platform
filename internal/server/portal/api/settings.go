@@ -4,9 +4,8 @@ import (
 	"context"
 	"net/http"
 
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/server/portal/httputil"
-	"design-cloud-engine/internal/server/service"
-	"design-cloud-engine/internal/server/service/settings/schema"
 
 	"github.com/labstack/echo/v5"
 )
@@ -14,11 +13,10 @@ import (
 type settingsService interface {
 	GetPlatformSettings(ctx context.Context) (schema.PlatformSettings, error)
 	GetConnectionSettings(ctx context.Context) (schema.ConnectionSettings, error)
-	GetTunnelSettings(ctx context.Context) (schema.TunnelSettings, error)
 	GetFileSettings(ctx context.Context) (schema.FileSettings, error)
 	GetStorageSettings(ctx context.Context) (schema.StorageSettings, error)
 	GetDesktopSettings(ctx context.Context) (schema.DesktopSettings, error)
-	GetDashboardSettings(ctx context.Context) (schema.DashboardSettings, error)
+	GetOverviewSettings(ctx context.Context) (schema.OverviewSettings, error)
 	GetByDomain(ctx context.Context, domain schema.Domain) (any, error)
 	UpdateByDomain(ctx context.Context, domain schema.Domain, raw []byte) error
 }
@@ -27,8 +25,8 @@ type settingsHandler struct {
 	settings settingsService
 }
 
-func newSettingsHandler(svc *service.Container) *settingsHandler {
-	return &settingsHandler{settings: svc.Settings}
+func newSettingsHandler(settingsSvc settingsService) *settingsHandler {
+	return &settingsHandler{settings: settingsSvc}
 }
 
 // route: /api/settings

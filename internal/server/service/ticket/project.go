@@ -4,155 +4,121 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 
-	"design-cloud-engine/internal/common"
+	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
 )
 
-// --- 项目管理 ---
-
-// CreateProject 创建项目
-func (s *Service) CreateProject(ctx context.Context, req CreateProjectRequest, operatorID uint, operatorUsername string) (*model.TicketProject, error) {
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		return nil, ErrProjectNameRequired
+func validateProjectName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	switch {
+	case name == "":
+		return "", invalid("name is required")
+	case runeLen(name) > maxProjectNameRunes:
+		return "", invalid("name is too long")
 	}
-	if len(name) > 128 {
-		return nil, ErrProjectNameTooLong
-	}
-
-	project := &model.TicketProject{
-		Name:        name,
-		Description: req.Description,
-	}
-
-	if err := s.projectRepo.Create(ctx, project); err != nil {
-		if common.IsUniqueConstraintError(err) {
-			return nil, fmt.Errorf("%w: %w", ErrProjectNameConflict, err)
-		}
-		return nil, fmt.Errorf("create ticket project: %w", err)
-	}
-
-	s.auditSvc.LogUser(ctx, "PROJECT_CREATE", "success", formatUint(operatorID), slog.LevelInfo, map[string]any{
-		"project_id":        project.ID,
-		"project_name":      name,
-		"operator_username": operatorUsername,
-	})
-
-	return project, nil
+	return name, nil
 }
 
-// ListProjects 获取项目列表
-func (s *Service) ListProjects(ctx context.Context, limit, offset int, includeArchived bool) (*PagedResponse, error) {
-	projects, total, err := s.projectRepo.List(ctx, limit, offset, includeArchived, false)
-	if err != nil {
-		return nil, fmt.Errorf("list ticket projects: %w", err)
+func validateProjectDescription(s string) error {
+	if runeLen(s) > maxProjectDescRunes {
+		return invalid("description is too long")
 	}
-
-	hasMore := int64(offset+limit) < total
-
-	return &PagedResponse{
-		Items:      projects,
-		TotalCount: total,
-		Limit:      limit,
-		Offset:     offset,
-		HasMore:    hasMore,
-	}, nil
-}
-
-// AdminListProjects 管理员获取项目列表（含归档和已删除）
-func (s *Service) AdminListProjects(ctx context.Context, limit, offset int, includeArchived, includeDeleted bool) (*PagedResponse, error) {
-	projects, total, err := s.projectRepo.List(ctx, limit, offset, includeArchived, includeDeleted)
-	if err != nil {
-		return nil, fmt.Errorf("list ticket projects: %w", err)
-	}
-
-	hasMore := int64(offset+limit) < total
-
-	return &PagedResponse{
-		Items:      projects,
-		TotalCount: total,
-		Limit:      limit,
-		Offset:     offset,
-		HasMore:    hasMore,
-	}, nil
-}
-
-// UpdateProject 更新项目
-func (s *Service) UpdateProject(ctx context.Context, id uint, req UpdateProjectRequest, operatorID uint, operatorUsername string) (*model.TicketProject, error) {
-	project, err := s.projectRepo.GetByID(ctx, id)
-	if err != nil {
-		return nil, fmt.Errorf("get project for update(id=%d): %w", id, err)
-	}
-
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			return nil, ErrProjectNameRequired
-		}
-		if len(name) > 128 {
-			return nil, ErrProjectNameTooLong
-		}
-		project.Name = name
-	}
-	if req.Description != nil {
-		project.Description = *req.Description
-	}
-
-	if err := s.projectRepo.Update(ctx, &project); err != nil {
-		if common.IsUniqueConstraintError(err) {
-			return nil, fmt.Errorf("%w: %w", ErrProjectNameConflict, err)
-		}
-		return nil, fmt.Errorf("update ticket project: %w", err)
-	}
-
-	s.auditSvc.LogUser(ctx, "PROJECT_UPDATE", "success", formatUint(operatorID), slog.LevelInfo, map[string]any{
-		"project_id":        id,
-		"operator_username": operatorUsername,
-	})
-
-	return &project, nil
-}
-
-// DeleteProject 删除项目（需检查是否有活跃工单）
-func (s *Service) DeleteProject(ctx context.Context, projectID uint, operatorID uint, operatorUsername string) error {
-	count, err := s.ticketRepo.CountByProject(ctx, projectID, false)
-	if err != nil {
-		return fmt.Errorf("count tickets for project(id=%d): %w", projectID, err)
-	}
-
-	if count > 0 {
-		return fmt.Errorf("%w: %d active tickets", ErrProjectHasTickets, count)
-	}
-
-	if err := s.projectRepo.SoftDelete(ctx, projectID); err != nil {
-		return fmt.Errorf("soft delete project(id=%d): %w", projectID, err)
-	}
-
-	s.auditSvc.LogUser(ctx, "PROJECT_DELETE", "success", formatUint(operatorID), slog.LevelInfo, map[string]any{
-		"project_id":        projectID,
-		"operator_username": operatorUsername,
-	})
 	return nil
 }
 
-// ArchiveProject 归档/取消归档项目
-func (s *Service) ArchiveProject(ctx context.Context, projectID uint, archived bool, operatorID uint, operatorUsername string) (*model.TicketProject, error) {
-	if err := s.projectRepo.Archive(ctx, projectID, archived); err != nil {
-		return nil, fmt.Errorf("archive ticket project: %w", err)
-	}
-
-	project, err := s.projectRepo.GetByID(ctx, projectID)
+// CreateProject 创建项目；名称在未删除项目中唯一。
+func (s *Service) CreateProject(ctx context.Context, actor Actor, req CreateProjectRequest) (ProjectDTO, error) {
+	name, err := validateProjectName(req.Name)
 	if err != nil {
-		return nil, fmt.Errorf("get project after archive(id=%d): %w", projectID, err)
+		return ProjectDTO{}, err
 	}
+	if err := validateProjectDescription(req.Description); err != nil {
+		return ProjectDTO{}, err
+	}
+	p := modelProject(name, req.Description)
+	if err := s.projectRepo.Create(ctx, &p); err != nil {
+		if db.IsUniqueConstraintError(err) {
+			return ProjectDTO{}, ErrProjectNameConflict
+		}
+		return ProjectDTO{}, fmt.Errorf("create ticket project: %w", err)
+	}
+	s.audit(ctx, actor, "PROJECT_CREATE", slog.LevelInfo, map[string]any{"project_id": p.ID, "project_name": name})
+	return toProjectDTO(p), nil
+}
 
-	s.auditSvc.LogUser(ctx, "PROJECT_ARCHIVE", "success", formatUint(operatorID), slog.LevelInfo, map[string]any{
-		"project_id":        projectID,
-		"archived":          archived,
-		"operator_username": operatorUsername,
-	})
+// ListProjects 返回项目分页列表。
+func (s *Service) ListProjects(ctx context.Context, limit, offset int, includeArchived, includeDeleted bool) (Page[ProjectDTO], error) {
+	ps, total, err := s.projectRepo.List(ctx, limit, offset, includeArchived, includeDeleted)
+	if err != nil {
+		return Page[ProjectDTO]{}, fmt.Errorf("list ticket projects: %w", err)
+	}
+	items := make([]ProjectDTO, 0, len(ps))
+	for _, p := range ps {
+		items = append(items, toProjectDTO(p))
+	}
+	return newPage(items, total, limit, offset), nil
+}
 
-	return &project, nil
+// UpdateProject 部分更新未删除的项目（名称、描述、归档状态）。
+func (s *Service) UpdateProject(ctx context.Context, actor Actor, id uint, req UpdateProjectRequest) (ProjectDTO, error) {
+	fields := map[string]any{}
+	if req.Name != nil {
+		name, err := validateProjectName(*req.Name)
+		if err != nil {
+			return ProjectDTO{}, err
+		}
+		fields["name"] = name
+	}
+	if req.Description != nil {
+		if err := validateProjectDescription(*req.Description); err != nil {
+			return ProjectDTO{}, err
+		}
+		fields["description"] = *req.Description
+	}
+	if req.IsArchived != nil {
+		fields["is_archived"] = *req.IsArchived
+	}
+	if _, err := s.projectRepo.Get(ctx, id, false); err != nil {
+		return ProjectDTO{}, mapRepoErr(err, ErrProjectNotFound)
+	}
+	if err := s.projectRepo.UpdateFields(ctx, id, fields); err != nil {
+		if db.IsUniqueConstraintError(err) {
+			return ProjectDTO{}, ErrProjectNameConflict
+		}
+		return ProjectDTO{}, mapRepoErr(err, ErrProjectNotFound)
+	}
+	p, err := s.projectRepo.Get(ctx, id, false)
+	if err != nil {
+		return ProjectDTO{}, mapRepoErr(err, ErrProjectNotFound)
+	}
+	keys := slices.Collect(maps.Keys(fields))
+	s.audit(ctx, actor, "PROJECT_UPDATE", slog.LevelInfo, map[string]any{"project_id": id, "fields": keys})
+	return toProjectDTO(p), nil
+}
+
+// DeleteProject 软删除项目；仍有未删除工单时拒绝。
+func (s *Service) DeleteProject(ctx context.Context, actor Actor, id uint) error {
+	if _, err := s.projectRepo.Get(ctx, id, false); err != nil {
+		return mapRepoErr(err, ErrProjectNotFound)
+	}
+	n, err := s.ticketRepo.CountActiveByProject(ctx, id)
+	if err != nil {
+		return fmt.Errorf("count tickets of project %d: %w", id, err)
+	}
+	if n > 0 {
+		return ErrProjectHasTickets
+	}
+	if err := s.projectRepo.SoftDelete(ctx, id); err != nil {
+		return mapRepoErr(err, ErrProjectNotFound)
+	}
+	s.audit(ctx, actor, "PROJECT_DELETE", slog.LevelInfo, map[string]any{"project_id": id})
+	return nil
+}
+
+func modelProject(name, description string) model.TicketProject {
+	return model.TicketProject{Name: name, Description: description}
 }

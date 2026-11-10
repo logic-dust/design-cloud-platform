@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"design-cloud-engine/internal/db"
+	"design-cloud-engine/internal/platform/concurrency"
 
 	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
@@ -103,10 +104,15 @@ func snapshotJanitors() []janitorEntry {
 // 守卫——那会把 interval 钉死在首次调用上，反而让需要不同周期的测试相互干扰。
 func StartJanitors(interval time.Duration) (stop func()) {
 	done := make(chan struct{})
+	exited := make(chan struct{})
 	var once sync.Once
-	stop = func() { once.Do(func() { close(done) }) }
+	stop = func() {
+		once.Do(func() { close(done) })
+		<-exited
+	}
 
 	go func() {
+		defer close(exited)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -337,6 +343,25 @@ func (c *TTLCache[K, V]) setLockedIfGeneration(key K, value V, ttl time.Duration
 	return true
 }
 
+// DeleteFunc removes every entry whose key satisfies pred and returns the number
+// removed. 与 Invalidate 一致递增代次：发起于本次失效之前的在途回填不会被写回。
+func (c *TTLCache[K, V]) DeleteFunc(pred func(K) bool) int {
+	if c == nil || pred == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.gen.Add(1)
+	removed := 0
+	for k := range c.data {
+		if pred(k) {
+			delete(c.data, k)
+			removed++
+		}
+	}
+	return removed
+}
+
 // Clear removes all entries from the cache.
 // 同时递增代次：在途回填不会被写回；GetWithTTL 的 flight key 含代次，清空后的
 // 新调用也不会加入清空前的 in-flight fetch。
@@ -414,7 +439,12 @@ type Invalidator struct {
 	mu         sync.RWMutex
 	versions   map[string]int64
 	registered map[string]*registration
-	cancel     context.CancelFunc
+
+	lifecycleMu sync.Mutex
+	started     bool
+	stopped     bool
+	cancel      context.CancelFunc
+	workers     sync.WaitGroup
 }
 
 // NewInvalidator 创建一个新的缓存失效协调器
@@ -446,13 +476,18 @@ func (i *Invalidator) BumpTx(ctx context.Context, tx *gorm.DB, name string) erro
 
 // Start 启动共享轮询。isSingleNode 为 true 时跳过轮询。
 func (i *Invalidator) Start(ctx context.Context, isSingleNode bool) {
+	i.lifecycleMu.Lock()
+	if i.started || i.stopped {
+		i.lifecycleMu.Unlock()
+		return
+	}
+	i.started = true
+	i.lifecycleMu.Unlock()
+
 	if isSingleNode {
 		i.logger.Info("running in single-node mode, disabling cache invalidator polling")
 		return
 	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	i.cancel = cancel
 
 	i.mu.RLock()
 	topics := len(i.registered)
@@ -462,19 +497,35 @@ func (i *Invalidator) Start(ctx context.Context, isSingleNode bool) {
 		return
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
+	i.lifecycleMu.Lock()
+	if i.stopped {
+		i.lifecycleMu.Unlock()
+		cancel()
+		return
+	}
+	i.cancel = cancel
+	i.workers.Add(1)
+	i.lifecycleMu.Unlock()
+
 	go i.pollLoop(ctx)
 	i.logger.Info("started shared cache invalidator polling",
 		"topics", topics, "interval", InvalidatorPollInterval)
 }
 
-// Stop 停止轮询
+// Stop 停止轮询并等待数据库查询与已派发的回调完成。
 func (i *Invalidator) Stop() {
+	i.lifecycleMu.Lock()
+	i.stopped = true
 	if i.cancel != nil {
 		i.cancel()
 	}
+	i.lifecycleMu.Unlock()
+	i.workers.Wait()
 }
 
 func (i *Invalidator) pollLoop(ctx context.Context) {
+	defer i.workers.Done()
 	ticker := time.NewTicker(InvalidatorPollInterval)
 	defer ticker.Stop()
 
@@ -527,13 +578,26 @@ func (i *Invalidator) pollOnce(ctx context.Context) {
 	for _, d := range pending {
 		i.logger.Info("cache invalidation triggered by version bump",
 			"name", d.name, "old_version", d.oldVer, "new_version", d.newVer)
-		callbacks := d.callbacks
-		go func() {
-			for _, cb := range callbacks {
-				if cb != nil {
-					cb()
-				}
-			}
-		}()
+		i.dispatchCallbacks(d.callbacks)
 	}
+}
+
+func (i *Invalidator) dispatchCallbacks(callbacks []func()) {
+	i.lifecycleMu.Lock()
+	if i.stopped {
+		i.lifecycleMu.Unlock()
+		return
+	}
+	i.workers.Add(1)
+	i.lifecycleMu.Unlock()
+
+	go func() {
+		defer i.workers.Done()
+		defer concurrency.SafeRecover(i.logger, "cache-invalidation-callback")()
+		for _, cb := range callbacks {
+			if cb != nil {
+				cb()
+			}
+		}
+	}()
 }

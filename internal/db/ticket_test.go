@@ -2,16 +2,20 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 )
 
-func newTicketRepoForTest(t *testing.T) (*Store, *TicketRepo, *TicketProjectRepo, *UserRepo) {
+func newTicketRepoForTest(t *testing.T) (*TicketRepo, *TicketProjectRepo, *UserRepo) {
 	t.Helper()
 	store, err := NewStore(config.Database{
 		Type: config.DatabaseTypeSQLite,
@@ -20,16 +24,12 @@ func newTicketRepoForTest(t *testing.T) (*Store, *TicketRepo, *TicketProjectRepo
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Fatalf("close store: %v", err)
-		}
-	})
+	t.Cleanup(func() { _ = store.Close() })
 	if err := store.Migrate(); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	repos := NewRepos(store)
-	return store, repos.Ticket, repos.TicketProject, repos.User
+	return repos.Ticket, repos.TicketProject, repos.User
 }
 
 func seedTicketProject(ctx context.Context, t *testing.T, repo *TicketProjectRepo, name string) uint {
@@ -50,372 +50,372 @@ func seedTicketUser(ctx context.Context, t *testing.T, repo *UserRepo, name stri
 	return user.ID
 }
 
-func seedTicket(ctx context.Context, t *testing.T, repo *TicketRepo, projectID, reporterID, assigneeID uint, title string, status model.TicketStatus) uint {
+func seedTicket(ctx context.Context, t *testing.T, repo *TicketRepo, tk model.Ticket) uint {
 	t.Helper()
-	ticket := &model.Ticket{
-		ProjectID:  projectID,
-		Type:       model.TicketTypeTask,
-		Title:      title,
-		ReporterID: reporterID,
-		AssigneeID: assigneeID,
-		Status:     status,
-		SortOrder:  1000.0,
+	if tk.Title == "" {
+		tk.Title = "t"
 	}
-	if err := repo.Create(ctx, ticket); err != nil {
+	if err := repo.Create(ctx, &tk); err != nil {
 		t.Fatalf("create ticket: %v", err)
 	}
-	return ticket.ID
+	return tk.ID
 }
 
-// --- TicketStore Tests ---
-
-func TestTicketStore_CreateAndGetByID(t *testing.T) {
+func TestTicketRepo_GetPreloadsAndHidesDeleted(t *testing.T) {
 	t.Parallel()
-	_, ticketRepo, projectRepo, userRepo := newTicketRepoForTest(t)
 	ctx := context.Background()
+	repo, projects, users := newTicketRepoForTest(t)
+	pid := seedTicketProject(ctx, t, projects, "p")
+	alice := seedTicketUser(ctx, t, users, "alice")
+	bob := seedTicketUser(ctx, t, users, "bob")
+	id := seedTicket(ctx, t, repo, model.Ticket{ProjectID: pid, ReporterID: alice, AssigneeID: &bob,
+		Attachments: []model.TicketAttachment{{Location: "home", Path: "a.txt", Name: "a.txt"}}})
 
-	projectID := seedTicketProject(ctx, t, projectRepo, "Test")
-	reporterID := seedTicketUser(ctx, t, userRepo, "reporter1")
-	assigneeID := seedTicketUser(ctx, t, userRepo, "assignee1")
-
-	ticketID := seedTicket(ctx, t, ticketRepo, projectID, reporterID, assigneeID, "Test Ticket", model.TicketStatusToDo)
-
-	got, err := ticketRepo.GetByID(ctx, ticketID)
+	got, err := repo.Get(ctx, id, false)
 	if err != nil {
-		t.Fatalf("GetByID: %v", err)
+		t.Fatal(err)
 	}
-	if got.ID != ticketID {
-		t.Fatalf("expected id %d, got %d", ticketID, got.ID)
+	if got.Project.Name != "p" || got.Reporter.Username != "alice" || got.Assignee == nil || got.Assignee.Username != "bob" {
+		t.Fatalf("refs not preloaded: %+v", got)
 	}
-	if got.Title != "Test Ticket" {
-		t.Fatalf("expected title 'Test Ticket', got '%s'", got.Title)
+	if got.Reporter.Status != 0 {
+		t.Fatal("reporter preload must only select id and username")
 	}
-	if got.ProjectID != projectID {
-		t.Fatalf("expected projectID %d, got %d", projectID, got.ProjectID)
+	if len(got.Attachments) != 1 || got.Attachments[0].Path != "a.txt" || got.Version != 1 {
+		t.Fatalf("unexpected ticket: %+v", got)
 	}
-	if got.ReporterID != reporterID {
-		t.Fatalf("expected reporterID %d, got %d", reporterID, got.ReporterID)
+
+	if err := repo.SoftDelete(ctx, []uint{id}); err != nil {
+		t.Fatal(err)
 	}
-	if got.AssigneeID != assigneeID {
-		t.Fatalf("expected assigneeID %d, got %d", assigneeID, got.AssigneeID)
+	if _, err := repo.Get(ctx, id, false); !errors.Is(err, contract.ErrNotFound) {
+		t.Fatalf("deleted ticket visible: %v", err)
+	}
+	if _, err := repo.Get(ctx, id, true); err != nil {
+		t.Fatalf("includeDeleted: %v", err)
+	}
+	if err := repo.Restore(ctx, []uint{id}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := repo.Get(ctx, id, false); err != nil || got.Version != 2 {
+		t.Fatalf("restore: %v version=%d", err, got.Version)
 	}
 }
 
-func TestTicketStore_GetByID_NotFound(t *testing.T) {
+func TestTicketRepo_UpdateVersioned(t *testing.T) {
 	t.Parallel()
-	_, ticketRepo, _, _ := newTicketRepoForTest(t)
 	ctx := context.Background()
+	repo, projects, users := newTicketRepoForTest(t)
+	pid := seedTicketProject(ctx, t, projects, "p")
+	u := seedTicketUser(ctx, t, users, "u")
+	id := seedTicket(ctx, t, repo, model.Ticket{ProjectID: pid, ReporterID: u})
 
-	_, err := ticketRepo.GetByID(ctx, 99999)
-	if err == nil {
-		t.Fatal("expected error for non-existent ticket")
+	if err := repo.UpdateVersioned(ctx, id, 1, map[string]any{"title": "new"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpdateVersioned(ctx, id, 1, map[string]any{"title": "stale"}); !errors.Is(err, ErrStaleVersion) {
+		t.Fatalf("stale: %v", err)
+	}
+	if err := repo.UpdateVersioned(ctx, 999, 1, map[string]any{"title": "x"}); !errors.Is(err, contract.ErrNotFound) {
+		t.Fatalf("missing: %v", err)
+	}
+	got, _ := repo.Get(ctx, id, false)
+	if got.Title != "new" || got.Version != 2 {
+		t.Fatalf("got %q v%d", got.Title, got.Version)
 	}
 }
 
-func TestTicketStore_UpdateFields(t *testing.T) {
+func TestTicketRepo_ListFiltersAndSorting(t *testing.T) {
 	t.Parallel()
-	_, ticketRepo, projectRepo, userRepo := newTicketRepoForTest(t)
 	ctx := context.Background()
+	repo, projects, users := newTicketRepoForTest(t)
+	p1 := seedTicketProject(ctx, t, projects, "p1")
+	p2 := seedTicketProject(ctx, t, projects, "p2")
+	a := seedTicketUser(ctx, t, users, "a")
+	b := seedTicketUser(ctx, t, users, "b")
+	due := time.Now().Add(48 * time.Hour)
 
-	projectID := seedTicketProject(ctx, t, projectRepo, "Test")
-	reporterID := seedTicketUser(ctx, t, userRepo, "reporter2")
-	assigneeID := seedTicketUser(ctx, t, userRepo, "assignee2")
-	ticketID := seedTicket(ctx, t, ticketRepo, projectID, reporterID, assigneeID, "Original", model.TicketStatusToDo)
+	ids := map[string]uint{}
+	for _, tk := range []model.Ticket{
+		{ProjectID: p1, ReporterID: a, AssigneeID: &b, Title: "Login bug", Status: model.TicketStatusToDo, Priority: model.TicketPriorityHigh, SortOrder: 2},
+		{ProjectID: p1, ReporterID: a, Title: "100% coverage", Status: model.TicketStatusInProgress, Priority: model.TicketPriorityLow, SortOrder: 1, DueDate: &due},
+		{ProjectID: p1, ReporterID: b, AssigneeID: &a, Title: "docs", Status: model.TicketStatusDone, SortOrder: 3},
+		{ProjectID: p2, ReporterID: a, Title: "other", Status: model.TicketStatusToDo, SortOrder: 1},
+	} {
+		ids[tk.Title] = seedTicket(ctx, t, repo, tk)
+	}
+	titles := func(f TicketFilter) string {
+		t.Helper()
+		if f.Limit == 0 {
+			f.Limit = 50
+		}
+		got, _, err := repo.List(ctx, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]string, 0, len(got))
+		for _, tk := range got {
+			out = append(out, tk.Title)
+		}
+		return fmt.Sprint(out)
+	}
 
-	err := ticketRepo.UpdateFields(ctx, ticketID, map[string]any{
-		"title":  "Updated",
-		"status": model.TicketStatusInProgress,
+	cases := []struct {
+		name string
+		f    TicketFilter
+		want string
+	}{
+		{"project sortOrder", TicketFilter{ProjectID: &p1}, "[100% coverage Login bug docs]"},
+		{"multi status", TicketFilter{ProjectID: &p1, Statuses: []model.TicketStatus{model.TicketStatusToDo, model.TicketStatusDone}}, "[Login bug docs]"},
+		{"unassigned", TicketFilter{Unassigned: true}, "[100% coverage other]"},
+		{"assignee", TicketFilter{AssigneeID: &b}, "[Login bug]"},
+		{"title q case-insensitive", TicketFilter{TitleQuery: "LOGIN"}, "[Login bug]"},
+		{"title q literal percent", TicketFilter{TitleQuery: "0%"}, "[100% coverage]"},
+		{"priority desc", TicketFilter{ProjectID: &p1, Sort: TicketSortPriority, Desc: true}, "[Login bug docs 100% coverage]"},
+		{"dueDate nulls last", TicketFilter{ProjectID: &p1, Sort: TicketSortDueDate}, "[100% coverage Login bug docs]"},
+	}
+	for _, tc := range cases {
+		if got := titles(tc.f); got != tc.want {
+			t.Errorf("%s: got %s, want %s", tc.name, got, tc.want)
+		}
+	}
+
+	if _, total, _ := repo.List(ctx, TicketFilter{Limit: 1}); total != 4 {
+		t.Fatalf("total=%d", total)
+	}
+}
+
+func TestTicketRepo_ListKeysetSortOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repo, projects, users := newTicketRepoForTest(t)
+	pid := seedTicketProject(ctx, t, projects, "p")
+	u := seedTicketUser(ctx, t, users, "u")
+
+	// 相同 sortOrder 多条 + 递增值，验证 id 兜底与 keyset/offset 一致。
+	var ids []uint
+	for i, so := range []float64{10, 10, 10, 20, 30, 40} {
+		id := seedTicket(ctx, t, repo, model.Ticket{
+			ProjectID: pid, ReporterID: u, Title: fmt.Sprintf("t%d", i), SortOrder: so,
+		})
+		ids = append(ids, id)
+	}
+
+	pageIDs := func(f TicketFilter) (ids []uint, total int64) {
+		t.Helper()
+		got, total, err := repo.List(ctx, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]uint, len(got))
+		for i, tk := range got {
+			out[i] = tk.ID
+		}
+		return out, total
+	}
+
+	base := TicketFilter{ProjectID: &pid, Sort: TicketSortOrder, Limit: 2}
+	p0, total0 := pageIDs(base)
+	if len(p0) != 2 || p0[0] != ids[0] || p0[1] != ids[1] || total0 != 6 {
+		t.Fatalf("page0=%v total=%d want [%d %d] total=6", p0, total0, ids[0], ids[1])
+	}
+	afterSort := 10.0
+	p1Keyset, totalKS := pageIDs(TicketFilter{
+		ProjectID: &pid, Sort: TicketSortOrder, Limit: 2,
+		AfterSort: &afterSort, AfterID: &p0[1],
 	})
+	if totalKS != -1 {
+		t.Fatalf("keyset total=%d want -1 (count skipped)", totalKS)
+	}
+	p1Offset, _ := pageIDs(TicketFilter{ProjectID: &pid, Sort: TicketSortOrder, Limit: 2, Offset: 2})
+	if fmt.Sprint(p1Keyset) != fmt.Sprint(p1Offset) || fmt.Sprint(p1Keyset) != fmt.Sprint([]uint{ids[2], ids[3]}) {
+		t.Fatalf("keyset=%v offset=%v want [%d %d]", p1Keyset, p1Offset, ids[2], ids[3])
+	}
+
+	afterSort = 20
+	p2, _ := pageIDs(TicketFilter{
+		ProjectID: &pid, Sort: TicketSortOrder, Limit: 2,
+		AfterSort: &afterSort, AfterID: &ids[3],
+	})
+	if fmt.Sprint(p2) != fmt.Sprint([]uint{ids[4], ids[5]}) {
+		t.Fatalf("page2=%v", p2)
+	}
+
+	// desc：游标比较符反向
+	desc0, _ := pageIDs(TicketFilter{ProjectID: &pid, Sort: TicketSortOrder, Desc: true, Limit: 2})
+	if desc0[0] != ids[5] || desc0[1] != ids[4] {
+		t.Fatalf("desc0=%v", desc0)
+	}
+	afterSort = 30
+	desc1, _ := pageIDs(TicketFilter{
+		ProjectID: &pid, Sort: TicketSortOrder, Desc: true, Limit: 2,
+		AfterSort: &afterSort, AfterID: &ids[4],
+	})
+	desc1Offset, _ := pageIDs(TicketFilter{ProjectID: &pid, Sort: TicketSortOrder, Desc: true, Limit: 2, Offset: 2})
+	if fmt.Sprint(desc1) != fmt.Sprint(desc1Offset) {
+		t.Fatalf("desc keyset=%v offset=%v", desc1, desc1Offset)
+	}
+
+	// 过滤变更后旧游标：结果为空（不报错）；keyset 不跑 COUNT → total=-1
+	other := seedTicketProject(ctx, t, projects, "other")
+	empty, total, err := repo.List(ctx, TicketFilter{
+		ProjectID: &other, Sort: TicketSortOrder, Limit: 2,
+		AfterSort: &afterSort, AfterID: &ids[4],
+	})
+	if err != nil || len(empty) != 0 || total != -1 {
+		t.Fatalf("stale cursor: items=%d total=%d err=%v", len(empty), total, err)
+	}
+
+	_, _, err = repo.List(ctx, TicketFilter{
+		Sort: TicketSortUpdatedAt, Limit: 1, AfterSort: &afterSort, AfterID: &ids[0],
+	})
+	if err == nil || !strings.Contains(err.Error(), "keyset pagination only supports") {
+		t.Fatalf("want unsupported sort err, got %v", err)
+	}
+
+	// SQLite EXPLAIN：board 过滤 + keyset 应走 idx_tickets_board；全局 keyset 走 idx_tickets_sort_id。
+	sqlDB, err := repo.store.DB().DB()
 	if err != nil {
-		t.Fatalf("UpdateFields: %v", err)
+		t.Fatal(err)
 	}
-
-	got, err := ticketRepo.GetByID(ctx, ticketID)
-	if err != nil {
-		t.Fatalf("GetByID after update: %v", err)
-	}
-	if got.Title != "Updated" {
-		t.Fatalf("expected title 'Updated', got '%s'", got.Title)
-	}
-	if got.Status != model.TicketStatusInProgress {
-		t.Fatalf("expected status InProgress, got %d", got.Status)
-	}
-}
-
-func TestTicketStore_SoftDeleteAndHardDelete(t *testing.T) {
-	t.Parallel()
-	_, ticketRepo, projectRepo, userRepo := newTicketRepoForTest(t)
-	ctx := context.Background()
-
-	projectID := seedTicketProject(ctx, t, projectRepo, "Test")
-	reporterID := seedTicketUser(ctx, t, userRepo, "reporter3")
-	assigneeID := seedTicketUser(ctx, t, userRepo, "assignee3")
-	ticketID := seedTicket(ctx, t, ticketRepo, projectID, reporterID, assigneeID, "ToDelete", model.TicketStatusToDo)
-
-	// 软删除
-	if err := ticketRepo.SoftDeleteByIDs(ctx, []uint{ticketID}); err != nil {
-		t.Fatalf("SoftDeleteByIDs: %v", err)
-	}
-
-	// 正常查询不返回（List 默认过滤）
-	results, total, err := ticketRepo.List(ctx, TicketFilter{Limit: 100})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	for _, r := range results {
-		if r.ID == ticketID {
-			t.Fatal("expected soft-deleted ticket not to appear in List")
+	explainUsesIndex := func(sql string, args ...any) {
+		t.Helper()
+		rows, qerr := sqlDB.Query("EXPLAIN QUERY PLAN "+sql, args...)
+		if qerr != nil {
+			t.Fatal(qerr)
+		}
+		defer rows.Close()
+		var plan strings.Builder
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan.WriteString(detail)
+			plan.WriteByte('\n')
+		}
+		s := plan.String()
+		if !strings.Contains(s, "INDEX") {
+			t.Fatalf("expected index use, plan:\n%s", s)
 		}
 	}
-	if total != 0 {
-		t.Fatalf("expected 0 after deleting all tickets, got %d", total)
-	}
+	explainUsesIndex(
+		`SELECT id FROM tickets WHERE deleted_at IS NULL AND project_id = ? AND ((sort_order > ?) OR (sort_order = ? AND id > ?)) ORDER BY sort_order ASC, id ASC LIMIT 2`,
+		pid, 10.0, 10.0, p0[1],
+	)
+	explainUsesIndex(
+		`SELECT id FROM tickets WHERE deleted_at IS NULL AND ((sort_order > ?) OR (sort_order = ? AND id > ?)) ORDER BY sort_order ASC, id ASC LIMIT 2`,
+		10.0, 10.0, p0[1],
+	)
+}
 
-	// GetByID 仍可查到（管理员用）
-	got, err := ticketRepo.GetByID(ctx, ticketID)
-	if err != nil {
-		t.Fatalf("GetByID after soft delete should still work: %v", err)
-	}
-	if got.ID != ticketID {
-		t.Fatalf("expected id %d, got %d", ticketID, got.ID)
-	}
+func TestTicketRepo_ColumnAndCounts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repo, projects, users := newTicketRepoForTest(t)
+	pid := seedTicketProject(ctx, t, projects, "p")
+	u := seedTicketUser(ctx, t, users, "u")
+	a := seedTicket(ctx, t, repo, model.Ticket{ProjectID: pid, ReporterID: u, SortOrder: 20})
+	b := seedTicket(ctx, t, repo, model.Ticket{ProjectID: pid, ReporterID: u, SortOrder: 10})
+	seedTicket(ctx, t, repo, model.Ticket{ProjectID: pid, ReporterID: u, Status: model.TicketStatusDone, SortOrder: 5})
 
-	// 硬删除
-	if err := ticketRepo.HardDeleteByIDs(ctx, []uint{ticketID}); err != nil {
-		t.Fatalf("HardDeleteByIDs: %v", err)
+	col, err := repo.Column(ctx, pid, model.TicketStatusToDo)
+	if err != nil || len(col) != 2 || col[0].ID != b || col[1].ID != a {
+		t.Fatalf("column=%v err=%v", col, err)
 	}
-
-	// 硬删除后不可查
-	_, err = ticketRepo.GetByID(ctx, ticketID)
-	if err == nil {
-		t.Fatal("expected error after hard delete")
+	if max, _ := repo.MaxSortOrder(ctx, pid, model.TicketStatusToDo); max != 20 {
+		t.Fatalf("max=%v", max)
+	}
+	if err := repo.SetSortOrders(ctx, []TicketPosition{{ID: a, SortOrder: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := repo.Get(ctx, a, false); got.SortOrder != 1 || got.Version != 1 {
+		t.Fatalf("set sort: %+v", got)
+	}
+	counts, _ := repo.CountByStatus(ctx, pid)
+	if counts[model.TicketStatusToDo] != 2 || counts[model.TicketStatusDone] != 1 {
+		t.Fatalf("counts=%v", counts)
+	}
+	if n, _ := repo.CountActiveByProject(ctx, pid); n != 3 {
+		t.Fatalf("active=%d", n)
+	}
+	times, err := repo.TimesInRange(ctx, "created_at", pid, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	if err != nil || len(times) != 3 {
+		t.Fatalf("times=%v err=%v", times, err)
 	}
 }
 
-func TestTicketStore_ListWithFilters(t *testing.T) {
+func TestTicketRepo_CommentsEventsAndHardDelete(t *testing.T) {
 	t.Parallel()
-	_, ticketRepo, projectRepo, userRepo := newTicketRepoForTest(t)
 	ctx := context.Background()
+	repo, projects, users := newTicketRepoForTest(t)
+	pid := seedTicketProject(ctx, t, projects, "p")
+	u := seedTicketUser(ctx, t, users, "u")
+	id := seedTicket(ctx, t, repo, model.Ticket{ProjectID: pid, ReporterID: u})
 
-	projectID := seedTicketProject(ctx, t, projectRepo, "Test")
-	reporterID := seedTicketUser(ctx, t, userRepo, "reporter4")
-	assigneeID := seedTicketUser(ctx, t, userRepo, "assignee4")
-
-	seedTicket(ctx, t, ticketRepo, projectID, reporterID, assigneeID, "Ticket A", model.TicketStatusToDo)
-	seedTicket(ctx, t, ticketRepo, projectID, reporterID, assigneeID, "Ticket B", model.TicketStatusInProgress)
-	seedTicket(ctx, t, ticketRepo, projectID, reporterID, assigneeID, "Ticket C", model.TicketStatusDone)
-
-	// 按状态过滤
-	results, total, err := ticketRepo.List(ctx, TicketFilter{Status: new(model.TicketStatusInProgress)})
-	if err != nil {
-		t.Fatalf("List: %v", err)
+	c := &model.TicketComment{TicketID: id, AuthorID: u, Body: "hi"}
+	if err := repo.CreateComment(ctx, c); err != nil {
+		t.Fatal(err)
 	}
-	if total != 1 {
-		t.Fatalf("expected 1 ticket with status InProgress, got %d", total)
+	if err := repo.CreateEvents(ctx, []model.TicketEvent{{TicketID: id, ActorID: u, Action: model.TicketEventCreated}}); err != nil {
+		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Title != "Ticket B" {
-		t.Fatalf("expected 'Ticket B', got '%s'", results[0].Title)
+	got, err := repo.GetComment(ctx, id, c.ID)
+	if err != nil || got.Author.Username != "u" {
+		t.Fatalf("comment=%+v err=%v", got, err)
+	}
+	if _, err := repo.GetComment(ctx, id+1, c.ID); !errors.Is(err, contract.ErrNotFound) {
+		t.Fatalf("comment of other ticket: %v", err)
+	}
+	if list, total, _ := repo.ListEvents(ctx, id, 10, 0); total != 1 || list[0].Actor.Username != "u" {
+		t.Fatalf("events=%+v", list)
 	}
 
-	// 分页
-	limit := 2
-	paged, pTotal, err := ticketRepo.List(ctx, TicketFilter{Limit: limit})
-	if err != nil {
-		t.Fatalf("List with limit: %v", err)
+	if err := repo.HardDelete(ctx, []uint{id}); err != nil {
+		t.Fatal(err)
 	}
-	if pTotal != 3 {
-		t.Fatalf("expected total 3, got %d", pTotal)
+	if _, total, _ := repo.ListComments(ctx, id, 10, 0); total != 0 {
+		t.Fatal("comments not removed")
 	}
-	if len(paged) != 2 {
-		t.Fatalf("expected 2 items, got %d", len(paged))
+	if _, total, _ := repo.ListEvents(ctx, id, 10, 0); total != 0 {
+		t.Fatal("events not removed")
 	}
 }
 
-func TestTicketStore_CountByProject(t *testing.T) {
+func TestTicketProjectRepo(t *testing.T) {
 	t.Parallel()
-	_, ticketRepo, projectRepo, userRepo := newTicketRepoForTest(t)
 	ctx := context.Background()
-
-	projectID := seedTicketProject(ctx, t, projectRepo, "Test")
-	reporterID := seedTicketUser(ctx, t, userRepo, "reporter5")
-	assigneeID := seedTicketUser(ctx, t, userRepo, "assignee5")
-
-	seedTicket(ctx, t, ticketRepo, projectID, reporterID, assigneeID, "A", model.TicketStatusToDo)
-	seedTicket(ctx, t, ticketRepo, projectID, reporterID, assigneeID, "B", model.TicketStatusInProgress)
-
-	count, err := ticketRepo.CountByProject(ctx, projectID, false)
-	if err != nil {
-		t.Fatalf("CountByProject: %v", err)
+	_, projects, _ := newTicketRepoForTest(t)
+	a := seedTicketProject(ctx, t, projects, "a")
+	b := seedTicketProject(ctx, t, projects, "b")
+	if err := projects.UpdateFields(ctx, b, map[string]any{"is_archived": true}); err != nil {
+		t.Fatal(err)
 	}
-	if count != 2 {
-		t.Fatalf("expected 2, got %d", count)
+	if list, total, _ := projects.List(ctx, 10, 0, false, false); total != 1 || list[0].ID != a {
+		t.Fatalf("active list=%v", list)
 	}
-}
-
-func TestTicketStore_CountByStatus(t *testing.T) {
-	t.Parallel()
-	_, ticketRepo, projectRepo, userRepo := newTicketRepoForTest(t)
-	ctx := context.Background()
-
-	projectID := seedTicketProject(ctx, t, projectRepo, "Test")
-	reporterID := seedTicketUser(ctx, t, userRepo, "reporter6")
-	assigneeID := seedTicketUser(ctx, t, userRepo, "assignee6")
-
-	seedTicket(ctx, t, ticketRepo, projectID, reporterID, assigneeID, "A", model.TicketStatusToDo)
-	seedTicket(ctx, t, ticketRepo, projectID, reporterID, assigneeID, "B", model.TicketStatusToDo)
-	seedTicket(ctx, t, ticketRepo, projectID, reporterID, assigneeID, "C", model.TicketStatusDone)
-
-	counts, err := ticketRepo.CountByStatus(ctx, 0)
-	if err != nil {
-		t.Fatalf("CountByStatus: %v", err)
+	if _, total, _ := projects.List(ctx, 10, 0, true, false); total != 2 {
+		t.Fatal("includeArchived")
 	}
-	if counts[model.TicketStatusToDo] != 2 {
-		t.Fatalf("expected 2 ToDo, got %d", counts[model.TicketStatusToDo])
+	if err := projects.SoftDelete(ctx, a); err != nil {
+		t.Fatal(err)
 	}
-	if counts[model.TicketStatusDone] != 1 {
-		t.Fatalf("expected 1 Done, got %d", counts[model.TicketStatusDone])
+	if _, err := projects.Get(ctx, a, false); !errors.Is(err, contract.ErrNotFound) {
+		t.Fatalf("deleted project visible: %v", err)
 	}
-}
-
-func TestTicketStore_GetMaxSortOrderInStatus(t *testing.T) {
-	t.Parallel()
-	_, ticketRepo, projectRepo, userRepo := newTicketRepoForTest(t)
-	ctx := context.Background()
-
-	projectID := seedTicketProject(ctx, t, projectRepo, "Test")
-	reporterID := seedTicketUser(ctx, t, userRepo, "reporter7")
-	assigneeID := seedTicketUser(ctx, t, userRepo, "assignee7")
-
-	ticket := &model.Ticket{
-		ProjectID: projectID, Type: model.TicketTypeTask, Title: "Sort Test",
-		ReporterID: reporterID, AssigneeID: assigneeID,
-		Status: model.TicketStatusToDo, SortOrder: 5000.0,
+	if err := projects.UpdateFields(ctx, a, map[string]any{"name": "x"}); !errors.Is(err, contract.ErrNotFound) {
+		t.Fatalf("update deleted: %v", err)
 	}
-	if err := ticketRepo.Create(ctx, ticket); err != nil {
-		t.Fatalf("create: %v", err)
+	if _, total, _ := projects.List(ctx, 10, 0, true, true); total != 2 {
+		t.Fatal("includeDeleted")
 	}
 
-	maxSort, err := ticketRepo.GetMaxSortOrderInStatus(ctx, projectID, model.TicketStatusToDo)
-	if err != nil {
-		t.Fatalf("GetMaxSortOrderInStatus: %v", err)
+	// 名称仅在未删除项目中唯一：活跃重名应失败，软删后可复用同名。
+	if err := projects.Create(ctx, &model.TicketProject{Name: "b"}); !IsUniqueConstraintError(err) {
+		t.Fatalf("duplicate active name: err=%v, want unique violation", err)
 	}
-	if maxSort != 5000.0 {
-		t.Fatalf("expected 5000, got %f", maxSort)
-	}
-}
-
-// --- TicketProjectStore Tests ---
-
-func TestTicketProjectStore_CreateAndGetByID(t *testing.T) {
-	t.Parallel()
-	_, _, projectRepo, _ := newTicketRepoForTest(t)
-	ctx := context.Background()
-
-	project := &model.TicketProject{Name: "Design Cloud"}
-	if err := projectRepo.Create(ctx, project); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if project.ID == 0 {
-		t.Fatal("expected non-zero ID after create")
-	}
-
-	got, err := projectRepo.GetByID(ctx, project.ID)
-	if err != nil {
-		t.Fatalf("GetByID: %v", err)
-	}
-	if got.Name != "Design Cloud" {
-		t.Fatalf("expected 'Design Cloud', got '%s'", got.Name)
-	}
-}
-
-func TestTicketProjectStore_List(t *testing.T) {
-	t.Parallel()
-	_, _, projectRepo, _ := newTicketRepoForTest(t)
-	ctx := context.Background()
-
-	for i := range 3 {
-		name := fmt.Sprintf("Project %d", i)
-		if err := projectRepo.Create(ctx, &model.TicketProject{Name: name}); err != nil {
-			t.Fatalf("create project %s: %v", name, err)
-		}
-	}
-
-	projects, total, err := projectRepo.List(ctx, 10, 0, true, false)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if total != 3 {
-		t.Fatalf("expected 3 projects, got %d", total)
-	}
-	if len(projects) != 3 {
-		t.Fatalf("expected 3 items, got %d", len(projects))
-	}
-}
-
-func TestTicketProjectStore_Archive(t *testing.T) {
-	t.Parallel()
-	_, _, projectRepo, _ := newTicketRepoForTest(t)
-	ctx := context.Background()
-
-	project := &model.TicketProject{Name: "Archivable"}
-	if err := projectRepo.Create(ctx, project); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	if err := projectRepo.Archive(ctx, project.ID, true); err != nil {
-		t.Fatalf("Archive: %v", err)
-	}
-
-	got, err := projectRepo.GetByID(ctx, project.ID)
-	if err != nil {
-		t.Fatalf("GetByID: %v", err)
-	}
-	if !got.IsArchived {
-		t.Fatal("expected project to be archived")
-	}
-
-	// 取消归档
-	if err := projectRepo.Archive(ctx, project.ID, false); err != nil {
-		t.Fatalf("Unarchive: %v", err)
-	}
-	got2, _ := projectRepo.GetByID(ctx, project.ID)
-	if got2.IsArchived {
-		t.Fatal("expected project to be unarchived")
-	}
-}
-
-func TestTicketProjectStore_SoftDelete(t *testing.T) {
-	t.Parallel()
-	_, _, projectRepo, _ := newTicketRepoForTest(t)
-	ctx := context.Background()
-
-	project := &model.TicketProject{Name: "Deletable"}
-	if err := projectRepo.Create(ctx, project); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	if err := projectRepo.SoftDelete(ctx, project.ID); err != nil {
-		t.Fatalf("SoftDelete: %v", err)
-	}
-
-	// 软删除后 List 不返回
-	projects, total, err := projectRepo.List(ctx, 10, 0, true, false)
-	if err != nil {
-		t.Fatalf("List after soft delete: %v", err)
-	}
-	if total != 0 {
-		t.Fatalf("expected 0 projects after soft delete, got %d", total)
-	}
-	if len(projects) != 0 {
-		t.Fatalf("expected 0 items, got %d", len(projects))
-	}
-
-	// GetByID 仍可查到（管理员用）
-	got, err := projectRepo.GetByID(ctx, project.ID)
-	if err != nil {
-		t.Fatalf("GetByID after soft delete should still work: %v", err)
-	}
-	if got.ID != project.ID {
-		t.Fatalf("expected id %d, got %d", project.ID, got.ID)
+	if err := projects.Create(ctx, &model.TicketProject{Name: "a"}); err != nil {
+		t.Fatalf("recreate soft-deleted name: %v", err)
 	}
 }

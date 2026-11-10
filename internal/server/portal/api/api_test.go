@@ -1,112 +1,20 @@
 package api
 
 import (
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/portal/httputil"
 
+	"design-cloud-engine/internal/contract"
 	"github.com/labstack/echo/v5"
 )
-
-// ============================================================================
-// httputil.ClassifyError
-// ============================================================================
-
-func TestClassifyError(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		err          error
-		wantStatus   int
-		wantContains string
-	}{
-		{
-			name:         "common.ErrNotFound → 404",
-			err:          common.ErrNotFound,
-			wantStatus:   http.StatusNotFound,
-			wantContains: common.ErrNotFound.Error(),
-		},
-		{
-			name:         "fs.ErrNotExist → 404",
-			err:          fs.ErrNotExist,
-			wantStatus:   http.StatusNotFound,
-			wantContains: fs.ErrNotExist.Error(),
-		},
-		{
-			name:         "fs.ErrPermission → 403",
-			err:          fs.ErrPermission,
-			wantStatus:   http.StatusForbidden,
-			wantContains: fs.ErrPermission.Error(),
-		},
-		{
-			name:         "fs.ErrInvalid → 422",
-			err:          fs.ErrInvalid,
-			wantStatus:   http.StatusUnprocessableEntity,
-			wantContains: fs.ErrInvalid.Error(),
-		},
-		{
-			name:       "unknown error → 500 + safe message",
-			err:        errors.New("raw db driver error: connection refused"),
-			wantStatus: http.StatusInternalServerError,
-			// should NOT contain the raw error
-			wantContains: "internal server error",
-		},
-		{
-			name:         "wrapped ErrNotFound → 404",
-			err:          errors.New("get user 42: " + common.ErrNotFound.Error()),
-			wantStatus:   http.StatusInternalServerError,
-			wantContains: "internal server error",
-		},
-		{
-			name:         "wrapped via %w common.ErrNotFound → 404",
-			err:          newWrappedNotFound("record not found"),
-			wantStatus:   http.StatusNotFound,
-			wantContains: "record not found",
-		},
-		{
-			name:         "wrapped via %w fs.ErrNotExist → 404",
-			err:          newWrappedNotExist("license service 1 not found"),
-			wantStatus:   http.StatusNotFound,
-			wantContains: "license service 1 not found",
-		},
-		{
-			name:         "wrapped via %w fs.ErrPermission → 403",
-			err:          newWrappedPermission("read-only"),
-			wantStatus:   http.StatusForbidden,
-			wantContains: "read-only",
-		},
-		{
-			name:         "wrapped via %w fs.ErrInvalid → 422",
-			err:          newWrappedInvalid("name is reserved"),
-			wantStatus:   http.StatusUnprocessableEntity,
-			wantContains: "name is reserved",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			statusCode, publicMessage := httputil.ClassifyError(tt.err)
-
-			if statusCode != tt.wantStatus {
-				t.Errorf("statusCode = %d, want %d", statusCode, tt.wantStatus)
-			}
-			if tt.wantContains != "" && !contains(publicMessage, tt.wantContains) {
-				t.Errorf("publicMessage = %q, want to contain %q", publicMessage, tt.wantContains)
-			}
-		})
-	}
-}
 
 // ============================================================================
 // respondError
@@ -120,10 +28,9 @@ func TestRespondError(t *testing.T) {
 		err        error
 		wantStatus int
 	}{
-		{"not found → 404", common.ErrNotFound, http.StatusNotFound},
-		{"not exist → 404", fs.ErrNotExist, http.StatusNotFound},
-		{"permission → 403", fs.ErrPermission, http.StatusForbidden},
-		{"invalid → 422", fs.ErrInvalid, http.StatusUnprocessableEntity},
+		{"not found → 404", contract.ErrNotFound, http.StatusNotFound},
+		{"forbidden → 403", contract.NewForbiddenError("no perm"), http.StatusForbidden},
+		{"validation → 422", contract.NewValidationError("bad input"), http.StatusUnprocessableEntity},
 		{"unknown → 500", errors.New("db connection lost"), http.StatusInternalServerError},
 	}
 
@@ -147,7 +54,7 @@ func TestRespondError(t *testing.T) {
 
 			// Verify the response body has message field
 			body := rec.Body.String()
-			if !contains(body, `"message"`) {
+			if !strings.Contains(body, `"message"`) {
 				t.Errorf("response missing 'message' field: %s", body)
 			}
 		})
@@ -174,11 +81,11 @@ func TestRespondErrorSafeMessage(t *testing.T) {
 
 	body := rec.Body.String()
 	// Must NOT leak raw db error
-	if contains(body, "postgres") || contains(body, "duplicate key") {
+	if strings.Contains(body, "postgres") || strings.Contains(body, "duplicate key") {
 		t.Errorf("response body leaked raw error: %s", body)
 	}
 	// Must contain safe generic message
-	if !contains(body, "internal server error") {
+	if !strings.Contains(body, "internal server error") {
 		t.Errorf("response body missing safe message: %s", body)
 	}
 }
@@ -357,7 +264,7 @@ func TestRequireSession(t *testing.T) {
 		if httpErr.Code != http.StatusUnauthorized {
 			t.Errorf("status = %d, want 401", httpErr.Code)
 		}
-		if !contains(fmt.Sprint(httpErr.Message), "no active session") {
+		if !strings.Contains(fmt.Sprint(httpErr.Message), "no active session") {
 			t.Errorf("unexpected message: %v", httpErr.Message)
 		}
 	})
@@ -385,7 +292,7 @@ func TestRequireSession(t *testing.T) {
 		if httpErr.Code != http.StatusUnauthorized {
 			t.Errorf("status = %d, want 401", httpErr.Code)
 		}
-		if !contains(fmt.Sprint(httpErr.Message), "session type mismatch") {
+		if !strings.Contains(fmt.Sprint(httpErr.Message), "session type mismatch") {
 			t.Errorf("unexpected message: %v", httpErr.Message)
 		}
 	})
@@ -444,7 +351,7 @@ func TestParseUintParamErrorMessage(t *testing.T) {
 			t.Errorf("status = %d, want 400", httpErr.Code)
 		}
 		msg := httpErr.Message
-		if !contains(msg, "missing") {
+		if !strings.Contains(msg, "missing") {
 			t.Errorf("message should contain param name: %v", httpErr.Message)
 		}
 	})
@@ -528,32 +435,32 @@ func TestParsePagination(t *testing.T) {
 		{
 			name:         "defaults",
 			query:        "",
-			defaultLimit: 50,
-			maxLimit:     200,
-			wantLimit:    50,
+			defaultLimit: httputil.DefaultPageLimit,
+			maxLimit:     httputil.MaxPageLimit,
+			wantLimit:    httputil.DefaultPageLimit,
 			wantOffset:   0,
 		},
 		{
 			name:         "custom within bounds",
 			query:        "?limit=100&offset=20",
-			defaultLimit: 50,
-			maxLimit:     200,
+			defaultLimit: httputil.DefaultPageLimit,
+			maxLimit:     httputil.MaxPageLimit,
 			wantLimit:    100,
 			wantOffset:   20,
 		},
 		{
 			name:         "limit clamped to max",
-			query:        "?limit=500&offset=10",
-			defaultLimit: 50,
-			maxLimit:     200,
-			wantLimit:    200,
+			query:        "?limit=5000&offset=10",
+			defaultLimit: httputil.DefaultPageLimit,
+			maxLimit:     httputil.MaxPageLimit,
+			wantLimit:    2000,
 			wantOffset:   10,
 		},
 		{
 			name:         "limit clamped to min 1 on negative",
 			query:        "?limit=-5&offset=-10",
-			defaultLimit: 50,
-			maxLimit:     200,
+			defaultLimit: httputil.DefaultPageLimit,
+			maxLimit:     httputil.MaxPageLimit,
 			wantLimit:    1,
 			wantOffset:   0,
 		},
@@ -627,7 +534,7 @@ func TestDefaultRestrictedSessionAllowedPaths(t *testing.T) {
 	}
 
 	blocked := []string{
-		"/api/dashboard",
+		"/api/overview/cluster",
 		"/api/apps",
 		"/api/files",
 		"/api/admin/system/status",
@@ -639,31 +546,25 @@ func TestDefaultRestrictedSessionAllowedPaths(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// helpers
-// ============================================================================
+func TestMarkCurrentSession(t *testing.T) {
+	t.Parallel()
 
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+	out := markCurrentSession([]model.Session{{ID: 1}, {ID: 2}}, 2)
+	if out[0].Current || !out[1].Current {
+		t.Fatalf("current flags = %v/%v, want false/true", out[0].Current, out[1].Current)
 	}
-	return false
-}
 
-func newWrappedNotFound(msg string) error {
-	return fmt.Errorf("%s: %w", msg, common.ErrNotFound)
-}
-
-func newWrappedNotExist(msg string) error {
-	return fmt.Errorf("%s: %w", msg, fs.ErrNotExist)
-}
-
-func newWrappedPermission(msg string) error {
-	return fmt.Errorf("%s: %w", msg, fs.ErrPermission)
-}
-
-func newWrappedInvalid(msg string) error {
-	return fmt.Errorf("%s: %w", msg, fs.ErrInvalid)
+	b, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got := strings.Count(string(b), `"current":true`); got != 1 {
+		t.Fatalf("current:true occurrences = %d, want 1 in %s", got, b)
+	}
+	if strings.Contains(string(b), `"current":false`) {
+		t.Fatalf("non-current entries should omit current: %s", b)
+	}
+	if !strings.Contains(string(b), `"hostname"`) || !strings.Contains(string(b), `"platform"`) {
+		t.Fatalf("session fields should be flattened: %s", b)
+	}
 }

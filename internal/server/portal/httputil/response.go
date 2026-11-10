@@ -3,13 +3,12 @@ package httputil
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"net/http"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/server/service/settings/schema"
+	"design-cloud-engine/internal/contract/schema"
 
+	"design-cloud-engine/internal/contract"
 	"github.com/labstack/echo/v5"
 )
 
@@ -18,8 +17,9 @@ import (
 // responses serialize as {"message":"..."} and success responses as
 // {"data":...}.
 type Response struct {
-	Data    any    `json:"data,omitempty"`
-	Message string `json:"message,omitempty"`
+	Data    any            `json:"data,omitempty"`
+	Message string         `json:"message,omitempty"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 // RespondPage writes a standard paginated envelope: {"data": {"items": items, "total": total}}.
@@ -44,10 +44,11 @@ func RespondData(c *echo.Context, data any) error {
 //     operators can debug, even when the client only receives a generic message
 //  3. returns a safe Response{} envelope to the caller
 //
-// Known sentinel errors (common.ErrNotFound, fs.ErrNotExist, fs.ErrPermission, fs.ErrInvalid)
-// pass their err.Error() text through to the client because the messages are intentionally
-// safe prose, not raw driver output. All other errors are logged in full but sent to the
-// client as "internal server error".
+// Only domain contract errors (contract.DomainError, contract.ErrNotFound,
+// schema.ErrMalformed) and echo.HTTPError get status-coded responses. Everything
+// else — including standard-library sentinels such as io/fs errors — becomes 500
+// with a WARN log marked unclassified_error=true, so that leaking filesystem
+// sentinels through the HTTP layer is detectable in production.
 func RespondError(c *echo.Context, err error) error {
 	statusCode, publicMessage := ClassifyError(err)
 
@@ -73,14 +74,16 @@ func RespondError(c *echo.Context, err error) error {
 }
 
 // ClassifyError determines the HTTP status code and public message for an error.
-// Known domain sentinels get their natural status code; everything else becomes
-// 500 "internal server error" so that no driver-internal detail leaks to the client.
+// Only domain contract errors get status-coded responses; everything else
+// becomes 500 "internal server error" so that no driver-internal detail leaks
+// to the client. Unclassified errors are marked unclassified_error=true in a
+// WARN log so operators can detect fs.Err* leaking through the HTTP layer.
 func ClassifyError(err error) (statusCode int, publicMessage string) {
 	if err == nil {
 		return http.StatusOK, ""
 	}
 
-	if domainErr, ok := errors.AsType[common.DomainError](err); ok {
+	if domainErr, ok := errors.AsType[contract.DomainError](err); ok {
 		return domainErr.HTTPStatus(), domainErr.Message()
 	}
 
@@ -90,18 +93,13 @@ func ClassifyError(err error) (statusCode int, publicMessage string) {
 	}
 
 	switch {
-	case errors.Is(err, common.ErrNotFound), errors.Is(err, fs.ErrNotExist):
+	case errors.Is(err, contract.ErrNotFound):
 		return http.StatusNotFound, err.Error()
 	case errors.Is(err, schema.ErrMalformed):
 		// JSON 语法/结构错误 → 400（语法层）。
 		return http.StatusBadRequest, err.Error()
-	case errors.Is(err, fs.ErrPermission):
-		return http.StatusForbidden, err.Error()
-	case errors.Is(err, fs.ErrInvalid):
-		// 业务规则校验失败（enum 不合法 / 数值越界 / 格式错误）→ 422，
-		// 400 仅留给语法/绑定错误（坏 JSON、缺参数等）。
-		return http.StatusUnprocessableEntity, err.Error()
 	default:
+		slog.Warn("unclassified_error=true", slog.String("error", err.Error()), slog.String("type", fmt.Sprintf("%T", err)))
 		return http.StatusInternalServerError, "internal server error"
 	}
 }

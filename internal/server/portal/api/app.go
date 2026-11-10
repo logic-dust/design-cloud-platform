@@ -29,11 +29,12 @@ func (h *appHandler) appsAPI(g *echo.Group) {
 // --- 获取当前用户的应用列表
 func (h *appHandler) listApps(c *echo.Context) error {
 	requestUser := httputil.CurrentUsername(c)
-	list, err := h.app.ListAccessible(c.Request().Context(), requestUser)
+	p := httputil.ParsePage(c)
+	list, total, err := h.app.ListAccessiblePage(c.Request().Context(), requestUser, p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: list})
+	return httputil.RespondPage(c, list, total)
 }
 
 // --- 根据应用 ID 获取应用详情

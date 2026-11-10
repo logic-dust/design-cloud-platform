@@ -3,23 +3,34 @@
 #
 # 规则解读：package 下的任何 .go 文件不得 import forbidden_imports 列出的包（含子包）。
 # 此规则由 .agents/verifiers/verify-arch.py 自动校验。
+#
+# 可选字段（缺省值见后）：
+#   selector: subtree | exact    # 缺省 subtree，即 package 及其所有子包
+#   scope:    production | tests | all   # 缺省 production，只看非 _test.go 的 import
+#
+# 路径写法：包内（本仓）路径写仓库相对路径，例如 "internal/server"；
+# 标准库写裸名，例如 "testing"。
 
 rules:
-  - package: "internal/config"
+  # --- L0 平台底座：只允许依赖标准库与 internal/contract ---
+  # 覆盖 platform/{config,logger,crypto,fs,host,overlay,format,concurrency,process,osuser,procfs,winsession}。
+  # platform/fs 允许依赖 internal/contract（路径/错误哨兵契约），故不禁 contract。
+  - package: "internal/platform"
     forbidden_imports:
-      - "internal/db"
-      - "internal/agent"
       - "internal/server"
+      - "internal/db"
+      - "internal/model"
+      - "internal/agent"
+      - "internal/dcexec"
       - "internal/execution"
-      - "internal/launcher"
-    reason: "配置包是最基础的原语，不应该引入业务或实现对象导致循环依赖。"
+    reason: "平台底座是最基础的原语，不得依赖业务层、持久层、执行层或进程实现，否则底座会被业务反向绑架。"
 
   - package: "internal/model"
     forbidden_imports:
       - "internal/server"
       - "internal/agent"
       - "internal/execution"
-      - "internal/launcher"
+      - "internal/dcexec"
     reason: "数据模型层仅定义 GORM 结构体，不应反向依赖业务层、通信层或执行层。"
 
   - package: "internal/db"
@@ -27,8 +38,8 @@ rules:
       - "internal/server"
       - "internal/agent"
       - "internal/execution"
-      - "internal/launcher"
-    reason: "数据库持久层是底层结构，禁止反向依赖业务层(Service)、展现层(Server)、执行层或启动器。注意：import 合规不等于职责合规；语义边界需同时满足 rules/db-boundary-rules.md。"
+      - "internal/dcexec"
+    reason: "数据库持久层是底层结构，禁止反向依赖业务层(Service)、展现层(Server)、执行层或启动器。注意：import 合规不等于职责合规；语义边界需同时满足 rules/backend-layering-principles.md。"
 
   - package: "internal/execution"
     forbidden_imports:
@@ -44,39 +55,155 @@ rules:
       - "internal/db"
     reason: "Agent 执行器层应该尽量轻量，通过 Service 层交互，不得直连 DB 或引用 HTTP Web 层逻辑。"
 
-  - package: "internal/launcher"
+  - package: "internal/dcexec"
     forbidden_imports:
       - "internal/server"
       - "internal/db"
       - "internal/agent"
-    reason: "Launcher 是独立特权进程，只依赖 execution 协议层和 config，禁止引入 Engine 内部组件。"
+    reason: "dc-exec 是独立特权进程，只依赖 execution 协议层和 config，禁止引入 Engine 内部组件。"
 
   - package: "internal"
     forbidden_imports:
       - "testing"
     reason: "生产代码（非 *_test.go）绝对禁止引入 testing 库，强制测试逻辑与核心业务硬隔离。"
 
+  # service 在阶段 3 起已是纯分组目录（目录下无 Go 文件，只有 19 个领域子包），
+  # 此处 selector 保持默认 subtree，即约束 service/... 全部子包。
   - package: "internal/server/service"
     forbidden_imports:
-      - "internal/server/control"
+      - "internal/server/controlplane"
       - "internal/server/portal"
     reason: "业务层不得反向依赖控制面或展现层，触发采集契约应经 internal/contract。"
 
   - package: "internal/server/portal"
     forbidden_imports:
-      - "internal/server/control"
-    reason: "Portal 仅经 service 间接触发采集，不得直连控制面。"
+      - "internal/server/controlplane"
+      - "internal/db"
+    reason: "Portal 只经 service/application 访问数据：不得直连控制面，也不得绕过仓储用 db 直接读写。"
 
-  - package: "internal/server/control"
+  - package: "internal/server/controlplane"
     forbidden_imports:
       - "internal/server/service"
       - "internal/server/portal"
-    reason: "控制面不得反向依赖业务层/展现层，保持可被 Agent 独立复用。"
+      - "internal/server/application"
+    reason: "控制面不得反向依赖业务层/应用层/展现层，保持可被 Agent 独立复用。"
+
+  - package: "internal/server/application"
+    forbidden_imports:
+      - "internal/server/controlplane"
+      - "internal/server/portal"
+    reason: "应用层只组合领域服务的原子操作，不得反向依赖控制面或入口适配层。"
+
+  - package: "internal/server/cache"
+    forbidden_imports:
+      - "internal/server/service"
+    reason: "缓存失效是共享基础设施（地基），不得依赖任何业务域。"
 
   - package: "internal/contract"
     forbidden_imports:
       - "internal/server"
       - "internal/db"
       - "internal/agent"
-      - "internal/launcher"
-    reason: "契约包是跨层中立的抽象协议层，绝对禁止反向依赖任何具体实现层（Server/Service/DB/Agent/Launcher）。"
+      - "internal/dcexec"
+    reason: "契约包是跨层中立的抽象协议层，绝对禁止反向依赖任何具体实现层（Server/Service/DB/Agent/DcExec）。"
+
+  # 领域服务逐包禁止反向依赖应用层（application/*：identity 写编排、overview/system 读模型）
+  - package: "internal/server/service/alert"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/app"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/connection"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/desktop"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/file"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/license"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/node"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/proxy"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  # push 在阶段 6 从 service/ 移出：它是 SSE 基础设施，不是业务域。
+  # 控制面实现 ClusterForwarder（controlplane→push 单向），因此 Hub 自身必须
+  # 保持与业务域、Portal、控制面无关。
+  - package: "internal/server/push"
+    forbidden_imports:
+      - "internal/server/service"
+      - "internal/server/application"
+      - "internal/server/portal"
+      - "internal/server/controlplane"
+    reason: "Push Hub 只负责本机 SSE 分发与可选中继；转发 RPC/TTL/去重属控制面，Hub 不得反向依赖任何上层实现。"
+  - package: "internal/server/service/role"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/scheduler"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/security"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/session"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/settings"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/storage"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/ticket"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+  - package: "internal/server/service/user"
+    forbidden_imports: ["internal/server/application"]
+    reason: "L1 领域服务不得反向依赖编排层。"
+
+  - package: "internal/contract/schema"
+    forbidden_imports:
+      - "internal/server"
+      - "internal/db"
+      - "internal/agent"
+      - "internal/dcexec"
+      - "internal/execution"
+    reason: "Settings Schema 是全仓共享的纯配置结构定义层，只能依赖 contract 与标准库，禁止反向依赖业务服务、存储或执行层。"
+
+  # --- CLI 输出适配：只服务 cmd/engine，不得变成第二个 common ---
+  - package: "cmd/engine/console"
+    selector: "exact"
+    forbidden_imports:
+      - "internal/server"
+      - "internal/db"
+      - "internal/model"
+      - "internal/agent"
+      - "internal/dcexec"
+      - "internal/execution"
+      - "internal/platform"
+      - "internal/contract"
+      - "internal/audit"
+    reason: "console 是 Engine CLI 的 stdout/stderr 适配，属于叶子包；一旦被 internal 反向依赖就会退化成全仓 common。"
+
+# --- 禁止模式规则（文本级，排除 *_test.go） ---
+# 作用域仅限 HTTP 分类层：只有 portal 负责把领域错误映射为状态码。
+# 业务服务层允许用 errors.Is(err, os.ErrNotExist) 区分真实 OS 错误，再经 %w 上抛为 contract 领域错误。
+# fs.ErrNotExist 与 os.ErrNotExist 是同一变量的别名，两组模式必须同时列出，避免绕过。
+pattern_rules:
+  - package: "internal/server/portal"
+    forbidden_patterns:
+      - "fs.ErrNotExist"
+      - "fs.ErrInvalid"
+      - "fs.ErrPermission"
+      - "fs.ErrExist"
+      - "os.ErrNotExist"
+      - "os.ErrInvalid"
+      - "os.ErrPermission"
+      - "os.ErrExist"
+    reason: "HTTP 分类层不解释标准库哨兵；业务错误必须用 contract 领域错误表达。"

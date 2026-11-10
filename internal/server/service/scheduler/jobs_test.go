@@ -2,30 +2,74 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"design-cloud-engine/internal/contract"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/execution"
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/cache"
-	"design-cloud-engine/internal/server/service/push"
+	"design-cloud-engine/internal/server/push"
 )
 
-type fakeSchedulerDriver struct {
-	controlErr error
-	lastSubmit JobSubmitRequest
+type staticSettingsReader struct {
+	st schema.SchedulerSettings
 }
 
-func (d *fakeSchedulerDriver) JobFields() []string { return nil }
-func (d *fakeSchedulerDriver) StatusKey() string   { return "status" }
+func (r staticSettingsReader) GetSchedulerSettings(context.Context) (schema.SchedulerSettings, error) {
+	return r.st, nil
+}
 
-func (d *fakeSchedulerDriver) ExecuteListJobs(context.Context, execution.Executor, JobListQuery) (JobListResult, error) {
+func newTestService(name schema.JobScheduler) *Service {
+	drv := newDriver(name)
+	if drv == nil {
+		return nil
+	}
+	meta := drv.Meta()
+	meta.Scheduler = name
+	return &Service{
+		settingsSvc: staticSettingsReader{st: schema.SchedulerSettings{Type: name}},
+		ops:         drv,
+		opsType:     name,
+		meta:        meta,
+	}
+}
+
+type fakeSchedulerDriver struct {
+	controlErr    error
+	controlCalls  int
+	lastSubmit    JobSubmitRequest
+	listResult    JobListResult
+	listErr       error
+	listQueuesErr error
+	lastListQuery JobListQuery
+}
+
+func (d *fakeSchedulerDriver) Meta() SchedulerMeta {
+	return SchedulerMeta{Keys: SchedulerKeyMap{Status: "status"}}
+}
+
+func (d *fakeSchedulerDriver) ExecuteListJobs(_ context.Context, _ execution.Executor, query JobListQuery) (JobListResult, error) {
+	d.lastListQuery = query
+	if d.listErr != nil {
+		return JobListResult{}, d.listErr
+	}
+	if d.listResult.Jobs != nil {
+		return d.listResult, nil
+	}
 	return JobListResult{}, nil
 }
 
-func (d *fakeSchedulerDriver) ExecuteListQueues(context.Context, execution.Executor, []map[string]any) (QueueListResult, error) {
+func (d *fakeSchedulerDriver) ExecuteListQueues(context.Context, execution.Executor) (QueueListResult, error) {
+	if d.listQueuesErr != nil {
+		return QueueListResult{}, d.listQueuesErr
+	}
 	return QueueListResult{}, nil
 }
 
@@ -47,6 +91,7 @@ func (d *fakeSchedulerDriver) ExecuteSubmit(ctx context.Context, exec execution.
 }
 
 func (d *fakeSchedulerDriver) ExecuteControl(context.Context, execution.Executor, string, JobOp, string, JobControlArgs) error {
+	d.controlCalls++
 	return d.controlErr
 }
 
@@ -73,10 +118,58 @@ func TestControlJobNormalizesJobNotFound(t *testing.T) {
 	}
 }
 
+func TestControlJobRejectsMoreThanMaxBatchControlJobs(t *testing.T) {
+	t.Parallel()
+	driver := &fakeSchedulerDriver{}
+	svc := &Service{ops: driver}
+	jobIDs := make([]string, MaxBatchControlJobs+1)
+	for i := range jobIDs {
+		jobIDs[i] = fmt.Sprintf("%d", i+1)
+	}
+
+	_, err := svc.ControlJob(context.Background(), JobControlRequest{
+		JobIDs:    jobIDs,
+		Operation: JobOpKill,
+	})
+	if err == nil {
+		t.Fatal("expected batch size error")
+	}
+	domainErr, ok := errors.AsType[contract.DomainError](err)
+	if !ok || domainErr.HTTPStatus() != 400 {
+		t.Fatalf("error = %v, want HTTP 400 domain error", err)
+	}
+	if driver.controlCalls != 0 {
+		t.Fatalf("scheduler control calls = %d, want 0", driver.controlCalls)
+	}
+}
+
+func TestControlJobAllowsMaxBatchControlJobs(t *testing.T) {
+	t.Parallel()
+	driver := &fakeSchedulerDriver{}
+	svc := &Service{
+		ops:      driver,
+		jobCache: cache.NewTTLCache[string, JobListResult](time.Minute),
+	}
+	jobIDs := make([]string, MaxBatchControlJobs)
+	for i := range jobIDs {
+		jobIDs[i] = fmt.Sprintf("%d", i+1)
+	}
+
+	if _, err := svc.ControlJob(context.Background(), JobControlRequest{
+		JobIDs:    jobIDs,
+		Operation: JobOpKill,
+	}); err != nil {
+		t.Fatalf("ControlJob at max batch size: %v", err)
+	}
+	if driver.controlCalls != MaxBatchControlJobs {
+		t.Fatalf("scheduler control calls = %d, want %d", driver.controlCalls, MaxBatchControlJobs)
+	}
+}
+
 func TestNormalizeJobStatus(t *testing.T) {
 	t.Parallel()
 
-	// fakeSchedulerDriver.StatusKey() returns "status", NormalizeStatus always returns JobStatusRunning.
+	// fakeSchedulerDriver.Meta().Keys.Status is "status", NormalizeStatus always returns JobStatusRunning.
 	svc := &Service{ops: &fakeSchedulerDriver{}}
 
 	cases := []struct {
@@ -125,7 +218,7 @@ func (p *fakePublisher) PublishToRole(_ context.Context, _ model.Role, msg push.
 	p.published = append(p.published, msg)
 }
 
-func TestControlJobPublishesJobEvent(t *testing.T) {
+func TestControlJobDoesNotPushToOperator(t *testing.T) {
 	t.Parallel()
 	pub := &fakePublisher{}
 	service := &Service{
@@ -141,18 +234,12 @@ func TestControlJobPublishesJobEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(pub.published) != 1 {
-		t.Fatalf("expected 1 published message, got %d", len(pub.published))
-	}
-	if pub.published[0].Name != push.EventJob {
-		t.Errorf("published event = %v, want %v", pub.published[0].Name, push.EventJob)
-	}
-	if len(pub.users) == 0 || pub.users[0] != "alice" {
-		t.Errorf("published users = %v, want ['alice']", pub.users)
+	if len(pub.published) != 0 {
+		t.Fatalf("sync job control must not push to operator; got %d messages", len(pub.published))
 	}
 }
 
-func TestModifyJobPublishesJobEvent(t *testing.T) {
+func TestModifyJobDoesNotPushToOperator(t *testing.T) {
 	t.Parallel()
 	pub := &fakePublisher{}
 	service := &Service{
@@ -165,14 +252,165 @@ func TestModifyJobPublishesJobEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(pub.published) != 1 {
-		t.Fatalf("expected 1 published message, got %d", len(pub.published))
+	if len(pub.published) != 0 {
+		t.Fatalf("sync job modify must not push to operator; got %d messages", len(pub.published))
 	}
-	if pub.published[0].Name != push.EventJob {
-		t.Errorf("published event = %v, want %v", pub.published[0].Name, push.EventJob)
+}
+
+func TestControlJobRejectsInvalidInputBeforeExecuting(t *testing.T) {
+	t.Parallel()
+	cases := []JobControlRequest{
+		{JobIDs: []string{"1", "0"}, Operation: JobOpKill, RequestUser: "u"},
+		{JobIDs: []string{"123[1]"}, Operation: JobOpKill, RequestUser: "u"},
+		{JobIDs: nil, Operation: JobOpKill, RequestUser: "u"},
+		{JobIDs: []string{"1"}, Operation: JobOpSwitch, TargetQueue: "", RequestUser: "u"},
+		{JobIDs: []string{"1"}, Operation: JobOpSwitch, TargetQueue: "-m", RequestUser: "u"},
 	}
-	ep, ok := pub.published[0].Payload.(push.EventPayload)
-	if !ok || ep.TargetID != "456" {
-		t.Errorf("expected TargetID = '456', got %+v", pub.published[0].Payload)
+	for _, req := range cases {
+		driver := &fakeSchedulerDriver{}
+		svc := &Service{ops: driver}
+		_, err := svc.ControlJob(context.Background(), req)
+		domainErr, ok := errors.AsType[contract.DomainError](err)
+		if !ok || domainErr.HTTPStatus() != 400 {
+			t.Fatalf("req %+v: error = %v, want HTTP 400", req, err)
+		}
+		if driver.controlCalls != 0 {
+			t.Fatalf("req %+v: control calls = %d, want 0", req, driver.controlCalls)
+		}
+	}
+}
+
+func TestModifyJobValidatesArgs(t *testing.T) {
+	t.Parallel()
+	svc := &Service{ops: &fakeSchedulerDriver{}}
+	bad := "-x"
+	empty := " "
+	good := "renamed"
+	for _, tc := range []struct {
+		id   string
+		args JobModifyArgs
+	}{
+		{"0", JobModifyArgs{Name: &good}},
+		{"1", JobModifyArgs{}},
+		{"1", JobModifyArgs{Name: &bad}},
+		{"1", JobModifyArgs{Name: &empty}},
+		{"1", JobModifyArgs{Queue: &bad}},
+	} {
+		err := svc.ModifyJob(context.Background(), tc.id, tc.args, "u")
+		domainErr, ok := errors.AsType[contract.DomainError](err)
+		if !ok || domainErr.HTTPStatus() != 400 {
+			t.Fatalf("ModifyJob(%q, %+v) error = %v, want HTTP 400", tc.id, tc.args, err)
+		}
+	}
+	if err := svc.ModifyJob(context.Background(), "1", JobModifyArgs{Name: &good}, "u"); err != nil {
+		t.Fatalf("valid modify: %v", err)
+	}
+}
+
+func mustMeta(t *testing.T, svc *Service) SchedulerMeta {
+	t.Helper()
+	meta, err := svc.Meta(context.Background())
+	if err != nil {
+		t.Fatalf("Meta() failed: %v", err)
+	}
+	return meta
+}
+
+func TestServiceMeta(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []schema.JobScheduler{
+		schema.JobSchedulerLSF,
+		schema.JobSchedulerSlurm,
+		schema.JobSchedulerOpenLava,
+	} {
+		t.Run(string(name), func(t *testing.T) {
+			t.Parallel()
+			drv := newDriver(name)
+			if drv == nil {
+				t.Fatalf("newDriver(%q) returned nil", name)
+			}
+			svc := newTestService(name)
+			meta := mustMeta(t, svc)
+			if meta.Scheduler != name {
+				t.Errorf("meta.Scheduler = %q, want %q", meta.Scheduler, name)
+			}
+			if len(meta.Fields.Job) == 0 || len(meta.Fields.Host) == 0 || len(meta.Fields.Queue) == 0 {
+				t.Errorf("meta.Fields incomplete: %+v", meta.Fields)
+			}
+			if meta.Keys.ID == "" || meta.Keys.User == "" || meta.Keys.Status == "" || meta.Keys.SubmitTime == "" {
+				t.Errorf("meta.Keys has empty fields: %+v", meta.Keys)
+			}
+			if len(meta.Actions) == 0 {
+				t.Error("meta.Actions is empty")
+			}
+			view := mustMeta(t, svc)
+			view.Actions[JobOpKill] = append(view.Actions[JobOpKill], "MUTATED")
+			if slices.Contains(mustMeta(t, svc).Actions[JobOpKill], "MUTATED") {
+				t.Error("Service.Meta() returned an alias of the cached action table")
+			}
+			if name == schema.JobSchedulerOpenLava {
+				lsfDrv := newDriver(schema.JobSchedulerLSF)
+				lsfMeta := lsfDrv.Meta()
+				if !slices.Equal(meta.Fields.Job, lsfMeta.Fields.Job) ||
+					!slices.Equal(meta.Fields.Host, lsfMeta.Fields.Host) ||
+					!slices.Equal(meta.Fields.Queue, lsfMeta.Fields.Queue) {
+					t.Errorf("openlava fields = %+v, want %+v", meta.Fields, lsfMeta.Fields)
+				}
+				if meta.Keys != lsfMeta.Keys {
+					t.Errorf("openlava keys = %+v, want %+v", meta.Keys, lsfMeta.Keys)
+				}
+				if !maps.EqualFunc(mustMeta(t, svc).Actions, lsfMeta.Actions, slices.Equal) {
+					t.Errorf("openlava actions = %#v, want %#v", mustMeta(t, svc).Actions, lsfMeta.Actions)
+				}
+			}
+		})
+	}
+}
+
+func TestListJobsStampsScheduler(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []schema.JobScheduler{schema.JobSchedulerLSF, schema.JobSchedulerSlurm} {
+		t.Run(string(name), func(t *testing.T) {
+			t.Parallel()
+			driver := &fakeSchedulerDriver{
+				listResult: JobListResult{Jobs: []map[string]any{{"id": "1"}}},
+			}
+			svc := &Service{
+				ops:      driver,
+				opsType:  name,
+				meta:     SchedulerMeta{Scheduler: name},
+				jobCache: cache.NewTTLCache[string, JobListResult](time.Minute),
+			}
+
+			got, err := svc.ListJobs(context.Background(), JobListQuery{})
+			if err != nil {
+				t.Fatalf("ListJobs: %v", err)
+			}
+			if got.Scheduler != name {
+				t.Fatalf("ListJobs scheduler = %q, want %q", got.Scheduler, name)
+			}
+
+			gotUser, err := svc.ListJobs(context.Background(), JobListQuery{User: "alice"})
+			if err != nil {
+				t.Fatalf("ListJobs: %v", err)
+			}
+			if gotUser.Scheduler != name {
+				t.Fatalf("ListJobs scheduler = %q, want %q", gotUser.Scheduler, name)
+			}
+		})
+	}
+}
+
+func TestListQueuesPropagatesListError(t *testing.T) {
+	t.Parallel()
+	listErr := errors.New("bqueues failed")
+	svc := &Service{
+		ops:  &fakeSchedulerDriver{listQueuesErr: listErr},
+		meta: SchedulerMeta{Scheduler: schema.JobSchedulerLSF},
+	}
+	if _, err := svc.ListQueues(context.Background()); !errors.Is(err, listErr) {
+		t.Fatalf("ListQueues err = %v, want %v", err, listErr)
 	}
 }

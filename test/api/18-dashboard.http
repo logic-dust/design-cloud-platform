@@ -1,9 +1,0 @@
-# ========================================
-# ===== DASHBOARD Http =====
-# ========================================
-# ----- 先执行 02-session.http 登录 -----
-
-
-### 获取集群概览状态
-GET {{addr}}/api/dashboard
-Authorization: Bearer {{accessToken}}

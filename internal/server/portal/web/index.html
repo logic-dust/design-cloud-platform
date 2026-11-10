@@ -5,343 +5,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>设计云平台</title>
-  <link rel="icon" type="image/x-icon" href="static/assets/design-cloud.ico">
-  <script src="static/js/theme.js"></script>
-  <link rel="stylesheet" href="static/css/theme.css">
-  <style>
-    /* ============================================================
-       门户主页 专属样式
-       ============================================================ */
-
-    html {
-      scroll-behavior: smooth;
-    }
-
-    body {
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-    }
-
-    .page {
-      position: relative;
-      z-index: 1;
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 0 24px;
-      width: 100%;
-      flex: 1;
-    }
-
-    /* ---------- 顶部 Floating Nav ---------- */
-    nav {
-      position: sticky;
-      top: 0;
-      z-index: 50;
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      background: var(--bg-surface);
-      border-bottom: var(--glass-border);
-      transition: all 0.3s;
-    }
-
-    nav::after {
-      content: "";
-      position: absolute;
-      left: 0;
-      right: 0;
-      bottom: -1px;
-      height: 1px;
-      background: linear-gradient(90deg, transparent, var(--primary-cyan), var(--primary-blue), transparent);
-      opacity: 0.5;
-    }
-
-    .nav-inner {
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 0 24px;
-      height: 64px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-
-    .nav-links {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .nav-links a {
-      color: var(--text-secondary);
-      text-decoration: none;
-      font-size: 14px;
-      font-weight: 500;
-      padding: 6px 16px;
-      border-radius: var(--radius-pill);
-      transition: all 0.2s;
-    }
-
-    .nav-links a:hover {
-      color: var(--primary-cyan);
-      background: var(--bg-chip);
-    }
-
-    /* ---------- Hero Section ---------- */
-    .hero {
-      text-align: center;
-      padding: 108px 0 64px;
-    }
-
-    .hero h1 {
-      font-size: 54px;
-      font-weight: 800;
-      letter-spacing: 4px;
-      background: var(--grad-title);
-      -webkit-background-clip: text;
-      background-clip: text;
-      color: transparent;
-      line-height: 1.15;
-    }
-
-    .hero .subtitle {
-      margin: 20px auto 36px;
-      font-size: 17px;
-      color: var(--text-secondary);
-      max-width: 680px;
-      line-height: 1.8;
-      font-weight: 400;
-    }
-
-    .meta {
-      font-size: 13px;
-      color: var(--text-muted);
-      font-family: var(--font-mono);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-
-    .meta code {
-      color: var(--primary-cyan);
-      background: var(--bg-chip);
-      padding: 2px 8px;
-      border-radius: var(--radius-sm);
-      border: 1px solid var(--border-subtle);
-    }
-
-    .meta .meta-sep {
-      color: var(--border-subtle);
-    }
-
-    /* ---------- Features 特性 4 卡片 ---------- */
-    .features {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 16px;
-      padding: 32px 0 64px;
-    }
-
-    .feat-card {
-      padding: 28px 24px;
-      border-radius: var(--radius-md);
-      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-    }
-
-    .feat-card:hover {
-      transform: translateY(-4px);
-      box-shadow: var(--shadow-md), var(--shadow-glow);
-    }
-
-    .feat-card .icon-box {
-      width: 48px;
-      height: 48px;
-      border-radius: var(--radius-md);
-      background: var(--bg-chip);
-      border: 1px solid var(--border-subtle);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      margin-bottom: 20px;
-      transition: all 0.3s;
-    }
-
-    .feat-card:hover .icon-box {
-      border-color: var(--primary-cyan);
-      box-shadow: 0 0 16px rgba(56, 189, 248, 0.3);
-    }
-
-    .feat-card h3 {
-      font-size: 17px;
-      font-weight: 700;
-      margin-bottom: 10px;
-      color: var(--text-main);
-    }
-
-    .feat-card p {
-      font-size: 13px;
-      color: var(--text-muted);
-      line-height: 1.8;
-    }
-
-    /* ---------- Download 下载区块 ---------- */
-    .download-section {
-      padding: 16px 0 80px;
-    }
-
-    .section-head {
-      margin-bottom: 20px;
-    }
-
-    .section-head h2 {
-      font-size: 24px;
-      font-weight: 700;
-      letter-spacing: 2px;
-      position: relative;
-      padding-left: 14px;
-    }
-
-    .section-head h2::before {
-      content: "";
-      position: absolute;
-      left: 0;
-      top: 4px;
-      bottom: 4px;
-      width: 4px;
-      border-radius: 2px;
-      background: var(--grad-brand);
-      box-shadow: 0 0 8px var(--primary-cyan);
-    }
-
-    .dl-panel {
-      padding: 24px;
-    }
-
-    .dl-buttons {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 16px;
-    }
-
-    .dl-buttons .btn-dl {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 6px;
-      padding: 28px 20px;
-      border-radius: var(--radius-md);
-      border: 1px solid var(--border-subtle);
-      background: var(--bg-surface);
-      color: var(--text-main);
-      text-decoration: none;
-      text-align: center;
-      position: relative;
-      overflow: hidden;
-      transition: all 0.2s;
-    }
-
-    .dl-buttons .btn-dl::before {
-      content: "";
-      position: absolute;
-      left: 0;
-      top: 0;
-      width: 100%;
-      height: 2px;
-      background: var(--grad-brand);
-      opacity: 0;
-      transition: opacity 0.25s;
-    }
-
-    .dl-buttons .btn-dl:hover {
-      border-color: var(--border-glow);
-      background: var(--bg-surface-hover);
-      box-shadow: var(--shadow-glow);
-      transform: translateY(-2px);
-    }
-
-    .dl-buttons .btn-dl:hover::before {
-      opacity: 1;
-    }
-
-    .dl-buttons .btn-dl .dl-icon {
-      font-size: 34px;
-      line-height: 1;
-    }
-
-    .dl-buttons .btn-dl .dl-main {
-      font-size: 16px;
-      font-weight: 700;
-      letter-spacing: 1px;
-      color: var(--text-main);
-    }
-
-    .dl-buttons .btn-dl .dl-sub {
-      font-size: 12px;
-      color: var(--text-secondary);
-      font-family: var(--font-mono);
-    }
-
-    .dl-buttons .btn-dl .dl-meta {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-top: 8px;
-      font-family: var(--font-mono);
-      font-size: 12px;
-    }
-
-    .dl-buttons .btn-dl .dl-ver {
-      background: rgba(0, 242, 254, 0.12);
-      color: var(--primary-cyan);
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-weight: 600;
-    }
-
-    .dl-buttons .btn-dl .dl-size {
-      color: var(--text-main);
-      font-weight: 600;
-    }
-
-    .dl-buttons .btn-dl .dl-hash {
-      margin-top: 4px;
-      font-size: 10px;
-      color: var(--text-muted);
-      font-family: var(--font-mono);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      max-width: 100%;
-    }
-
-    @media (max-width: 640px) {
-      .dl-buttons {
-        grid-template-columns: 1fr;
-      }
-    }
-
-    /* Footer */
-    footer {
-      border-top: 1px solid var(--border-subtle);
-      padding: 28px 0;
-      text-align: center;
-      font-size: 12px;
-      color: var(--text-muted);
-      letter-spacing: 1px;
-    }
-
-    @media (max-width: 900px) {
-      .features {
-        grid-template-columns: repeat(2, 1fr);
-      }
-
-      .hero h1 {
-        font-size: 38px;
-      }
-    }
-  </style>
+  <link rel="icon" type="image/x-icon" href="static/assets/design-cloud.ico?v=__WEB_VERSION__">
+  <script src="static/js/theme.js?v=__WEB_VERSION__"></script>
+  <link rel="stylesheet" href="static/css/theme.css?v=__WEB_VERSION__">
+  <link rel="stylesheet" href="static/css/index.css?v=__WEB_VERSION__">
 </head>
 
 <body>
@@ -350,12 +17,12 @@
   <nav>
     <div class="nav-inner">
       <div class="brand">
-        <img class="logo" src="static/assets/design-cloud-logo.svg" alt="设计云平台" />
+        <img class="logo" src="static/assets/design-cloud-logo.svg?v=__WEB_VERSION__" alt="设计云平台" />
         设计云平台
       </div>
       <div class="nav-links">
         <a href="#download">下载客户端</a>
-        <a class="btn-action" href="/dashboard">进入数据大屏 ↗</a>
+        <a class="btn-action" href="/overview">进入数据大屏 ↗</a>
         <button class="theme-toggle-btn" id="themeToggle" title="切换亮/暗主题">🌙</button>
       </div>
     </div>
@@ -410,7 +77,7 @@
           </svg>
         </div>
         <h3>资源监控</h3>
-        <p>点健康状态监控，负载预警与运行态势一屏掌握。</p>
+        <p>节点健康状态监控，负载预警与运行态势一屏掌握。</p>
       </div>
 
       <div class="glass-panel feat-card">
@@ -422,7 +89,7 @@
           </svg>
         </div>
         <h3>远程连接</h3>
-        <p>多节点多协议连接统一管理，一键快速链接。</p>
+        <p>多节点多协议连接统一管理，一键快速连接。</p>
       </div>
     </section>
 
@@ -430,10 +97,19 @@
     <section class="download-section" id="download">
       <div class="section-head">
         <h2>客户端下载</h2>
+        <div class="release-meta" id="dlReleaseMeta" hidden>
+          <span class="platform-chip">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z" />
+            </svg>
+            Windows
+          </span>
+          <span class="version-chip" id="dlVersionChip" hidden></span>
+        </div>
       </div>
 
       <div class="glass-panel dl-panel">
-        <div class="dl-buttons" id="dlButtons"></div>
+        <div id="downloadContent"></div>
       </div>
     </section>
   </div>
@@ -442,93 +118,8 @@
     <div>© 2026 设计云平台 · Design Cloud Engine</div>
   </footer>
 
-  <script>
-    const $ = id => document.getElementById(id);
-
-    const DL_ASSETS = [
-      { id: "setup", icon: "💿", label: "Windows 安装版", file: "DesignCloudDesktop-win-Setup.exe", desc: "Setup.exe · 双击安装" },
-      { id: "portable", icon: "🗜️", label: "Windows 便携版", file: "DesignCloudDesktop-win-Portable.zip", desc: "Portable.zip · 解压即用" },
-    ];
-
-    function formatSize(bytes) {
-      if (!bytes || bytes <= 0) return "";
-      const mb = bytes / (1024 * 1024);
-      if (mb >= 1024) {
-        return (mb / 1024).toFixed(2) + " GB";
-      }
-      return mb.toFixed(1) + " MB";
-    }
-
-    async function renderDownloads(desktopEnabled) {
-      const box = $("dlButtons");
-      if (!box) return;
-
-      if (desktopEnabled === false) {
-        box.innerHTML = DL_ASSETS.map(a => {
-          return `<div class="btn-dl disabled" style="pointer-events: none; opacity: 0.65; cursor: not-allowed; filter: grayscale(0.2);">` +
-            `<span class="dl-icon">${a.icon}</span>` +
-            `<span class="dl-main">${a.label}</span>` +
-            `<span class="dl-sub">${a.desc}</span>` +
-            `<span class="dl-size" style="color: var(--text-muted); margin-top: 8px;">暂未开放</span></div>`;
-        }).join("");
-        return;
-      }
-
-      let releaseData = null;
-      try {
-        const res = await fetch("/api/version/desktop/latest?os=win");
-        if (res.ok) {
-          releaseData = (await res.json()).data || null;
-        }
-      } catch (e) { }
-
-      const assets = releaseData && releaseData.assets ? releaseData.assets : [];
-      const relVersion = releaseData && releaseData.version ? `v${releaseData.version}` : "";
-
-      box.innerHTML = DL_ASSETS.map(a => {
-        let found = assets.find(item => item.FileName === a.file || item.FileName.toLowerCase().includes(a.id));
-        if (!found && assets.length > 0) {
-          found = assets.find(item => item.Type === "Full") || assets[0];
-        }
-
-        const verStr = relVersion || (found ? `v${found.Version}` : "");
-        const sizeStr = found ? formatSize(found.Size) : "";
-        const hashVal = found ? (found.SHA256 || found.SHA1 || "") : "";
-        const hashStr = hashVal ? `SHA256: ${hashVal.slice(0, 12)}...` : "";
-
-        const dlFileName = (found && found.FileName && !found.FileName.endsWith(".nupkg")) ? found.FileName : a.file;
-        const dlUrl = `/api/version/desktop/download/${encodeURIComponent(dlFileName)}`;
-
-        return `<a href="${dlUrl}" class="btn-dl" download>` +
-          `<span class="dl-icon">${a.icon}</span>` +
-          `<span class="dl-main">${a.label}</span>` +
-          `<span class="dl-sub">${a.desc}</span>` +
-          `<div class="dl-meta">` +
-          (verStr ? `<span class="dl-ver">${verStr}</span>` : "") +
-          (sizeStr ? `<span class="dl-size">${sizeStr}</span>` : '<span class="dl-size">点击下载</span>') +
-          `</div>` +
-          (hashStr ? `<span class="dl-hash" title="${hashVal}">${hashStr}</span>` : "") +
-          `</a>`;
-      }).join("");
-    }
-
-    async function loadVersion() {
-      try {
-        const d = (await (await fetch("/api/version")).json()).data;
-        if (d && d.version) $("engineVersion").textContent = "v" + d.version;
-        if (d && d.commit) $("engineCommit").textContent = (d.commit || "unknown").slice(0, 7);
-        if (d && d.releaseDate) $("engineDate").textContent = d.releaseDate;
-        renderDownloads(d ? d.desktopEnabled : true);
-      } catch (e) {
-        $("engineVersion").textContent = "unknown";
-        $("engineCommit").textContent = "unknown";
-        $("engineDate").textContent = "unknown";
-        renderDownloads(true);
-      }
-    }
-
-    loadVersion();
-  </script>
+  <script src="static/js/portal-dom.js?v=__WEB_VERSION__"></script>
+  <script src="static/js/index.js?v=__WEB_VERSION__"></script>
 </body>
 
 </html>

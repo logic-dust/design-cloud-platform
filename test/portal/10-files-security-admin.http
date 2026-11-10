@@ -1,0 +1,42 @@
+# ========================================
+# ===== ADMIN-FILES Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录（需要 Security Admin 权限） -----
+# ----- 需要先执行 10-files.http 中的下载审批流程获取 testDownloadRequestId -----
+
+### 管理员列出下载审批申请 (Security admin)
+GET {{addr}}/api/admin/security/files/download-requests?status=pending
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,403,404
+### 管理员查看下载审批申请详情 (Security admin)
+GET {{addr}}/api/admin/security/files/download-requests/{{testDownloadRequestId}}
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,204,404
+# 404 = downloadAccess=allow 时无待审批申请（10-files.http 创建申请返回 409，未生成 id）
+### 管理员同意下载审批申请 (Security admin)
+POST {{addr}}/api/admin/security/files/download-requests/{{testDownloadRequestId}}/review
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "decision": "approve"
+}
+
+# @expect 200,404
+# 404 = 无对应申请（同上，allow 模式无审批链）
+### 审批下载模式：一次 POST 流式下载
+POST {{addr}}/api/files/download-requests/{{testDownloadRequestId}}/content
+Authorization: Bearer {{accessToken}}
+
+# @manual
+### 管理员拒绝下载审批申请 (Security admin, alternative flow)
+POST {{addr}}/api/admin/security/files/download-requests/{{testDownloadRequestId}}/review
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "decision": "reject",
+  "reason": "not allowed for this test"
+}

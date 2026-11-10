@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 )
 
 func newNodeRepoForTest(t *testing.T) (*Store, *NodeRepo) {
@@ -66,7 +66,7 @@ func TestNodeGetByNodeIDNotFound(t *testing.T) {
 
 	_, repo := newNodeRepoForTest(t)
 	_, err := repo.GetByNodeID(context.Background(), "nonexistent")
-	if !errors.Is(err, common.ErrNotFound) {
+	if !errors.Is(err, contract.ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
 }
@@ -85,7 +85,7 @@ func TestNodeTouchHeartbeat(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := repo.TouchHeartbeat(ctx, "heartbeat-node", "server-1"); err != nil {
+	if err := repo.TouchHeartbeat(ctx, "heartbeat-node"); err != nil {
 		t.Fatalf("TouchHeartbeat: %v", err)
 	}
 
@@ -95,9 +95,6 @@ func TestNodeTouchHeartbeat(t *testing.T) {
 	}
 	if got.Status != model.NodeStatusOnline {
 		t.Fatalf("Status after heartbeat = %d, want %d", got.Status, model.NodeStatusOnline)
-	}
-	if got.LastSeenServer != "server-1" {
-		t.Fatalf("LastSeenServer = %q, want %q", got.LastSeenServer, "server-1")
 	}
 	if got.LastHeartbeatAt.IsZero() {
 		t.Fatal("LastHeartbeatAt is zero")
@@ -118,7 +115,7 @@ func TestNodeTouchHeartbeatDoesNotUpdateMaintenance(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := repo.TouchHeartbeat(ctx, "maintenance-node", "server-1"); err != nil {
+	if err := repo.TouchHeartbeat(ctx, "maintenance-node"); err != nil {
 		t.Fatalf("TouchHeartbeat on maintenance node: %v", err)
 	}
 
@@ -145,7 +142,7 @@ func TestNodeMarkOnlineAndDisconnected(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := repo.MarkOnline(ctx, "toggle-node", "server-1"); err != nil {
+	if err := repo.MarkOnline(ctx, "toggle-node"); err != nil {
 		t.Fatalf("MarkOnline: %v", err)
 	}
 
@@ -156,11 +153,11 @@ func TestNodeMarkOnlineAndDisconnected(t *testing.T) {
 	if got.Status != model.NodeStatusOnline {
 		t.Fatalf("Status = %d, want %d", got.Status, model.NodeStatusOnline)
 	}
-	if got.ConnectedAt.IsZero() {
-		t.Fatal("ConnectedAt is zero after MarkOnline")
+	if got.LastConnectedAt.IsZero() {
+		t.Fatal("LastConnectedAt is zero after MarkOnline")
 	}
 
-	if err := repo.MarkDisconnected(ctx, "toggle-node", "server-1"); err != nil {
+	if err := repo.MarkDisconnected(ctx, "toggle-node"); err != nil {
 		t.Fatalf("MarkDisconnected: %v", err)
 	}
 
@@ -171,8 +168,8 @@ func TestNodeMarkOnlineAndDisconnected(t *testing.T) {
 	if got.Status != model.NodeStatusOffline {
 		t.Fatalf("Status after disconnect = %d, want %d", got.Status, model.NodeStatusOffline)
 	}
-	if got.DisconnectedAt.IsZero() {
-		t.Fatal("DisconnectedAt is zero after MarkDisconnected")
+	if got.LastDisconnectedAt.IsZero() {
+		t.Fatal("LastDisconnectedAt is zero after MarkDisconnected")
 	}
 }
 
@@ -201,6 +198,81 @@ func TestNodeMarkStaleOffline(t *testing.T) {
 	if len(staled) != 1 || staled[0] != "stale-node" {
 		t.Fatalf("expected staledNodes [stale-node], got %v", staled)
 	}
+	got, err := repo.GetByNodeID(ctx, "stale-node")
+	if err != nil {
+		t.Fatalf("GetByNodeID: %v", err)
+	}
+	if got.Status != model.NodeStatusOffline {
+		t.Fatalf("Status = %d, want offline", got.Status)
+	}
+}
+
+func TestNodeMarkStaleOfflineSkipsFreshHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	_, repo := newNodeRepoForTest(t)
+	ctx := context.Background()
+
+	if err := repo.Create(ctx, &model.Node{
+		NodeID: "fresh-node",
+		Status: model.NodeStatusOnline,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := repo.TouchHeartbeat(ctx, "fresh-node"); err != nil {
+		t.Fatalf("TouchHeartbeat: %v", err)
+	}
+
+	cutoff := time.Now().Add(-time.Minute)
+	staled, err := repo.MarkStaleOffline(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("MarkStaleOffline: %v", err)
+	}
+	if len(staled) != 0 {
+		t.Fatalf("expected no stale nodes with fresh heartbeat, got %v", staled)
+	}
+	got, err := repo.GetByNodeID(ctx, "fresh-node")
+	if err != nil {
+		t.Fatalf("GetByNodeID: %v", err)
+	}
+	if got.Status != model.NodeStatusOnline {
+		t.Fatalf("Status = %d, want online", got.Status)
+	}
+}
+
+func TestCountRuntimeByStatusIgnoresNeverConnected(t *testing.T) {
+	t.Parallel()
+
+	_, repo := newNodeRepoForTest(t)
+	ctx := context.Background()
+
+	if err := repo.Create(ctx, &model.Node{
+		NodeID: "awaiting",
+		Status: model.NodeStatusMaintenance,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := repo.Create(ctx, &model.Node{
+		NodeID:          "enrolled-offline",
+		Status:          model.NodeStatusOffline,
+		LastConnectedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("Create enrolled: %v", err)
+	}
+
+	online, offline, maintenance, err := repo.CountRuntimeByStatus(ctx)
+	if err != nil {
+		t.Fatalf("CountRuntimeByStatus: %v", err)
+	}
+	if maintenance != 0 {
+		t.Fatalf("maintenance = %d, want 0 (never connected)", maintenance)
+	}
+	if offline != 1 {
+		t.Fatalf("offline = %d, want 1", offline)
+	}
+	if online != 0 {
+		t.Fatalf("online = %d, want 0", online)
+	}
 }
 
 func TestNodeUpdateSettingsAndOmit(t *testing.T) {
@@ -220,7 +292,7 @@ func TestNodeUpdateSettingsAndOmit(t *testing.T) {
 	// 1. UpdateSettings atomically sets settings
 	settingsData := map[string]any{
 		"agent": map[string]any{
-			"launcherPath": "/custom/launcher",
+			"execBinPath": "/custom/dcexec",
 		},
 	}
 	if err := repo.UpdateSettings(ctx, "settings-node", settingsData); err != nil {
@@ -235,31 +307,62 @@ func TestNodeUpdateSettingsAndOmit(t *testing.T) {
 		t.Fatalf("expected settings to be persisted, got nil")
 	}
 	agentMap, ok := got.Settings["agent"].(map[string]any)
-	if !ok || agentMap["launcherPath"] != "/custom/launcher" {
+	if !ok || agentMap["execBinPath"] != "/custom/dcexec" {
 		t.Fatalf("unexpected settings payload: %v", got.Settings)
 	}
 
-	// 2. UpdateAllFields with older memory state (empty Settings) must NOT overwrite DB settings (Omit("Settings"))
-	olderNode := got
-	olderNode.Settings = nil
-	olderNode.ClientHost = "192.168.1.100"
-	if err := repo.UpdateAllFields(ctx, &olderNode); err != nil {
-		t.Fatalf("UpdateAllFields: %v", err)
+	// 2. UpdateAdminFields must not touch Settings
+	host := "192.168.1.100"
+	if err := repo.UpdateAdminFields(ctx, "settings-node", NodeAdminPatch{
+		DialHost: &host,
+	}); err != nil {
+		t.Fatalf("UpdateAdminFields: %v", err)
 	}
 
-	gotAfterAllFields, err := repo.GetByNodeID(ctx, "settings-node")
+	gotAfterAdmin, err := repo.GetByNodeID(ctx, "settings-node")
 	if err != nil {
-		t.Fatalf("GetByNodeID after UpdateAllFields: %v", err)
+		t.Fatalf("GetByNodeID after UpdateAdminFields: %v", err)
 	}
-	if gotAfterAllFields.ClientHost != "192.168.1.100" {
-		t.Fatalf("expected ClientHost updated to 192.168.1.100, got %q", gotAfterAllFields.ClientHost)
+	if gotAfterAdmin.DialHost != "192.168.1.100" {
+		t.Fatalf("expected DialHost updated to 192.168.1.100, got %q", gotAfterAdmin.DialHost)
 	}
-	if gotAfterAllFields.Settings == nil {
-		t.Fatalf("Settings was unexpectedly overwritten by UpdateAllFields! Omit('Settings') failed")
+	if gotAfterAdmin.Settings == nil {
+		t.Fatalf("Settings was unexpectedly cleared by UpdateAdminFields")
 	}
-	agentMap2, ok := gotAfterAllFields.Settings["agent"].(map[string]any)
-	if !ok || agentMap2["launcherPath"] != "/custom/launcher" {
-		t.Fatalf("Settings corrupted after UpdateAllFields: %v", gotAfterAllFields.Settings)
+	agentMap2, ok := gotAfterAdmin.Settings["agent"].(map[string]any)
+	if !ok || agentMap2["execBinPath"] != "/custom/dcexec" {
+		t.Fatalf("Settings corrupted after UpdateAdminFields: %v", gotAfterAdmin.Settings)
+	}
+}
+
+func TestMarkOnlineRegisterPersistsPlatformColumns(t *testing.T) {
+	t.Parallel()
+
+	_, repo := newNodeRepoForTest(t)
+	ctx := context.Background()
+
+	if err := repo.Create(ctx, &model.Node{NodeID: "plat-1"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := repo.MarkOnlineRegister(ctx, "plat-1", "linux", "amd64", "Ubuntu", "22.04", "6.1.0-1"); err != nil {
+		t.Fatalf("mark online register: %v", err)
+	}
+	got, err := repo.GetByNodeID(ctx, "plat-1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.OS != "linux" || got.Arch != "amd64" || got.OSName != "Ubuntu" || got.OSVersion != "22.04" || got.KernelVersion != "6.1.0-1" {
+		t.Fatalf("platform = %+v", got)
+	}
+	if err := repo.TouchHeartbeat(ctx, "plat-1"); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	after, err := repo.GetByNodeID(ctx, "plat-1")
+	if err != nil {
+		t.Fatalf("get after heartbeat: %v", err)
+	}
+	if after.OSName != "Ubuntu" || after.OSVersion != "22.04" || after.KernelVersion != "6.1.0-1" {
+		t.Fatalf("heartbeat must not change version fields: %+v", after)
 	}
 }
 
@@ -274,19 +377,19 @@ func TestNodeListByFilter(t *testing.T) {
 			NodeID: "gpu-01",
 			Status: model.NodeStatusOnline,
 			OS:     "linux",
-			Labels: map[string]string{"pool": "gpu", "zone": "east"},
+			Groups: []string{"gpu", "east"},
 		},
 		{
 			NodeID: "gpu-02",
 			Status: model.NodeStatusOffline,
 			OS:     "linux",
-			Labels: map[string]string{"pool": "gpu", "zone": "west"},
+			Groups: []string{"gpu", "west"},
 		},
 		{
 			NodeID: "win-01",
 			Status: model.NodeStatusOnline,
 			OS:     "windows",
-			Labels: map[string]string{"pool": "cpu", "zone": "east"},
+			Groups: []string{"cpu", "east"},
 		},
 	}
 	for _, n := range nodes {
@@ -307,14 +410,14 @@ func TestNodeListByFilter(t *testing.T) {
 		t.Fatalf("expected gpu-01, got %v (err=%v)", res, err)
 	}
 
-	// 3. Filter by Labels
-	res, err = repo.ListByFilter(ctx, NodeFilter{Labels: map[string]string{"pool": "gpu"}})
+	// 3. Filter by groups (AND)
+	res, err = repo.ListByFilter(ctx, NodeFilter{Groups: []string{"gpu"}})
 	if err != nil || len(res) != 2 {
 		t.Fatalf("expected 2 gpu nodes, got %d (err=%v)", len(res), err)
 	}
 
-	// 4. Filter by multiple labels
-	res, err = repo.ListByFilter(ctx, NodeFilter{Labels: map[string]string{"pool": "gpu", "zone": "west"}})
+	// 4. Filter by multiple groups
+	res, err = repo.ListByFilter(ctx, NodeFilter{Groups: []string{"gpu", "west"}})
 	if err != nil || len(res) != 1 || res[0].NodeID != "gpu-02" {
 		t.Fatalf("expected gpu-02, got %v (err=%v)", res, err)
 	}
@@ -323,5 +426,96 @@ func TestNodeListByFilter(t *testing.T) {
 	res, err = repo.ListByFilter(ctx, NodeFilter{NodeIDs: []string{"nonexistent"}})
 	if err != nil || len(res) != 0 {
 		t.Fatalf("expected 0 nodes, got %d (err=%v)", len(res), err)
+	}
+}
+
+func TestNodeListPage(t *testing.T) {
+	t.Parallel()
+
+	_, repo := newNodeRepoForTest(t)
+	ctx := context.Background()
+
+	for _, id := range []string{"a-node", "b-node", "c-node"} {
+		if err := repo.Create(ctx, &model.Node{NodeID: id}); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+
+	page, total, err := repo.ListPage(ctx, NodeFilter{}, 2, 0)
+	if err != nil || total != 3 || len(page) != 2 || page[0].NodeID != "a-node" || page[1].NodeID != "b-node" {
+		t.Fatalf("first page: page=%v total=%d err=%v", page, total, err)
+	}
+	page, total, err = repo.ListPage(ctx, NodeFilter{}, 2, 2)
+	if err != nil || total != 3 || len(page) != 1 || page[0].NodeID != "c-node" {
+		t.Fatalf("last page: page=%v total=%d err=%v", page, total, err)
+	}
+
+	groupsPage, total, err := repo.ListPage(ctx, NodeFilter{Groups: []string{"gpu"}}, 10, 0)
+	if err != nil {
+		t.Fatalf("groups page: %v", err)
+	}
+	_ = groupsPage
+	if total != 0 {
+		t.Fatalf("expected 0 nodes with group gpu, total=%d", total)
+	}
+
+	if err := repo.Create(ctx, &model.Node{NodeID: "gpu-a", Groups: []string{"gpu", "east"}}); err != nil {
+		t.Fatalf("create gpu-a: %v", err)
+	}
+	if err := repo.Create(ctx, &model.Node{NodeID: "gpu-b", Groups: []string{"gpu", "west"}}); err != nil {
+		t.Fatalf("create gpu-b: %v", err)
+	}
+	if err := repo.Create(ctx, &model.Node{NodeID: "cpu-a", Groups: []string{"cpu"}}); err != nil {
+		t.Fatalf("create cpu-a: %v", err)
+	}
+	groupsPage, total, err = repo.ListPage(ctx, NodeFilter{Groups: []string{"gpu"}}, 1, 0)
+	if err != nil || total != 2 || len(groupsPage) != 1 || groupsPage[0].NodeID != "gpu-a" {
+		t.Fatalf("gpu first page: page=%v total=%d err=%v", groupsPage, total, err)
+	}
+	groupsPage, total, err = repo.ListPage(ctx, NodeFilter{Groups: []string{"gpu"}}, 1, 1)
+	if err != nil || total != 2 || len(groupsPage) != 1 || groupsPage[0].NodeID != "gpu-b" {
+		t.Fatalf("gpu second page: page=%v total=%d err=%v", groupsPage, total, err)
+	}
+}
+
+func TestAdminDescriptionSurvivesConcurrentHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	_, repo := newNodeRepoForTest(t)
+	ctx := context.Background()
+	if err := repo.Create(ctx, &model.Node{
+		NodeID:      "race-node",
+		Status:      model.NodeStatusOffline,
+		Description: "before",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				_ = repo.TouchHeartbeat(ctx, "race-node")
+			}
+		}
+	}()
+
+	for range 50 {
+		desc := "admin-updated"
+		if err := repo.UpdateAdminFields(ctx, "race-node", NodeAdminPatch{Description: &desc}); err != nil {
+			t.Fatalf("update admin: %v", err)
+		}
+	}
+	close(done)
+
+	got, err := repo.GetByNodeID(ctx, "race-node")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Description != "admin-updated" {
+		t.Fatalf("description = %q, want admin-updated", got.Description)
 	}
 }

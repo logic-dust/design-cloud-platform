@@ -2,7 +2,9 @@ package file
 
 import (
 	"context"
-	"encoding/json"
+	"design-cloud-engine/internal/contract"
+	json "design-cloud-engine/internal/platform/jsoncodec"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path"
@@ -11,30 +13,50 @@ import (
 
 	"design-cloud-engine/internal/execution/payload"
 
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/execution"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/settings/schema"
 )
 
-// ListDir lists files in a directory via the launcher.
+// ListDir lists files in a directory via the PrivilegedExec.
 func (s *Service) ListDir(ctx context.Context, dirPath, runUser string) (DirInfo, error) {
-	listResult, err := s.execute(ctx, execution.ActionFileList, payload.FileList{Dir: dirPath}, runUser)
+	listResult, err := s.execute(ctx, execution.ActionFileList, payload.FileList{Dir: dirPath, Limit: s.listMaxEntries(ctx)}, runUser)
 	if err != nil {
+		if isMissingDirectory(err) {
+			return DirInfo{}, contract.NewNotFoundError("directory not found")
+		}
 		return DirInfo{}, execution.HandleError(s.logger, err, "file.list_files")
 	}
 
 	dirInfo := DirInfo{Name: path.Base(dirPath), Path: dirPath, Files: []payload.FileInfo{}}
-	if listResult == "" || listResult == "[]" {
+	if listResult == "" {
 		return dirInfo, nil
 	}
 
-	var launcherFiles []payload.FileInfo
-	if err := json.Unmarshal([]byte(listResult), &launcherFiles); err != nil {
-		s.logger.Error("failed to unmarshal launcher file list", "error", err, "result", listResult)
-		return DirInfo{}, fmt.Errorf("invalid file list response from launcher: %w", err)
+	var listed struct {
+		Files     []payload.FileInfo `json:"files"`
+		Truncated bool               `json:"truncated"`
 	}
-	dirInfo.Files = launcherFiles
+	if err := json.Unmarshal([]byte(listResult), &listed); err != nil {
+		s.logger.Error("failed to unmarshal PrivilegedExec file list", "error", err, "result", listResult)
+		return DirInfo{}, fmt.Errorf("invalid file list response from PrivilegedExec: %w", err)
+	}
+	if listed.Files != nil {
+		dirInfo.Files = listed.Files
+	}
+	dirInfo.Truncated = listed.Truncated
 	return dirInfo, nil
+}
+
+func (s *Service) listMaxEntries(ctx context.Context) int {
+	if s.settingsSvc == nil {
+		return schema.ListMaxEntriesDefault
+	}
+	fileSetting, err := s.settingsSvc.GetFileSettings(ctx)
+	if err != nil {
+		return schema.ListMaxEntriesDefault
+	}
+	return fileSetting.ListMaxEntries
 }
 
 func (s *Service) ListLocations(ctx context.Context, runUser string) ([]LocationInfo, error) {
@@ -78,13 +100,13 @@ func (s *Service) ResolveLocationPath(ctx context.Context, locationName, relPath
 	case PredefinedDirReleases:
 		dbUser, err := s.userSvc.GetDBUser(ctx, runUser)
 		if err != nil || dbUser.Role != model.RoleSuperAdmin {
-			return "", fmt.Errorf("%w: file location not found: %s", fs.ErrNotExist, locationName)
+			return "", contract.NewNotFoundError(fmt.Sprintf("file location not found: %s", locationName))
 		}
 		root = s.desktopReleaseDir(ctx)
 	default:
 		location, ok := s.extraFileLocation(ctx, locationName)
 		if !ok || !location.Enabled {
-			return "", fmt.Errorf("%w: file location not found: %s", fs.ErrNotExist, locationName)
+			return "", contract.NewNotFoundError(fmt.Sprintf("file location not found: %s", locationName))
 		}
 		root = location.Root
 	}
@@ -106,7 +128,7 @@ func (s *Service) ResolveLocationPath(ctx context.Context, locationName, relPath
 		return "", fmt.Errorf("resolve location path: %w", err)
 	}
 	if relativeToRoot == ".." || strings.HasPrefix(relativeToRoot, ".."+string(filepath.Separator)) || filepath.IsAbs(relativeToRoot) {
-		return "", fmt.Errorf("%w: invalid location path", fs.ErrInvalid)
+		return "", contract.NewValidationError("invalid location path")
 	}
 	return target, nil
 }
@@ -145,10 +167,10 @@ func (s *Service) ensureWritableLocation(ctx context.Context, locationName, runU
 		return err
 	}
 	if !policy.Exists {
-		return fmt.Errorf("%w: file location not found", fs.ErrNotExist)
+		return contract.NewNotFoundError("file location not found")
 	}
 	if policy.ReadOnly {
-		return fmt.Errorf("%w: file location is read-only", fs.ErrPermission)
+		return contract.NewForbiddenError("file location is read-only")
 	}
 	return nil
 }
@@ -171,12 +193,24 @@ func (s *Service) extraFileLocation(ctx context.Context, name string) (schema.Fi
 
 func validateEntryName(name string) error {
 	if name == "" || name == "." || name == ".." {
-		return fmt.Errorf("%w: invalid file name", fs.ErrInvalid)
+		return contract.NewValidationError("invalid file name")
 	}
 	if filepath.Base(name) != name || strings.ContainsAny(name, "/\\\x00\r\n\t") {
-		return fmt.Errorf("%w: invalid file name", fs.ErrInvalid)
+		return contract.NewValidationError("invalid file name")
 	}
 	return nil
+}
+
+func isMissingDirectory(err error) bool {
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	if execErr, ok := errors.AsType[*execution.ActionError](err); ok {
+		msg := execErr.Message + " " + execErr.Stderr
+		return strings.Contains(msg, "no such file or directory") ||
+			strings.Contains(msg, "cannot access") && strings.Contains(msg, "No such file")
+	}
+	return false
 }
 
 func normalizeLocationPath(relPath string) (string, error) {
@@ -184,14 +218,14 @@ func normalizeLocationPath(relPath string) (string, error) {
 		return "", nil
 	}
 	if filepath.IsAbs(relPath) || strings.ContainsAny(relPath, "\x00\r\n\t") {
-		return "", fmt.Errorf("%w: invalid location path", fs.ErrInvalid)
+		return "", contract.NewValidationError("invalid location path")
 	}
 	cleanRel := filepath.Clean(relPath)
 	if cleanRel == "." {
 		return "", nil
 	}
 	if cleanRel == ".." || strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("%w: invalid location path", fs.ErrInvalid)
+		return "", contract.NewValidationError("invalid location path")
 	}
 	return cleanRel, nil
 }

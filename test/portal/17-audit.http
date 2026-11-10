@@ -1,0 +1,28 @@
+# ========================================
+# ===== AUDIT Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+
+
+### 读取审计日志尾部 (Audit admin / single-admin)
+GET {{addr}}/api/admin/audit/logs/audit?tail=200&page=1
+Authorization: Bearer {{accessToken}}
+
+### 读取安全日志尾部 (Audit admin / single-admin)
+GET {{addr}}/api/admin/audit/logs/security?tail=200&page=1
+Authorization: Bearer {{accessToken}}
+
+# ----- SSE 流式握手见 22-sse-push.http -----
+
+### 分页查询执行记录 (Audit admin / single-admin)
+GET {{addr}}/api/admin/audit/executions?limit=20&offset=0
+Authorization: Bearer {{accessToken}}
+
+### 按过滤条件查询执行记录 (Audit admin / single-admin)
+GET {{addr}}/api/admin/audit/executions?status=3&limit=20&offset=0
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,404
+### 按 executionId 查询单条执行记录 (Audit admin / single-admin)
+GET {{addr}}/api/admin/audit/executions/{{testExecutionId}}
+Authorization: Bearer {{accessToken}}

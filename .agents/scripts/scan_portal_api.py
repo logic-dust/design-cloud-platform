@@ -113,7 +113,7 @@ def parse_all_routes():
 def scan_portal_api():
     if not os.path.exists(API_DIR):
         print(f"Error: {API_DIR} not found.")
-        return
+        raise SystemExit(1)
 
     routes = parse_all_routes()
 

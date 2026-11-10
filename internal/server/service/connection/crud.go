@@ -2,76 +2,84 @@ package connection
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io/fs"
 	"strconv"
+	"strings"
 	"time"
 
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/common/crypto"
 	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/server/push"
 )
 
-const AllUsers = "all"
-
-// formatConnID formats a connection ID for event payloads.
 func formatConnID(id uint) string {
 	return strconv.FormatUint(uint64(id), 10)
 }
 
-// ListAll returns paginated connections for admin listing (no cache).
-func (s *Service) ListAll(ctx context.Context, limit, offset int) ([]model.Connection, int64, error) {
-	return s.connectionRepo.List(ctx, limit, offset)
-}
-
-// ListByUser get connections of a user, served through the settings-driven TTL cache.
-func (s *Service) ListByUser(ctx context.Context, user string) ([]model.Connection, error) {
-	if user == AllUsers {
-		conns, _, err := s.connectionRepo.List(ctx, 50, 0)
-		if err != nil {
-			return nil, fmt.Errorf("list all connections: %w", err)
-		}
-		return conns, nil
-	}
-	return s.connListCache.GetWithTTL(ctx, user, s.listCacheTTL(ctx), func(ctx context.Context, u string) ([]model.Connection, error) {
-		conns, err := s.connectionRepo.ListByUser(ctx, u)
-		if err != nil {
-			return nil, fmt.Errorf("list connections for user %s: %w", u, err)
-		}
-		return conns, nil
-	})
-}
-
-// listCacheTTL 返回连接列表缓存 TTL：跟随 connection 域 ConnectionListCacheTTL
-// 设置（默认 60s，可配 15-1800s），每次调用动态读取以支持热更新。
-//
-// 读失败/未配置/未注入 settings 时返回 0，由 TTLCache 回退到构造时设定的代码
-// 默认值——"TTL<=0 走缓存级默认"是 cache 自身的契约，此处不重复一份默认值。
-func (s *Service) listCacheTTL(ctx context.Context) time.Duration {
-	if s.settingsSvc == nil {
-		return 0
-	}
-	settings, err := s.settingsSvc.GetConnectionSettings(ctx)
-	if err != nil {
-		return 0
-	}
-	return time.Duration(settings.ConnectionListCacheTTL) * time.Second
-}
-
-// invalidateConnListCache removes a user's cached connection list so the next
-// read hits the DB. Called after create / delete / collect.
-// Shared connections (username == "") appear in every user's list, so the
-// entire cache is cleared instead of a single key.
-func (s *Service) invalidateConnListCache(username string) {
-	if username == "" {
-		s.connListCache.Clear()
+// notifyOwnerRefresh pushes a connection refresh to the owner when the caller is
+// a passive party. Self-service sync CRUD (requestUser == owner) skips push —
+// the HTTP response is the operator feedback. Pass requestUser="" for async
+// agent paths; pass AllUsers for admin-on-behalf so the owner is notified.
+func (s *Service) notifyOwnerRefresh(ctx context.Context, requestUser, owner string, connID uint) {
+	if s.publisher == nil {
 		return
 	}
-	s.connListCache.Invalidate(username)
+	if owner != "" && requestUser != "" && requestUser != AllUsers && requestUser == owner {
+		return
+	}
+	// Empty TargetID means full list refresh (push contract); never emit "0".
+	targetID := ""
+	if connID != 0 {
+		targetID = formatConnID(connID)
+	}
+	msg := push.Message{
+		Name: push.EventConnection,
+		Payload: push.EventPayload{
+			Action:   "refresh",
+			TargetID: targetID,
+		},
+	}
+	if owner == "" {
+		s.publisher.Broadcast(ctx, msg)
+		return
+	}
+	s.publisher.PublishToUser(ctx, []string{owner}, msg)
 }
 
-// GetByID returns connection by ID
+// ListPage returns a paginated connection list. limit must be > 0 (enforced by repo).
+// Admin list view includes terminating tombstones and node-effective status.
+// Host is intentionally empty here (admin inventory); detail/user list/launch paths
+// project dial host via attachDialHost / ListByUserWithDialHost.
+func (s *Service) ListPage(ctx context.Context, limit, offset int) ([]model.Connection, int64, error) {
+	conns, total, err := s.connectionRepo.List(ctx, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	conns, err = s.withEffectiveStatuses(ctx, conns)
+	return conns, total, err
+}
+
+func (s *Service) ListByUser(ctx context.Context, user string) ([]model.Connection, error) {
+	var conns []model.Connection
+	var err error
+	if user == AllUsers {
+		conns, err = s.connectionRepo.ListAll(ctx)
+		if err != nil {
+			return nil, err
+		}
+		conns = excludeTerminating(conns)
+	} else {
+		conns, err = s.connectionRepo.ListByUserWithDialHost(ctx, user)
+		if err != nil {
+			return nil, fmt.Errorf("list connections for user %s: %w", user, err)
+		}
+	}
+	return s.withEffectiveStatuses(ctx, conns)
+}
+
+// GetByID loads the persisted connection row without dial-host projection.
+// Prefer GetVisibleByIDForUser for API JSON that must include Host.
 func (s *Service) GetByID(ctx context.Context, id uint) (model.Connection, error) {
 	conn, err := s.connectionRepo.GetByID(ctx, id)
 	if err != nil {
@@ -80,137 +88,111 @@ func (s *Service) GetByID(ctx context.Context, id uint) (model.Connection, error
 	return conn, nil
 }
 
+// GetByIDForUser returns the raw DB row for lifecycle operations (no Host, no effective-status).
 func (s *Service) GetByIDForUser(ctx context.Context, id uint, username string) (model.Connection, error) {
 	conn, err := s.GetByID(ctx, id)
 	if err != nil {
 		return model.Connection{}, err
 	}
-	if !canAccessConnection(username, conn) {
-		return model.Connection{}, fs.ErrPermission
+	if conn.Status == model.ConnectionTerminating && username != AllUsers {
+		return model.Connection{}, fmt.Errorf("connection %d: %w", id, contract.ErrNotFound)
+	}
+	if username != AllUsers && conn.Username != username {
+		return model.Connection{}, contract.NewForbiddenError("no permission to access this connection")
 	}
 	return conn, nil
 }
 
-// CreateManual creates a user-owned connection record that is not tied to an app submission.
-func (s *Service) CreateManual(ctx context.Context, username string, form CreateManualConnectionForm) (model.Connection, error) {
-	form, err := form.normalize()
+// GetVisibleByIDForUser is the user/admin GET detail path with effective status overlay.
+func (s *Service) GetVisibleByIDForUser(ctx context.Context, id uint, username string) (model.Connection, error) {
+	conn, err := s.GetByIDForUser(ctx, id, username)
 	if err != nil {
 		return model.Connection{}, err
 	}
-
-	conn := model.Connection{
-		Name:         "manual-" + crypto.GenRandomId(16),
-		Alias:        form.Alias,
-		Username:     username,
-		Host:         form.Host,
-		Port:         form.Port,
-		TargetNodeID: form.TargetNodeID,
-		Status:       model.ConnectionUnknown,
-		Source:       model.ConnectionSourceManual,
-		Protocol:     form.Protocol,
-	}
-	if conn.Username == "" {
-		return model.Connection{}, fmt.Errorf("%w: username is required", fs.ErrInvalid)
-	}
-
-	quota, err := s.effectiveMaxConnections(ctx, username)
+	out, err := s.withEffectiveStatuses(ctx, []model.Connection{conn})
 	if err != nil {
-		return model.Connection{}, fmt.Errorf("check connection quota: %w", err)
+		return model.Connection{}, err
+	}
+	s.attachDialHost(ctx, &out[0])
+	return out[0], nil
+}
+
+func (s *Service) Touch(ctx context.Context, id uint, username string) error {
+	conn, err := s.GetByIDForUser(ctx, id, username)
+	if err != nil {
+		return err
 	}
 
-	if err := s.connectionRepo.CreateWithQuota(ctx, &conn, quota); err != nil {
-		if common.IsUniqueConstraintError(err) {
-			return model.Connection{}, fmt.Errorf("%w: host=%s port=%d", ErrConnectionAlreadyExists, conn.Host, conn.Port)
+	now := time.Now()
+	if !s.rememberTouch(id, now) {
+		return nil
+	}
+
+	return s.connectionRepo.UpdateFields(ctx, conn.ID, map[string]any{
+		"last_accessed_at": now,
+	})
+}
+
+func (s *Service) rememberTouch(id uint, now time.Time) bool {
+	s.touchMu.Lock()
+	defer s.touchMu.Unlock()
+	if s.lastTouchAt == nil {
+		s.lastTouchAt = make(map[uint]time.Time)
+	}
+	for key, touched := range s.lastTouchAt {
+		if now.Sub(touched) >= 60*time.Second {
+			delete(s.lastTouchAt, key)
 		}
-		return model.Connection{}, fmt.Errorf("create manual connection: %w", err)
 	}
-	s.invalidateConnListCache(username)
-
-	// 手动创建是同步链路：操作者从 response 拿到完整 conn，无需推送
-	return conn, nil
+	if last, ok := s.lastTouchAt[id]; ok && now.Sub(last) < 60*time.Second {
+		return false
+	}
+	s.lastTouchAt[id] = now
+	return true
 }
 
-// CreateFixed creates an admin-assigned fixed connection record.
-func (s *Service) CreateFixed(ctx context.Context, form CreateFixedConnectionForm) (model.Connection, error) {
-	form, err := form.normalize()
-	if err != nil {
-		return model.Connection{}, err
+func (s *Service) PurgeUserConnections(ctx context.Context, username string) error {
+	username = strings.TrimSpace(username)
+	if username == "" || s.connectionRepo == nil {
+		return nil
 	}
-
-	conn, err := s.createFixedFromForm(ctx, form)
+	// Include terminating tombstones so user deletion does not leave quota/ghost rows.
+	conns, err := s.connectionRepo.ListAllByUser(ctx, username)
 	if err != nil {
-		if common.IsUniqueConstraintError(err) {
-			return model.Connection{}, fmt.Errorf("%w: host=%s port=%d", ErrConnectionAlreadyExists, form.Host, form.Port)
+		return err
+	}
+	if len(conns) > 0 {
+		ids := make([]uint, 0, len(conns))
+		for _, conn := range conns {
+			ids = append(ids, conn.ID)
 		}
-		return model.Connection{}, err
-	}
-
-	s.invalidateConnListCache(form.Username)
-
-	// 共享连接对所有用户可见：广播刷新；私有连接调用方同步拿到 conn，无需推送
-	if form.Shared {
-		s.notifyOwnerRefresh(ctx, "", conn.ID)
-	}
-
-	return conn, nil
-}
-
-// updateStatus patches a connection record's mutable fields based on the
-// ConnectionInfo payload and sets its status. It is the shared primitive
-// used by event handling, refresh, and sync flows.
-func (s *Service) updateStatus(ctx context.Context, connInfo *contract.ConnectionInfo, targetNodeID string, newStatus model.ConnectionStatus) error {
-	if connInfo.ConnectionID == 0 {
-		return fmt.Errorf("connection ID is required")
-	}
-	connectionRecord, err := s.connectionRepo.GetByID(ctx, connInfo.ConnectionID)
-	if err != nil {
-		return fmt.Errorf("failed to fetch connection: %w", err)
-	}
-
-	fields := make(map[string]any)
-	if connectionRecord.TargetNodeID == "" && targetNodeID != "" {
-		fields["target_node_id"] = targetNodeID
-	}
-	if connInfo.Name != "" && connectionRecord.Alias == "" {
-		fields["alias"] = connInfo.Name
-	}
-	if connInfo.Username != "" {
-		fields["username"] = connInfo.Username
-	}
-	if connInfo.Host != "" {
-		fields["host"] = connInfo.Host
-	}
-	if connInfo.Display != "" {
-		fields["display"] = connInfo.Display
-	}
-	if connInfo.Port != 0 {
-		fields["port"] = connInfo.Port
-	}
-	if connInfo.PID != 0 {
-		fields["pid"] = connInfo.PID
-	}
-	if connInfo.Protocol != "" {
-		fields["protocol"] = connInfo.Protocol
-	}
-	fields["status"] = newStatus
-	if err := s.connectionRepo.UpdateFields(ctx, connectionRecord.ID, fields); err != nil {
-		return fmt.Errorf("update connection %d fields: %w", connectionRecord.ID, err)
-	}
-
-	// 状态变化才推送（变化驱动）：agent 上报/系统回收等异步链路中，归属用户
-	// 不在请求链路上，需要得知状态跳变；状态未变（重复上报）零开销。
-	if connectionRecord.Status != newStatus {
-		s.notifyOwnerRefresh(ctx, connectionRecord.Username, connectionRecord.ID)
+		if _, err := s.Delete(ctx, AllUsers, ids...); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func canAccessConnection(username string, conn model.Connection) bool {
-	if username == AllUsers {
-		return true
+func (s *Service) dialHostForNode(ctx context.Context, nodeID string) string {
+	if nodeID == "" {
+		return ""
 	}
-	if conn.Shared {
-		return true
+	if s.nodeRepo == nil {
+		return nodeID
 	}
-	return conn.Username == username
+	node, err := s.nodeRepo.GetByNodeID(ctx, nodeID)
+	if err != nil {
+		if errors.Is(err, contract.ErrNotFound) {
+			return nodeID
+		}
+		return nodeID
+	}
+	return model.DialHostFor(node.DialHost, node.NodeID)
+}
+
+func (s *Service) attachDialHost(ctx context.Context, conn *model.Connection) {
+	if conn == nil {
+		return
+	}
+	conn.Host = s.dialHostForNode(ctx, conn.NodeID)
 }

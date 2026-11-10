@@ -1,20 +1,28 @@
 # Design Cloud Engine
 
-[![Go Version](https://img.shields.io/badge/Go-1.27-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.27.2%2B-blue.svg)](https://golang.org)
 
-Design Cloud Platform 核心引擎，基于 Server/Agent 架构，双组件安全隔离（Engine + Launcher），支持分布式部署。
+Design Cloud Platform 核心引擎，基于 Server/Agent 架构，双组件安全隔离（Engine + DcExec），支持分布式部署。
 
 ## 🏗️ 编译
 
+需要 **Go 1.27.2+**。`go.mod` 的 `go` 指令声明语言版本要求；未配置 `toolchain` 指令时，需自行安装满足最低版本要求的 Go。
+
 ```bash
 make all
+```
+
+静态检查与漏洞扫描（`lint` 先执行 `gofmt -l` 格式门禁再跑 staticcheck；工具以 go1.27.2 构建，安装到 `$HOME/go/bin`）：
+
+```bash
+make lint vuln
 ```
 
 或者单独编译某个组件，参看 [Makefile](Makefile) 中的目标。
 
 ## 📦 部署与运行
 
-详细部署说明请参考 [配置文件](docs-site/docs/deployment/config.md) 和 [部署](docs-site/docs/deployment/guide.md) 文档。
+详细部署说明请参考 [配置文件](docs-site/docs/deployment/config.md) 和 [安装与首次部署](docs-site/docs/deployment/install.md) 文档。
 
 ## 🔨 开发
 
@@ -36,4 +44,3 @@ hugo server #-D
 ```
 
 访问 `http://localhost:1313` 即可浏览文档站点。
-

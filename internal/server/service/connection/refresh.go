@@ -1,17 +1,28 @@
 package connection
 
 import (
+	"cmp"
 	"context"
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"fmt"
 	"time"
 
-	"design-cloud-engine/internal/execution/payload"
-
 	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/execution"
+	"design-cloud-engine/internal/execution/payload"
 	"design-cloud-engine/internal/model"
 )
+
+const (
+	defaultUserRefreshCooldown      = 10 * time.Second
+	minUserRefreshCooldownRetention = 5 * time.Minute
+	maxUserRefreshCooldownEntries   = 1000
+)
+
+type nodeUserKey struct {
+	nodeID   string
+	username string
+}
 
 func (s *Service) RefreshUserConnections(ctx context.Context, username string) error {
 	if username == "" {
@@ -27,44 +38,39 @@ func (s *Service) RefreshUserConnections(ctx context.Context, username string) e
 		return fmt.Errorf("list connections for refresh: %w", err)
 	}
 
-	// Group fixed VNC connections by target node.
-	byNode := make(map[string][]model.Connection)
-	var noNode []model.Connection
+	// Group seat-backed connections (VNC + XRDP with pid) by (target node, username).
+	byNodeUser := make(map[nodeUserKey][]model.Connection)
 	for _, conn := range connections {
-		src := conn.SourceType()
-		if src != model.ConnectionSourceFixed || conn.Protocol != contract.VNCProtocol {
+		switch conn.Protocol {
+		case contract.VNCProtocol:
+		case contract.XRDPProtocol:
+			if conn.PID == nil && conn.Display == nil {
+				continue
+			}
+		default:
 			continue
 		}
-		nodeID := conn.TargetNodeID
-		if nodeID == "" {
-			noNode = append(noNode, conn)
+		// 占坑行还在等本次拉起，不能被刷新改成 stopped。
+		if conn.Status == model.ConnectionPending {
 			continue
 		}
-		byNode[nodeID] = append(byNode[nodeID], conn)
+		if conn.NodeID == "" {
+			continue
+		}
+		key := nodeUserKey{nodeID: conn.NodeID, username: conn.Username}
+		byNodeUser[key] = append(byNodeUser[key], conn)
 	}
 
-	// Connections with no TargetNodeID: mark unknown conservatively.
-	for _, conn := range noNode {
-		if conn.Status == model.ConnectionUnknown || conn.Status == model.ConnectionStopped {
-			continue
-		}
-		if err := s.updateStatus(ctx, &contract.ConnectionInfo{ConnectionID: conn.ID}, "", model.ConnectionUnknown); err != nil {
-			s.logger.Warn("failed to mark connection unknown", "connectionId", conn.ID, "error", err)
+	for key, conns := range byNodeUser {
+		if _, err := s.checkManagedSeatsOnNode(ctx, key.nodeID, conns); err != nil {
+			s.logger.Warn("connection check failed for node", "nodeId", key.nodeID, "username", key.username, "error", err)
 		}
 	}
-
-	// For each node, dispatch CONNECTION_CHECK and merge results.
-	for nodeID, conns := range byNode {
-		if err := s.checkConnectionsOnNode(ctx, nodeID, conns); err != nil {
-			s.logger.Warn("connection check failed for node", "nodeId", nodeID, "error", err)
-		}
-	}
-	s.invalidateConnListCache(username)
 	return nil
 }
 
 func (s *Service) allowUserRefresh(username string) bool {
-	now := s.clockNow()
+	now := time.Now()
 	window := s.userRefreshWindow()
 
 	s.refreshMu.Lock()
@@ -101,23 +107,31 @@ func (s *Service) userRefreshWindow() time.Duration {
 	return defaultUserRefreshCooldown
 }
 
-func (s *Service) checkConnectionsOnNode(ctx context.Context, nodeID string, conns []model.Connection) error {
+func (s *Service) checkManagedSeatsOnNode(ctx context.Context, nodeID string, conns []model.Connection) (int, error) {
 	if len(conns) == 0 {
-		return nil
+		return 0, nil
+	}
+	orig := make(map[uint]model.Connection, len(conns))
+	for _, conn := range conns {
+		orig[conn.ID] = conn
 	}
 
-	// All connections belong to the same user (filtered by ListByUser).
 	username := conns[0].Username
+	dialHost := s.dialHostForNode(ctx, nodeID)
 	items := make([]payload.ConnectionCheckItem, 0, len(conns))
 	for _, conn := range conns {
+		var pidVal uint = 0
+		if conn.PID != nil {
+			pidVal = *conn.PID
+		}
 		items = append(items, payload.ConnectionCheckItem{
 			ConnectionID: conn.ID,
 			Username:     conn.Username,
-			Host:         conn.Host,
+			Host:         dialHost,
 			Port:         conn.Port,
 			Display:      conn.Display,
-			Protocol:     string(conn.Protocol),
-			PID:          conn.PID,
+			Protocol:     conn.Protocol.String(),
+			PID:          pidVal,
 			Name:         conn.Name,
 		})
 	}
@@ -131,42 +145,64 @@ func (s *Service) checkConnectionsOnNode(ctx context.Context, nodeID string, con
 
 	stdout, err := execution.Run(ctx, s.execSvc, req)
 	if err != nil {
-		return fmt.Errorf("connection check on node %s: %w", nodeID, err)
+		return 0, fmt.Errorf("connection check on node %s: %w", nodeID, err)
 	}
 
 	var result payload.ConnectionCheckResult
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		return fmt.Errorf("failed to parse connection check result from node %s: %w", nodeID, err)
+		return 0, fmt.Errorf("failed to parse connection check result from node %s: %w", nodeID, err)
 	}
 
+	changed := 0
 	for _, r := range result.Connections {
+		before := orig[r.ConnectionID]
 		switch r.State {
 		case payload.ConnectionCheckStateRunning:
-			info := connectionCheckItemToInfo(r)
-			if err := s.updateStatus(ctx, info, nodeID, model.ConnectionRunning); err != nil {
-				s.logger.Warn("failed to update running connection", "connectionId", r.ConnectionID, "error", err)
+			fields := map[string]any{
+				"status": model.ConnectionRunning,
+			}
+			rowChanged := before.Status != model.ConnectionRunning
+			if r.Info != nil {
+				if r.Info.Port > 0 {
+					fields["port"] = r.Info.Port
+					if r.Info.Port != before.Port {
+						rowChanged = true
+					}
+				}
+				if r.Info.PID > 0 {
+					fields["pid"] = &r.Info.PID
+					if before.PID == nil || *before.PID != r.Info.PID {
+						rowChanged = true
+					}
+				}
+			}
+			if rowChanged {
+				changed++
+				_ = s.connectionRepo.UpdateFields(ctx, r.ConnectionID, fields)
 			}
 		case payload.ConnectionCheckStateStopped:
-			if err := s.updateStatus(ctx, &contract.ConnectionInfo{ConnectionID: r.ConnectionID}, nodeID, model.ConnectionStopped); err != nil {
-				s.logger.Warn("failed to mark connection stopped", "connectionId", r.ConnectionID, "error", err)
+			port := before.Port
+			if before.Protocol == contract.XRDPProtocol {
+				port = cmp.Or(port, 3389)
+			} else {
+				placeholderPort, err := s.connectionRepo.PickPlaceholderPort(ctx, before.NodeID, before.Username)
+				if err != nil {
+					if s.logger != nil {
+						s.logger.Warn("pick placeholder port after connection check stopped", "connectionId", r.ConnectionID, "error", err)
+					}
+					continue
+				}
+				port = placeholderPort
 			}
+			if before.Status != model.ConnectionStopped || before.PID != nil || before.Display != nil {
+				changed++
+			}
+			_ = s.connectionRepo.MarkStoppedClearDisplay(ctx, r.ConnectionID, port)
 		default:
-			s.logger.Debug("connection check returned unknown, skipping", "connectionId", r.ConnectionID, "message", r.Message)
+			if s.logger != nil {
+				s.logger.Debug("connection check returned unknown, skipping", "connectionId", r.ConnectionID, "message", r.Message)
+			}
 		}
 	}
-	return nil
-}
-
-func connectionCheckItemToInfo(r payload.ConnectionCheckItemResult) *contract.ConnectionInfo {
-	info := &contract.ConnectionInfo{ConnectionID: r.ConnectionID}
-	if r.Info != nil {
-		info.Host = r.Info.Host
-		info.Port = r.Info.Port
-		info.Display = r.Info.Display
-		info.Protocol = contract.Protocol(r.Info.Protocol)
-		info.PID = r.Info.PID
-		info.Name = r.Info.Name
-		info.Username = r.Info.Username
-	}
-	return info
+	return changed, nil
 }

@@ -1,0 +1,85 @@
+# ========================================
+# ===== SYSTEM-APPS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录（需要 System Admin 权限） -----
+
+### 解析既有 test_app（幂等，写入 testAppId）
+GET {{addr}}/api/admin/system/apps
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,201,409
+### 创建应用（写入 testAppId；409 时由 runner 回查列表捕获 id）
+POST {{addr}}/api/admin/system/apps
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "test_app",
+  "alias": "Test Application",
+  "type": "batch",
+  "cmd": "/bin/true",
+  "queue": "normal",
+  "public": true
+}
+
+> {%
+
+
+
+const payload = response.body;
+if (payload?.data?.id) {
+  client.global.set("testAppId", String(payload.data.id));
+  client.log(`Stored testAppId=${payload.data.id}`);
+}
+
+
+
+%}
+
+# @expect 200,404
+### 获取单个应用详情 (Admin only)
+GET {{addr}}/api/admin/system/apps/{{testAppId}}
+Authorization: Bearer {{accessToken}}
+
+### 更新应用
+PUT {{addr}}/api/admin/system/apps/{{testAppId}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "updated_app1",
+  "alias": "Updated Alias",
+  "type": "batch",
+  "cmd": "/bin/true",
+  "queue": "normal",
+  "public": true
+}
+
+# @expect 200,404
+### 查看应用关联用户
+GET {{addr}}/api/admin/system/apps/{{testAppId}}/users
+Authorization: Bearer {{accessToken}}
+
+### 替换应用关联用户列表
+PUT {{addr}}/api/admin/system/apps/{{testAppId}}/users
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "users": [
+    "{{username}}"
+  ]
+}
+
+### 增量移除应用用户关联 (Admin only)
+PATCH {{addr}}/api/admin/system/apps/{{testAppId}}/users
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "remove": [
+    "{{normalUser}}"
+  ]
+}
+
+# 删除应用见 06-apps.http 末尾（先跑用户侧 launch，再清理）

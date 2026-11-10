@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	fsutil "design-cloud-engine/internal/common/fs"
+	fsutil "design-cloud-engine/internal/platform/fs"
 )
 
 // readPIDRecord reads the process ID and optional start time from the sentinel PID file.

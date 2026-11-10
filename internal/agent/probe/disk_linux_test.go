@@ -66,13 +66,15 @@ func TestCollectDiskUsageWithInvalidPath(t *testing.T) {
 	}
 }
 
-func TestStatfsWithTimeout_SingleflightPreventsGoroutineLeak(t *testing.T) {
+func TestStatfsWithTimeoutCoalescesCanceledCallers(t *testing.T) {
 	origStatfs := statfsFn
 	defer func() { statfsFn = origStatfs }()
 
 	var calls atomic.Int32
 	blockCh := make(chan struct{})
-	defer close(blockCh)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(blockCh) }) }
+	defer release()
 
 	statfsFn = func(path string, stat *syscall.Statfs_t) error {
 		calls.Add(1)
@@ -91,13 +93,11 @@ func TestStatfsWithTimeout_SingleflightPreventsGoroutineLeak(t *testing.T) {
 	errs := make([]error, concurrentCallers)
 
 	for i := range concurrentCallers {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
+		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 			defer cancel()
-			_, errs[idx] = StatfsWithTimeout(ctx, testPath)
-		}(i)
+			_, errs[i] = StatfsWithTimeout(ctx, testPath)
+		})
 	}
 
 	wg.Wait()
@@ -109,10 +109,30 @@ func TestStatfsWithTimeout_SingleflightPreventsGoroutineLeak(t *testing.T) {
 		}
 	}
 
-	// Crucial assertion: singleflight coalesced all callers; statfsFn was invoked only ONCE!
+	// All callers share one syscall even though each waiting context has expired.
 	if calls.Load() != 1 {
-		t.Fatalf("expected exactly 1 statfs call due to singleflight, got %d", calls.Load())
+		t.Fatalf("expected exactly 1 statfs call, got %d", calls.Load())
 	}
+
+	diskProbeGroup.Lock()
+	activeCalls := len(diskProbeGroup.calls)
+	diskProbeGroup.Unlock()
+	if activeCalls != 1 {
+		t.Fatalf("active shared calls = %d, want one; callers must not accumulate per-call wait state", activeCalls)
+	}
+
+	release()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		diskProbeGroup.Lock()
+		activeCalls = len(diskProbeGroup.calls)
+		diskProbeGroup.Unlock()
+		if activeCalls == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("shared statfs call was not removed after syscall completed")
 }
 
 func TestLookupFilesystem(t *testing.T) {

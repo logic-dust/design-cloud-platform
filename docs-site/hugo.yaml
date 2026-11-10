@@ -12,8 +12,6 @@ module:
   imports:
     - path: github.com/imfing/hextra
   mounts:
-    - source: content
-      target: content
     - source: docs
       target: content/docs
     - source: static
@@ -38,18 +36,6 @@ menu:
       weight: 15
       params:
         type: search
-    - name: 概述
-      pageRef: /docs/overview
-      weight: 20
-    - name: 开发
-      pageRef: /docs/development
-      weight: 30
-    - name: 部署
-      pageRef: /docs/deployment
-      weight: 40
-    - name: Portal API
-      pageRef: /docs/api
-      weight: 50
     - name: 主题
       weight: 60
       params:

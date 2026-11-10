@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"log/slog"
 	"net/http"
 
@@ -11,7 +10,6 @@ import (
 	"design-cloud-engine/internal/execution"
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/portal/httputil"
-	"design-cloud-engine/internal/server/service"
 	connsvc "design-cloud-engine/internal/server/service/connection"
 
 	"github.com/labstack/echo/v5"
@@ -24,83 +22,141 @@ type connectionHandler struct {
 
 type connService interface {
 	ListByUser(ctx context.Context, username string) ([]model.Connection, error)
-	ListAll(ctx context.Context, limit, offset int) ([]model.Connection, int64, error)
+	ListPage(ctx context.Context, limit, offset int) ([]model.Connection, int64, error)
 	GetByID(ctx context.Context, id uint) (model.Connection, error)
 	GetByIDForUser(ctx context.Context, id uint, username string) (model.Connection, error)
-	CreateManual(ctx context.Context, requestUser string, form connsvc.CreateManualConnectionForm) (model.Connection, error)
-	CreateFixed(ctx context.Context, form connsvc.CreateFixedConnectionForm) (model.Connection, error)
-	UpsertFixed(ctx context.Context, forms []connsvc.CreateFixedConnectionForm) (connsvc.UpsertFixedResult, error)
-	Delete(ctx context.Context, requestUser string, ids ...uint) error
+	GetVisibleByIDForUser(ctx context.Context, id uint, username string) (model.Connection, error)
+	Launch(ctx context.Context, username string, resourceID uint) (model.Connection, error)
+	Delete(ctx context.Context, requestUser string, ids ...uint) (connsvc.DeleteResult, error)
 	RefreshUserConnections(ctx context.Context, username string) error
 	GenerateVNCOTP(ctx context.Context, connectionID uint, username string) (string, error)
 	StartConnection(ctx context.Context, connectionID uint, username string) error
 	StopConnection(ctx context.Context, connectionID uint, username string) error
 	RestartConnection(ctx context.Context, connectionID uint, username string) error
+	Touch(ctx context.Context, connectionID uint, username string) error
 	TriggerCollect(ctx context.Context, target contract.CollectTarget) error
 	ExecuteCleanup(ctx context.Context) (connsvc.CleanupRunResult, error)
+
+	// Resource specifications
+	ListAccessibleResources(ctx context.Context, username string) ([]connsvc.ResourceDTO, error)
+	GetAccessibleResourceByID(ctx context.Context, username string, id uint) (connsvc.ResourceDTO, error)
+	AdminListResources(ctx context.Context, limit, offset int, protocol, nameLike string) ([]model.ConnectionResource, int64, error)
+	AdminGetResourceByID(ctx context.Context, id uint) (model.ConnectionResource, error)
+	AdminCreateResource(ctx context.Context, res *model.ConnectionResource) error
+	AdminUpdateResource(ctx context.Context, res *model.ConnectionResource) error
+	AdminBatchUpsertResources(ctx context.Context, items []model.ConnectionResource) (*connsvc.BatchResourceUpsertResponse, error)
+	AdminDeleteResource(ctx context.Context, id uint) error
+	AdminListResourceUsers(ctx context.Context, resourceID uint) ([]model.User, error)
+	AdminListResourceUsersPage(ctx context.Context, resourceID uint, limit, offset int) ([]model.User, int64, error)
+	AdminReplaceResourceUsers(ctx context.Context, resourceID uint, userIDs []uint) error
+	AdminPatchResourceUsers(ctx context.Context, resourceID uint, addIDs, removeIDs []uint) error
 }
 
-func newConnectionHandler(svc *service.Container, logger *slog.Logger) *connectionHandler {
+func newConnectionHandler(connectionSvc connService, logger *slog.Logger) *connectionHandler {
 	return &connectionHandler{
-		connection: svc.Connection,
+		connection: connectionSvc,
 		logger:     logger,
 	}
 }
 
 // route: /api/connections
 func (h *connectionHandler) connectionsAPI(g *echo.Group) {
-	g.POST("", h.createConnection)
+	// 规格子资源
+	g.GET("/resources", h.listAccessibleResources)
+	g.GET("/resources/:id", h.getAccessibleResource)
+
+	// 实例资源
 	g.GET("", h.listConnections)
-	g.POST("/refresh", h.refreshConnections)
+	g.POST("", h.launchConnection)
 	g.POST("/batch-delete", h.bulkDeleteConnections)
+	g.POST("/refresh", h.refreshConnections)
 	g.GET("/:id", h.getConnection)
 	g.DELETE("/:id", h.deleteConnection)
 	g.POST("/:id/vnc-otp", h.createConnectionVNCOTP)
+	g.POST("/:id/touch", h.touchConnection)
 	g.POST("/:id/:op", h.connectionAction)
 }
 
-// --- Connection CRUD and lifecycle handlers
+// --- 规格端点
 
-// --- 获取当前用户的连接列表
+func (h *connectionHandler) listAccessibleResources(c *echo.Context) error {
+	resources, err := h.connection.ListAccessibleResources(c.Request().Context(), httputil.CurrentUsername(c))
+	if err != nil {
+		return httputil.RespondError(c, err)
+	}
+	return c.JSON(http.StatusOK, httputil.Response{Data: resources})
+}
+
+func (h *connectionHandler) getAccessibleResource(c *echo.Context) error {
+	id, err := httputil.ParseUintParam(c, "id")
+	if err != nil {
+		return err
+	}
+	res, err := h.connection.GetAccessibleResourceByID(c.Request().Context(), httputil.CurrentUsername(c), id)
+	if err != nil {
+		return handleConnectionError(c, err)
+	}
+	return c.JSON(http.StatusOK, httputil.Response{Data: res})
+}
+
+// --- 实例端点
+
 func (h *connectionHandler) listConnections(c *echo.Context) error {
 	connections, err := h.connection.ListByUser(c.Request().Context(), httputil.CurrentUsername(c))
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-
 	return c.JSON(http.StatusOK, httputil.Response{Data: connections})
 }
 
-// --- 根据连接ID获取详细信息
+func (h *connectionHandler) launchConnection(c *echo.Context) error {
+	var body struct {
+		ResourceID uint `json:"resourceId"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	}
+	if body.ResourceID == 0 {
+		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "resourceId is required"})
+	}
+
+	conn, err := h.connection.Launch(c.Request().Context(), httputil.CurrentUsername(c), body.ResourceID)
+	if err != nil {
+		return handleConnectionError(c, err)
+	}
+	return c.JSON(http.StatusCreated, httputil.Response{Data: conn})
+}
+
 func (h *connectionHandler) getConnection(c *echo.Context) error {
 	id, err := httputil.ParseUintParam(c, "id")
 	if err != nil {
 		return err
 	}
-
-	conn, err := h.connection.GetByIDForUser(c.Request().Context(), id, httputil.CurrentUsername(c))
+	conn, err := h.connection.GetVisibleByIDForUser(c.Request().Context(), id, httputil.CurrentUsername(c))
 	if err != nil {
 		return handleConnectionError(c, err)
 	}
-
 	return c.JSON(http.StatusOK, httputil.Response{Data: conn})
 }
 
-// --- 删除单个连接
 func (h *connectionHandler) deleteConnection(c *echo.Context) error {
 	id, err := httputil.ParseUintParam(c, "id")
 	if err != nil {
 		return err
 	}
-
-	if err := h.connection.Delete(c.Request().Context(), httputil.CurrentUsername(c), id); err != nil {
+	res, err := h.connection.Delete(c.Request().Context(), httputil.CurrentUsername(c), id)
+	if err != nil {
 		return handleConnectionError(c, err)
 	}
-
+	if res.TerminatingCount > 0 {
+		return c.JSON(http.StatusAccepted, httputil.Response{
+			Message: "remote session teardown incomplete; marked terminating",
+			Data:    res,
+		})
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 
-// --- 批量删除连接
 func (h *connectionHandler) bulkDeleteConnections(c *echo.Context) error {
 	var body struct {
 		IDs httputil.IDList `json:"ids"`
@@ -111,39 +167,49 @@ func (h *connectionHandler) bulkDeleteConnections(c *echo.Context) error {
 	if len(body.IDs) == 0 {
 		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "ids are required"})
 	}
-
-	if err := h.connection.Delete(c.Request().Context(), httputil.CurrentUsername(c), body.IDs...); err != nil {
+	res, err := h.connection.Delete(c.Request().Context(), httputil.CurrentUsername(c), body.IDs...)
+	if err != nil {
 		return handleConnectionError(c, err)
 	}
-
+	if res.TerminatingCount > 0 {
+		return c.JSON(http.StatusAccepted, httputil.Response{
+			Message: "remote session teardown incomplete; marked terminating",
+			Data:    res,
+		})
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 
-// --- 刷新当前用户的连接状态
 func (h *connectionHandler) refreshConnections(c *echo.Context) error {
 	if err := h.connection.RefreshUserConnections(c.Request().Context(), httputil.CurrentUsername(c)); err != nil {
 		return httputil.RespondError(c, err)
 	}
-
 	return c.NoContent(http.StatusNoContent)
 }
 
-// --- 生成连接的 TurboVNC 一次性密码（OTP）
 func (h *connectionHandler) createConnectionVNCOTP(c *echo.Context) error {
 	id, err := httputil.ParseUintParam(c, "id")
 	if err != nil {
 		return err
 	}
-
 	otp, err := h.connection.GenerateVNCOTP(c.Request().Context(), id, httputil.CurrentUsername(c))
 	if err != nil {
 		return handleConnectionError(c, err)
 	}
-
 	return c.JSON(http.StatusOK, httputil.Response{Data: map[string]string{"otp": otp}})
 }
 
-// connectionAction dispatches start/stop/restart connection requests.
+func (h *connectionHandler) touchConnection(c *echo.Context) error {
+	id, err := httputil.ParseUintParam(c, "id")
+	if err != nil {
+		return err
+	}
+	if err := h.connection.Touch(c.Request().Context(), id, httputil.CurrentUsername(c)); err != nil {
+		return handleConnectionError(c, err)
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
 func (h *connectionHandler) connectionAction(c *echo.Context) error {
 	id, err := httputil.ParseUintParam(c, "id")
 	if err != nil {
@@ -171,43 +237,11 @@ func (h *connectionHandler) connectionAction(c *echo.Context) error {
 // --- Shared error mapper
 
 func handleConnectionError(c *echo.Context, err error) error {
-	if errors.Is(err, fs.ErrNotExist) {
-		return c.JSON(http.StatusNotFound, httputil.Response{Message: "connection not found"})
-	}
-	if errors.Is(err, fs.ErrPermission) {
-		return c.JSON(http.StatusForbidden, httputil.Response{Message: "permission denied"})
-	}
-	if errors.Is(err, fs.ErrInvalid) {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if status, msg, ok := connsvc.PublicHTTP(err); ok {
+		return c.JSON(status, httputil.Response{Message: msg})
 	}
 	if _, ok := errors.AsType[*execution.ActionError](err); ok {
 		return c.JSON(http.StatusBadGateway, httputil.Response{Message: err.Error()})
 	}
 	return httputil.RespondError(c, err)
-}
-
-func (h *connectionHandler) createConnection(c *echo.Context) error {
-	var req connsvc.CreateManualConnectionForm
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
-	}
-
-	conn, err := h.connection.CreateManual(c.Request().Context(), httputil.CurrentUsername(c), req)
-	if err != nil {
-		if errors.Is(err, fs.ErrInvalid) {
-			return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
-		}
-		if errors.Is(err, fs.ErrNotExist) {
-			return c.JSON(http.StatusNotFound, httputil.Response{Message: err.Error()})
-		}
-		if errors.Is(err, fs.ErrPermission) {
-			return c.JSON(http.StatusForbidden, httputil.Response{Message: err.Error()})
-		}
-		if errors.Is(err, connsvc.ErrConnectionAlreadyExists) {
-			return c.JSON(http.StatusConflict, httputil.Response{Message: err.Error()})
-		}
-		return httputil.RespondError(c, err)
-	}
-
-	return c.JSON(http.StatusCreated, httputil.Response{Data: conn})
 }

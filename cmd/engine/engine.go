@@ -9,17 +9,26 @@ import (
 	"slices"
 
 	"design-cloud-engine/cmd/engine/command"
+	"design-cloud-engine/cmd/engine/console"
 	"design-cloud-engine/internal/agent"
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/config"
-	"design-cloud-engine/internal/logger"
+	"design-cloud-engine/internal/platform/config"
+	"design-cloud-engine/internal/platform/logger"
 )
 
 // runEngine orchestrates the runtime initialization, startup, and graceful shutdown
 // of the engine's core services (Agent component unconditionally on all nodes; Server component additionally when ServerEnabled).
 func runEngine(ctx context.Context, flags *command.Flags) error {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	var cleanups []func()
+	defer func() {
+		// Stop every context-bound worker before releasing the resources it uses.
+		// Keep cancellation and cleanup in one defer so LIFO ordering cannot stop
+		// Server dependencies before their background loops have been told to exit.
+		cancel()
+		for _, cleanup := range slices.Backward(cleanups) {
+			cleanup()
+		}
+	}()
 
 	// --- 加载配置（配置文件模式或 configless 内存装配；模式冲突/缺省会 Fail-Fast）
 	cfg, mode, err := loadConfigForStart(flags)
@@ -43,31 +52,17 @@ func runEngine(ctx context.Context, flags *command.Flags) error {
 		}
 	}
 
-	// --- 初始化 app 日志记录器
-	appLogger, logCloser, err := logger.NewLogger(logger.LogConfig{
-		Path:       appLogPath(cfg),
-		Host:       cfg.Runtime.NodeID,
-		Level:      cfg.Log.AppLevel,
-		MaxSize:    cfg.Log.MaxSize,
-		MaxAge:     cfg.Log.MaxAge,
-		MaxBackups: cfg.Log.MaxBackups,
+	// --- 初始化 app 日志记录器（stdout；journald / 容器运行时接管落盘与轮转）
+	appLogger, _, err := logger.NewLogger(logger.LogConfig{
+		Host:  cfg.Runtime.NodeID,
+		Level: cfg.Log.AppLevel,
 	})
 	if err != nil {
 		return fmt.Errorf("app logger init failed: %w", err)
 	}
-	if logCloser != nil {
-		defer func() { _ = logCloser.Close() }()
-	}
 
 	// --- 错误通道，用于接收服务启动或运行过程中发生的错误，触发cleanup
 	errCh := make(chan error, 2)
-	var cleanups []func()
-	defer func() {
-		for _, cleanup := range slices.Backward(cleanups) {
-			cleanup()
-		}
-	}()
-
 	// --- 显示启动信息
 	showStartupInfo(cfg)
 
@@ -85,7 +80,7 @@ func runEngine(ctx context.Context, flags *command.Flags) error {
 
 	// --- 启动（GRPC）client：agent（全节点运行）
 	appLogger.With("component", "agent").Info("Starting AGENT", "node_id", cfg.Runtime.NodeID, "servers", cfg.Runtime.Servers, "heartbeat_interval", cfg.Cluster.HeartbeatInterval)
-	cleanup, err := startAgent(cfg, appLogger)
+	cleanup, err := startAgent(ctx, cfg, appLogger)
 	if err != nil {
 		return fmt.Errorf("agent start failed: %w", err)
 	}
@@ -105,14 +100,14 @@ func runEngine(ctx context.Context, flags *command.Flags) error {
 	return nil
 }
 
-func startAgent(cfg *config.Config, logger *slog.Logger) (func(), error) {
+func startAgent(ctx context.Context, cfg *config.Config, logger *slog.Logger) (func(), error) {
 	agentLog := logger.With("component", "agent")
 
 	if len(cfg.Runtime.Servers) == 0 {
 		return nil, fmt.Errorf("no cluster servers resolved from cluster.servers")
 	}
 
-	agentMgr, err := agent.NewManager(logger, cfg)
+	agentMgr, err := agent.NewManager(ctx, logger, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -133,29 +128,29 @@ func startAgent(cfg *config.Config, logger *slog.Logger) (func(), error) {
 // --- 启动信息 ---
 
 func showStartupInfo(cfg *config.Config) {
-	common.PrintlnStdout("+++++++++++++++++++++++++")
-	common.PrintlnStdout(config.AppName)
-	common.PrintlnStdout("+++++++++++++++++++++++++")
+	console.PrintlnStdout("+++++++++++++++++++++++++")
+	console.PrintlnStdout(config.AppName)
+	console.PrintlnStdout("+++++++++++++++++++++++++")
 
-	common.PrintlnStdout("Config Dir:    ", cfg.Runtime.BaseDir)
+	console.PrintlnStdout("Base Dir:      ", cfg.Runtime.BaseDir)
 
 	var roles []string
 	if cfg.Runtime.ServerEnabled {
 		roles = append(roles, "server")
-		common.PrintlnStdout("Listen Host:   ", cfg.Portal.Host)
-		common.PrintlnStdout("Listen Port:   ", cfg.Portal.Port)
+		console.PrintlnStdout("Listen Host:   ", cfg.Portal.Host)
+		console.PrintlnStdout("Listen Port:   ", cfg.Portal.Port)
 
-		common.PrintlnStdout("Database Type: ", cfg.Database.Type)
+		console.PrintlnStdout("Database Type: ", cfg.Database.Type)
 		if cfg.Database.Type == "sqlite" {
 			appDbAbsPath, _ := filepath.Abs(cfg.Database.Path)
-			common.PrintlnStdout("Database File: ", appDbAbsPath)
+			console.PrintlnStdout("Database File: ", appDbAbsPath)
 		}
 	}
 
 	roles = append(roles, "agent")
 
-	common.PrintlnStdout("Node Roles:    ", roles)
-	common.PrintlnStdout("Log Level:     ", cfg.Log.AppLevel.String())
-	common.PrintlnStdout("Access Level:  ", cfg.Log.AccessLevel.String())
-	common.PrintlnStdout("Log Dir:       ", cmp.Or(cfg.Log.Dir, "(console)"))
+	console.PrintlnStdout("Node Roles:    ", roles)
+	console.PrintlnStdout("Log Level:     ", cfg.Log.AppLevel.String())
+	console.PrintlnStdout("Access Level:  ", cfg.Log.AccessLevel.String())
+	console.PrintlnStdout("Audit Log Dir: ", cmp.Or(cfg.Log.Dir, "(unset)"))
 }

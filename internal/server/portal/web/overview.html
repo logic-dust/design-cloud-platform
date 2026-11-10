@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>设计云平台 · 运行态势感知</title>
+  <link rel="icon" type="image/x-icon" href="static/assets/design-cloud.ico?v=__WEB_VERSION__">
+  <!-- 资源 URL 带版本参数（__WEB_VERSION__ 由服务端替换为构建版本）：
+       版本变 → URL 变 → 浏览器缓存失效重新下载，大屏长期驻留也能更新代码 -->
+  <script src="static/js/theme.js?v=__WEB_VERSION__"></script>
+  <link rel="stylesheet" href="static/css/theme.css?v=__WEB_VERSION__">
+  <link rel="stylesheet" href="static/css/overview.css?v=__WEB_VERSION__">
+</head>
+
+<body>
+
+  <div class="screen">
+
+    <!-- ================= Header 顶栏 ================= -->
+    <header>
+      <div class="title-wrap">
+        <img class="logo" src="static/assets/design-cloud-logo.svg?v=__WEB_VERSION__" alt="设计云平台" />
+        <div class="title">
+          <h1 id="pageTitle">设计云平台 <span class="sub-title">· 运行态势感知</span>
+            <span class="sys-clock" id="sysClock"></span>
+          </h1>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span class="data-updated" id="dataUpdated"></span>
+        <div class="conn-status" id="connBadge">
+          <span class="dot"></span>
+          <span id="connText">数据流正常</span>
+        </div>
+        <button class="btn-action" id="fullscreenBtn">⛶ 全屏</button>
+        <button class="theme-toggle-btn" id="themeToggle" title="切换亮/暗主题">🌙</button>
+      </div>
+    </header>
+
+    <main>
+
+      <!-- ================= Row 1: 硬件资源（对齐 Desktop 集群概览上排） ================= -->
+      <section class="section-block">
+        <div class="panel-head">
+          <div class="panel-title">硬件资源</div>
+        </div>
+        <div class="top-cards-section" id="topCardsSection">
+
+        <!-- 大列 1: 集群节点 (左列自适应/固定，高度与中列铺满) -->
+        <div class="col-major col-config-spec">
+          <div class="glass-panel metric-card node-overview-card">
+            <div class="spec-col-side">
+              <div class="card-label">集群节点</div>
+
+              <div class="spec-main-body">
+                <div class="node-status-list">
+                  <div class="node-status-row">
+                    <span class="spec-label">总计</span>
+                    <span class="val-num text-cyan" id="kpiNodesConfigured">--</span>
+                  </div>
+                  <div class="node-status-row">
+                    <span class="spec-label">在线</span>
+                    <span class="val-num text-emerald" id="kpiNodesOnline">--</span>
+                  </div>
+                  <div class="node-status-row">
+                    <span class="spec-label">维护</span>
+                    <span class="val-num text-amber" id="kpiNodesMaintenance">--</span>
+                  </div>
+                  <div class="node-status-row">
+                    <span class="spec-label">离线</span>
+                    <span class="val-num text-rose" id="kpiNodesOffline">--</span>
+                  </div>
+                </div>
+                <svg class="card-ring card-ring-nodes" width="88" height="88" viewBox="0 0 88 88">
+                  <circle cx="44" cy="44" r="35" fill="none" stroke="var(--track-bg)" stroke-width="14" />
+                  <circle id="ringNodes" cx="44" cy="44" r="35" fill="none" stroke="var(--accent-emerald)"
+                    stroke-width="14" stroke-dasharray="219.9" stroke-dashoffset="219.9"
+                    transform="rotate(-90 44 44)" class="ring-arc" />
+                  <text x="44" y="44" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="600" fill="var(--accent-emerald)"
+                    id="ringNodesText">0.0%</text>
+                </svg>
+              </div>
+
+              <div class="spec-divider-h"></div>
+
+              <div class="spec-sub-specs">
+                <div class="spec-sub-item">
+                  <span class="spec-label">处理器</span>
+                  <div class="spec-val-box"><span class="val-num text-main" id="kpiCpuOnline">--</span><span class="val-denom" id="kpiCpuTotal">/--</span></div>
+                </div>
+                <div class="spec-sub-item">
+                  <span class="spec-label">内存 (GB)</span>
+                  <div class="spec-val-box"><span class="val-num text-violet" id="kpiMemOnlineStatic">--</span><span class="val-denom text-violet" id="kpiMemTotalStatic">/--</span></div>
+                </div>
+                <div class="card-footnote">* 在线容量 / 配置总量</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 大列 2: CPU / 内存 / 负载 (中列) -->
+        <div class="col-major col-middle">
+          <div class="middle-row-1">
+            <div class="glass-panel metric-card metric-card-util">
+              <div class="card-info">
+                <div class="card-label">CPU 平均利用率</div>
+                <div class="util-value text-cyan" id="kpiCpuUtilVal">0.0%</div>
+                <div class="meter-pill-track">
+                  <div class="meter-pill-bar bg-cyan" id="barCpuUtil"></div>
+                </div>
+              </div>
+              <div class="card-footnote">* 仅统计在线节点</div>
+            </div>
+
+            <div class="glass-panel metric-card metric-card-stack">
+              <div class="card-top-row">
+                <div class="card-info">
+                  <div class="card-label">内存使用量</div>
+                  <div class="usage-rows">
+                    <div class="usage-row">
+                      <span class="spec-label">总计</span>
+                      <span class="usage-val">
+                        <span class="val-num text-main" id="kpiMemTotalVal">--</span>
+                        <span class="val-unit" id="kpiMemTotalUnit">GB</span>
+                      </span>
+                    </div>
+                    <div class="usage-row">
+                      <span class="spec-label">使用</span>
+                      <span class="usage-val">
+                        <span class="val-num text-violet" id="kpiMemUsedVal">--</span>
+                        <span class="val-unit" id="kpiMemUsedUnit">GB</span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <svg class="card-ring" width="80" height="80" viewBox="0 0 80 80">
+                  <circle cx="40" cy="40" r="33" fill="none" stroke="var(--track-bg)" stroke-width="11" />
+                  <circle id="ringMemUsed" cx="40" cy="40" r="33" fill="none" stroke="var(--primary-violet)"
+                    stroke-width="11" stroke-dasharray="207.3" stroke-dashoffset="207.3"
+                    transform="rotate(-90 40 40)" class="ring-arc" />
+                  <text x="40" y="40" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="600" fill="var(--primary-violet)"
+                    id="ringMemUsedText">0.0%</text>
+                </svg>
+              </div>
+              <div class="card-footnote">* 仅统计在线节点</div>
+            </div>
+          </div>
+
+          <div class="glass-panel metric-card load-metric-card">
+            <div class="card-info load-card-info">
+              <div class="card-label">集群总负载</div>
+              <div class="load-cols">
+                <div class="load-col" id="loadCol1">
+                  <div class="load-col-head">
+                    <span class="load-bar-lbl">1 分钟</span>
+                    <span class="val-num load-normal" id="kpiLoad1">0.00</span>
+                  </div>
+                  <div class="load-bar-track"><i id="barLoad1" class="load-normal-bg"></i></div>
+                </div>
+                <div class="load-col" id="loadCol5">
+                  <div class="load-col-head">
+                    <span class="load-bar-lbl">5 分钟</span>
+                    <span class="val-num load-normal" id="kpiLoad5">0.00</span>
+                  </div>
+                  <div class="load-bar-track"><i id="barLoad5" class="load-normal-bg"></i></div>
+                </div>
+                <div class="load-col" id="loadCol15">
+                  <div class="load-col-head">
+                    <span class="load-bar-lbl">15 分钟</span>
+                    <span class="val-num load-normal" id="kpiLoad15">0.00</span>
+                  </div>
+                  <div class="load-bar-track"><i id="barLoad15" class="load-normal-bg"></i></div>
+                </div>
+              </div>
+              <div class="card-footnote" id="loadCoresNote">* 仅统计在线节点，当前满载为 <span class="text-bold text-mono">--</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 大列 3: GPU 列（上显存、下利用率；显存卡自然撑开宽度，利用率卡随之对齐） -->
+        <div class="col-major col-gpu-spec">
+          <div class="gpu-dyn-cards-col">
+            <div class="glass-panel metric-card metric-card-stack">
+              <div class="card-top-row">
+                <div class="card-info">
+                  <div class="card-label">显存使用量</div>
+                  <div class="usage-rows">
+                    <div class="usage-row">
+                      <span class="spec-label">总计</span>
+                      <span class="usage-val">
+                        <span class="val-num text-main" id="kpiGpuMemTotal">--</span>
+                        <span class="val-unit" id="kpiGpuMemTotalUnit">GB</span>
+                      </span>
+                    </div>
+                    <div class="usage-row">
+                      <span class="spec-label">使用</span>
+                      <span class="usage-val">
+                        <span class="val-num text-violet" id="kpiGpuMemUsed">--</span>
+                        <span class="val-unit" id="kpiGpuMemUsedUnit">GB</span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <svg class="card-ring" width="80" height="80" viewBox="0 0 80 80">
+                  <circle cx="40" cy="40" r="33" fill="none" stroke="var(--track-bg)" stroke-width="11" />
+                  <circle id="ringGpuMem" cx="40" cy="40" r="33" fill="none" stroke="var(--primary-violet)"
+                    stroke-width="11" stroke-dasharray="207.3" stroke-dashoffset="207.3"
+                    transform="rotate(-90 40 40)" class="ring-arc" />
+                  <text x="40" y="40" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="600" fill="var(--primary-violet)"
+                    id="ringGpuMemText">0.0%</text>
+                </svg>
+              </div>
+              <div class="card-footnote">* 仅统计在线节点</div>
+            </div>
+
+            <div class="glass-panel metric-card metric-card-util">
+              <div class="card-info">
+                <div class="card-label">GPU 平均利用率</div>
+                <div class="util-value text-teal" id="kpiGpuUtilVal">0.0%</div>
+                <div class="meter-pill-track">
+                  <div class="meter-pill-bar bg-teal" id="barGpuUtil"></div>
+                </div>
+              </div>
+              <div class="card-footnote">* 仅统计在线节点</div>
+            </div>
+          </div>
+        </div>
+        </div>
+      </section>
+
+      <!-- ================= Row 2: 作业调度 (全宽独立行，采用对齐 Desktop 的 1:2 布局) ================= -->
+      <section class="section-block">
+        <div class="panel-head">
+          <div class="panel-title">作业调度</div>
+          <span class="panel-tag sched-ring-tag" id="schedHostBadge">
+            <span>调度主机</span>
+            <svg class="sched-ring" width="18" height="18" viewBox="0 0 36 36">
+              <circle cx="18" cy="18" r="16" fill="var(--track-bg)" />
+              <circle id="ringSchedNodes" cx="18" cy="18" r="8" fill="none" stroke="var(--accent-emerald)"
+                stroke-width="16" stroke-dasharray="50.3" stroke-dashoffset="0"
+                transform="rotate(-90 18 18)" class="ring-arc" />
+            </svg>
+            <span id="schedNodesTag">-- / --</span>
+          </span>
+        </div>
+
+        <div class="job-split-row">
+          <!-- 状态统计卡片（环图 + 5 态图例列表） -->
+          <div class="glass-panel job-status-card">
+            <div class="job-status-body">
+              <div class="job-donut-wrap">
+                <svg viewBox="0 0 136 136" aria-hidden="true">
+                  <circle cx="68" cy="68" r="57" fill="none" stroke="var(--track-bg)" stroke-width="16" />
+                  <circle id="ringJobTotal" cx="68" cy="68" r="57" fill="none" stroke="var(--accent-emerald)"
+                    stroke-width="16" stroke-dasharray="358.1" stroke-dashoffset="358.1"
+                    transform="rotate(-90 68 68)" class="ring-arc" />
+                  <text x="68" y="64" text-anchor="middle" font-size="24" font-weight="600" font-family="var(--font-mono)" fill="var(--text-main)" id="jobTotalText">0</text>
+                  <text x="68" y="84" text-anchor="middle" font-size="12" font-weight="400" fill="var(--text-secondary)">总计</text>
+                </svg>
+              </div>
+
+              <div class="job-legend-sheet">
+                <div class="job-legend-item">
+                  <span class="status-dot dot-success"></span>
+                  <div class="job-legend-columns">
+                    <span class="legend-name">运行中</span>
+                    <span class="legend-val text-emerald text-mono" id="jobRunning">0</span>
+                  </div>
+                </div>
+                <div class="job-legend-item">
+                  <span class="status-dot dot-accent"></span>
+                  <div class="job-legend-columns">
+                    <span class="legend-name">等待中</span>
+                    <span class="legend-val text-cyan text-mono" id="jobPending">0</span>
+                  </div>
+                </div>
+                <div class="job-legend-item">
+                  <span class="status-dot dot-warning"></span>
+                  <div class="job-legend-columns">
+                    <span class="legend-name">已暂停</span>
+                    <span class="legend-val text-amber text-mono" id="jobSuspended">0</span>
+                  </div>
+                </div>
+                <div class="job-legend-item">
+                  <span class="status-dot dot-neutral"></span>
+                  <div class="job-legend-columns">
+                    <span class="legend-name">已完成</span>
+                    <span class="legend-val text-secondary text-mono" id="jobDone">0</span>
+                  </div>
+                </div>
+                <div class="job-legend-item">
+                  <span class="status-dot dot-danger"></span>
+                  <div class="job-legend-columns">
+                    <span class="legend-name">已失败</span>
+                    <span class="legend-val text-rose text-mono" id="jobFailed">0</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 队列分布迷你表 -->
+          <div class="glass-panel queue-table-card">
+            <div class="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>队列</th>
+                    <th>分配作业</th>
+                    <th class="text-emerald">运行中</th>
+                    <th class="text-cyan">排队中</th>
+                    <th>已完成</th>
+                    <th class="text-amber">已挂起</th>
+                    <th class="text-rose">已失败</th>
+                  </tr>
+                </thead>
+                <tbody id="queueTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= Row 3: 存储监控 (全宽独立行) ================= -->
+      <section class="section-block">
+        <div class="panel-head">
+          <div class="panel-title">存储监控</div>
+        </div>
+
+        <div class="glass-panel storage-full-card">
+          <!-- 共享存储容量 Donut 概述卡片 (Well) -->
+          <div class="storage-donut-section">
+            <div class="donut-svg-wrap">
+              <svg viewBox="0 0 64 64">
+                <circle cx="32" cy="32" r="26" fill="none" stroke="var(--track-bg)" stroke-width="8" />
+                <circle id="storageDonutArc" cx="32" cy="32" r="26" fill="none" stroke="var(--accent-emerald)"
+                  stroke-width="8" stroke-dasharray="163.4" stroke-dashoffset="163.4"
+                  transform="rotate(-90 32 32)" class="ring-arc" />
+                <text x="32" y="32" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="600" font-family="var(--font-mono)"
+                  fill="var(--accent-emerald)" id="donutPctText">0.0%</text>
+              </svg>
+            </div>
+
+            <div class="storage-cap-summary">
+              <div class="cap-block">
+                <span class="cap-label">已用容量</span>
+                <span class="cap-value text-emerald" id="storageUsedVal">--</span>
+              </div>
+              <div class="cap-block">
+                <span class="cap-label">总容量</span>
+                <span class="cap-value text-cyan" id="storageTotalVal">--</span>
+              </div>
+            </div>
+            <div class="storage-summary-note">* 汇总所有已启用挂载点的容量</div>
+          </div>
+
+          <!-- 存储挂载点明细表格 -->
+          <div class="table-wrapper storage-table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>标签</th>
+                  <th>挂载点名称</th>
+                  <th>协议类型</th>
+                  <th>总容量</th>
+                  <th>已用容量</th>
+                  <th>使用率</th>
+                  <th>更新时间</th>
+                </tr>
+              </thead>
+              <tbody id="storageTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="static/js/portal-dom.js?v=__WEB_VERSION__"></script>
+  <script src="static/js/overview.js?v=__WEB_VERSION__"></script>
+</body>
+
+</html>

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"design-cloud-engine/internal/common"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/model"
 
 	"gorm.io/gorm"
@@ -22,7 +22,7 @@ func (r *ExecutionRepo) GetByExecutionID(ctx context.Context, executionID string
 	var record model.ExecutionRecord
 	if err := r.store.db.WithContext(ctx).Where("execution_id = ?", executionID).First(&record).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return model.ExecutionRecord{}, fmt.Errorf("execution record (executionID=%s): %w", executionID, common.ErrNotFound)
+			return model.ExecutionRecord{}, fmt.Errorf("execution record (executionID=%s): %w", executionID, contract.ErrNotFound)
 		}
 		return model.ExecutionRecord{}, err
 	}
@@ -39,7 +39,7 @@ func (r *ExecutionRepo) Create(ctx context.Context, executionID, actionName, tra
 		Status:      model.ExecutionStatusPending,
 	}
 	if err := r.store.db.WithContext(ctx).Create(record).Error; err != nil {
-		if common.IsUniqueConstraintError(err) {
+		if IsUniqueConstraintError(err) {
 			return fmt.Errorf("%w: %s", ErrExecutionActionExists, executionID)
 		}
 		return err
@@ -53,23 +53,12 @@ func (r *ExecutionRepo) MarkDispatched(ctx context.Context, traceID string) erro
 		Update("status", model.ExecutionStatusDispatched).Error
 }
 
-// ExecutionListFilter is the filter criteria for listing execution records.
-type ExecutionListFilter struct {
-	ServerNode string                 // empty = any
-	ActionName string                 // empty = any
-	Status     *model.ExecutionStatus // nil = any
-	From       *time.Time             // nil = no lower bound on CreatedAt
-	To         *time.Time             // nil = no upper bound on CreatedAt
-	Limit      int                    // 0 = default 50, max 500
-	Offset     int                    // 0 = start from the beginning
-}
-
-func (r *ExecutionRepo) List(ctx context.Context, f ExecutionListFilter) ([]model.ExecutionRecord, int64, error) {
+func (r *ExecutionRepo) List(ctx context.Context, f model.ExecutionListFilter) ([]model.ExecutionRecord, int64, error) {
 	limit := f.Limit
-	if limit <= 0 {
-		limit = 50
+	if err := validateLimit(limit); err != nil {
+		return nil, 0, err
 	}
-	limit = min(limit, 500)
+	limit = CapListLimit(limit)
 
 	q := r.store.db.WithContext(ctx).Model(&model.ExecutionRecord{})
 	if f.ServerNode != "" {
@@ -94,13 +83,87 @@ func (r *ExecutionRepo) List(ctx context.Context, f ExecutionListFilter) ([]mode
 	}
 
 	var records []model.ExecutionRecord
-	if err := q.Order("created_at DESC").Limit(limit).Offset(f.Offset).Find(&records).Error; err != nil {
+	if err := q.Order("created_at DESC, id DESC").Limit(limit).Offset(f.Offset).Find(&records).Error; err != nil {
 		return nil, 0, err
 	}
 	return records, total, nil
 }
 
-func (r *ExecutionRepo) MarkTerminal(ctx context.Context, traceID string, status model.ExecutionStatus, success bool, exitCode int, systemError string) (bool, error) {
+// PruneTerminal 批量删除 created_at 早于 before 的终态执行记录，单次最多 limit 条。
+// 只删除终态：pending/dispatched 记录可能仍有在途请求，删除会让幂等回查误判为不存在。
+func (r *ExecutionRepo) PruneTerminal(ctx context.Context, before time.Time, limit int) (int64, error) {
+	if err := validateLimit(limit); err != nil {
+		return 0, err
+	}
+	terminal := []model.ExecutionStatus{
+		model.ExecutionStatusSucceeded,
+		model.ExecutionStatusFailed,
+		model.ExecutionStatusTimedOut,
+		model.ExecutionStatusCancelled,
+	}
+
+	var ids []uint
+	if err := r.store.db.WithContext(ctx).Model(&model.ExecutionRecord{}).
+		Where("status IN ? AND created_at < ?", terminal, before).
+		Limit(limit).
+		Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	result := r.store.db.WithContext(ctx).Delete(&model.ExecutionRecord{}, ids)
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
+// abandonedNonTerminalError is written when a pending/dispatched row is closed
+// because it outlived the staleness window. The row is kept so a retry of the
+// same execution_id replays a terminal failure instead of dispatching again.
+const abandonedNonTerminalError = "abandoned: non-terminal record exceeded staleness window"
+
+// ExpireStale marks pending/dispatched rows whose updated_at is before the
+// cutoff as timed out. It does not delete them: deletion would make an
+// idempotent retry look like the command never ran.
+func (r *ExecutionRepo) ExpireStale(ctx context.Context, before time.Time, limit int) (int64, error) {
+	if err := validateLimit(limit); err != nil {
+		return 0, err
+	}
+	nonTerminal := []model.ExecutionStatus{
+		model.ExecutionStatusPending,
+		model.ExecutionStatusDispatched,
+	}
+
+	var ids []uint
+	if err := r.store.db.WithContext(ctx).Model(&model.ExecutionRecord{}).
+		Where("status IN ? AND updated_at < ?", nonTerminal, before).
+		Limit(limit).
+		Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	now := time.Now()
+	result := r.store.db.WithContext(ctx).Model(&model.ExecutionRecord{}).
+		Where("id IN ? AND status IN ?", ids, nonTerminal).
+		Updates(map[string]any{
+			"status":       model.ExecutionStatusTimedOut,
+			"system_error": abandonedNonTerminalError,
+			"finished_at":  now,
+		})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
+// MarkTerminal transitions a pending/dispatched record to a terminal status.
+// Success is derived, not stored: is_success ⇔ status == succeeded.
+func (r *ExecutionRepo) MarkTerminal(ctx context.Context, traceID string, status model.ExecutionStatus, exitCode int, systemError string) (bool, error) {
 	result := r.store.db.WithContext(ctx).Model(&model.ExecutionRecord{}).
 		Where("trace_id = ? AND status IN ?", traceID, []model.ExecutionStatus{
 			model.ExecutionStatusPending,
@@ -108,7 +171,6 @@ func (r *ExecutionRepo) MarkTerminal(ctx context.Context, traceID string, status
 		}).
 		Updates(map[string]any{
 			"status":       status,
-			"success":      success,
 			"exit_code":    exitCode,
 			"system_error": systemError,
 			"finished_at":  time.Now(),

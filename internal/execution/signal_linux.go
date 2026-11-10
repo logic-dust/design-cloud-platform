@@ -6,9 +6,9 @@ import (
 	"syscall"
 )
 
-// LauncherKilledBySeccomp reports whether err is a dc-launcher process that the kernel
+// DcExecKilledBySeccomp reports whether err is a PrivilegedExec process that the kernel
 // killed for a blocked system call (seccomp), which Linux surfaces as SIGSYS.
-func LauncherKilledBySeccomp(err error) bool {
+func DcExecKilledBySeccomp(err error) bool {
 	return ExitErrorSignaled(err, syscall.SIGSYS)
 }
 

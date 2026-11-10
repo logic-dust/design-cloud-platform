@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"design-cloud-engine/internal/config"
 	"design-cloud-engine/internal/db"
+	"design-cloud-engine/internal/platform/config"
 	nodeService "design-cloud-engine/internal/server/service/node"
 )
 

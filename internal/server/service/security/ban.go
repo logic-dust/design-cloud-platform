@@ -1,12 +1,14 @@
 package security
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"net/netip"
 	"time"
 
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/settings/schema"
 )
 
 // DeleteByKey  removes the failure/Ban records for the given key from
@@ -19,9 +21,7 @@ func (s *Service) DeleteByKey(ctx context.Context, keyName string) {
 }
 
 func (s *Service) getAuthSettings(ctx context.Context) schema.AuthSettings {
-	v, err := s.authSettingsCache.Get(ctx, authSettingsKey, func(ctx context.Context, _ string) (schema.AuthSettings, error) {
-		return s.settingsSvc.GetAuthSettings(ctx)
-	})
+	v, err := s.settingsSvc.GetAuthSettings(ctx)
 	if err != nil {
 		return schema.AuthSettings{}
 	}
@@ -33,7 +33,7 @@ func (s *Service) getBanSecondsForUser(ctx context.Context) int {
 	if authSettings.UserBanDuration >= 60 {
 		return authSettings.UserBanDuration
 	}
-	return defaultBanSecondsForUser
+	return defaultAuthSettings.UserBanDuration
 }
 
 func (s *Service) getBanSecondsForIP(ctx context.Context) int {
@@ -41,7 +41,7 @@ func (s *Service) getBanSecondsForIP(ctx context.Context) int {
 	if authSettings.IPBanDuration >= 60 {
 		return authSettings.IPBanDuration
 	}
-	return defaultBanSecondsForIP
+	return defaultAuthSettings.IPBanDuration
 }
 
 func (s *Service) getUserMaxFailedTimes(ctx context.Context) int {
@@ -49,7 +49,7 @@ func (s *Service) getUserMaxFailedTimes(ctx context.Context) int {
 	if authSettings.MaxUserLoginAttempts > 0 {
 		return authSettings.MaxUserLoginAttempts
 	}
-	return defaultMaxUserFailedAttempts
+	return defaultAuthSettings.MaxUserLoginAttempts
 }
 
 func (s *Service) getIPMaxFailedTimes(ctx context.Context) int {
@@ -57,33 +57,40 @@ func (s *Service) getIPMaxFailedTimes(ctx context.Context) int {
 	if authSettings.MaxIPLoginAttempts > 0 {
 		return authSettings.MaxIPLoginAttempts
 	}
-	return defaultMaxIPFailedAttempts
+	return defaultAuthSettings.MaxIPLoginAttempts
 }
 
-// Ban creates a ban entry for the given key (IP or IP:username) persisting
-// it to DB via BanCache.
-func (s *Service) Ban(ctx context.Context, keyName string, record *BannedRecord) {
-	if record == nil {
-		return
-	}
-	if record.Reason == "" {
-		switch record.Type {
-		case model.BanTypeIP:
-			record.Reason = "too many failed with this IP, please try again later"
-		case model.BanTypeUser:
-			record.Reason = fmt.Sprintf("too many failed tries, please try again after %d seconds", s.getBanSecondsForUser(ctx))
-		}
-	}
-	record.BanTime = time.Now()
-
-	var duration time.Duration
-	if record.Type == model.BanTypeIP {
-		duration = time.Duration(s.getBanSecondsForIP(ctx)) * time.Second
+// Ban applies an auto-triggered ban for the given record (Key/Subject/Source/
+// IP/Username), filling in duration and default reason, and persists it via
+// BanCache.ApplyBan so reason and expiry survive restarts.
+func (s *Service) Ban(ctx context.Context, rec model.Ban) {
+	var seconds int
+	if rec.Subject == model.BanSubjectIP {
+		seconds = s.getBanSecondsForIP(ctx)
 	} else {
-		duration = time.Duration(s.getBanSecondsForUser(ctx)) * time.Second
+		seconds = s.getBanSecondsForUser(ctx)
 	}
-	if err := s.banCache.SetBannedUntil(ctx, keyName, new(record.BanTime.Add(duration))); err != nil {
-		s.logger.Error("failed to persist ban to DB", "key", keyName, "error", err)
+	until := time.Now().Add(time.Duration(seconds) * time.Second)
+	rec.BannedUntil = &until
+	rec.Reason = s.defaultBanReason(ctx, rec.Subject)
+
+	if err := s.banCache.ApplyBan(ctx, rec); err != nil {
+		s.logger.Error("failed to persist ban to DB", "key", rec.Key, "error", err)
+	}
+	if rec.Subject == model.BanSubjectUserIP && rec.Username != "" && s.onUserBanned != nil {
+		s.onUserBanned(rec.Username)
+	}
+}
+
+// defaultBanReason returns the user-facing reason string for an auto-triggered ban.
+func (s *Service) defaultBanReason(ctx context.Context, subject model.BanSubject) string {
+	switch subject {
+	case model.BanSubjectIP:
+		return "too many failed with this IP, please try again later"
+	case model.BanSubjectUserIP:
+		return fmt.Sprintf("too many failed tries, please try again after %d seconds", s.getBanSecondsForUser(ctx))
+	default:
+		return "banned, please contact the administrator"
 	}
 }
 
@@ -120,19 +127,11 @@ func (s *Service) IsBanned(ctx context.Context, IP, username string) (bool, Bann
 	for _, keyName := range keyNameCandidate {
 		dbRecord, ok := s.banCache.GetBanRecord(keyName)
 		if ok && dbRecord.Key != "" && dbRecord.BannedUntil != nil && dbRecord.BannedUntil.After(now) {
-			record := BannedRecord{
-				Type:     dbRecord.Type,
-				Username: dbRecord.Username,
-				IP:       dbRecord.IP,
-				BanTime:  dbRecord.CreatedAt,
+			if s.IsAllowlisted(ctx, IP) {
+				s.logger.Warn("ban allowlist hit: active ban ignored", "ip", IP, "key", keyName, "subject", dbRecord.Subject)
+				return false, BannedRecord{}
 			}
-			switch record.Type {
-			case model.BanTypeIP:
-				record.Reason = "too many failed with this IP, please try again later"
-			default:
-				record.Reason = fmt.Sprintf("too many failed tries, please try again after %d seconds", s.getBanSecondsForUser(ctx))
-			}
-			return true, record
+			return true, toBannedRecord(dbRecord)
 		}
 	}
 
@@ -141,18 +140,20 @@ func (s *Service) IsBanned(ctx context.Context, IP, username string) (bool, Bann
 
 // IsBannedByIP checks if an IP is banned regardless of username.
 // Used by session auth middleware where no username is available yet.
-func (s *Service) IsBannedByIP(_ context.Context, IP string) (bool, BannedRecord) {
-	dbRecord, ok := s.banCache.GetBanRecord(IP)
-	if !ok || dbRecord.Key == "" || dbRecord.BannedUntil == nil || !dbRecord.BannedUntil.After(time.Now()) {
-		return false, BannedRecord{}
+func (s *Service) IsBannedByIP(ctx context.Context, IP string) (bool, BannedRecord) {
+	return s.IsBanned(ctx, IP, "")
+}
+
+// toBannedRecord converts a stored ban into its client-facing representation.
+func toBannedRecord(r model.Ban) BannedRecord {
+	return BannedRecord{
+		Subject:  r.Subject,
+		Source:   r.Source,
+		Username: r.Username,
+		IP:       r.IP,
+		BanTime:  r.FirstFailedAt,
+		Reason:   r.Reason,
 	}
-	record := BannedRecord{
-		Type:    dbRecord.Type,
-		IP:      dbRecord.IP,
-		BanTime: dbRecord.CreatedAt,
-		Reason:  "too many failed requests from this IP, please try again later",
-	}
-	return true, record
 }
 
 // ListBannedRecords returns all currently active bans.
@@ -163,38 +164,43 @@ func (s *Service) ListBannedRecords() map[string]any {
 		if record.BannedUntil == nil || !record.BannedUntil.After(now) {
 			continue
 		}
-		allBannedRecords[record.Key] = BannedRecord{
-			Type:     record.Type,
-			Username: record.Username,
-			IP:       record.IP,
-			BanTime:  record.CreatedAt,
-		}
+		allBannedRecords[record.Key] = toBannedRecord(record)
 	}
 	return allBannedRecords
 }
 
-// AddFailedCount increments the failure counter and, if the threshold is
-// exceeded, triggers a ban.
-func (s *Service) AddFailedCount(ctx context.Context, keyName string, recordType model.BanType, IP, username string) {
-	failureRecord := model.BanRecord{
+// RecordFailure increments the failure counter for the given subject/source and,
+// if the threshold is exceeded, triggers a ban. It is the unified entry point for
+// all failure sources (login, session token).
+// Allowlisted IPs are silently ignored (with a WARN log) to avoid blind spots.
+// Active bans skip further counting (no dirty/flush churn while the window lasts).
+func (s *Service) RecordFailure(ctx context.Context, keyName string, subject model.BanSubject, source model.BanSource, IP, username string) {
+	if s.IsAllowlisted(ctx, IP) {
+		s.logger.Warn("ban allowlist hit: failure ignored", "ip", IP, "subject", subject, "source", source, "key", keyName)
+		return
+	}
+	if banned, _ := s.IsBanned(ctx, IP, username); banned {
+		return
+	}
+
+	record, err := s.banCache.AddBanRecord(model.Ban{
 		Key:      keyName,
 		IP:       IP,
 		Username: username,
-		Type:     recordType,
-	}
-
-	record, err := s.banCache.AddBanRecord(failureRecord)
+		Subject:  subject,
+		Source:   source,
+	})
 	if err != nil {
 		return
 	}
 
 	needBan := false
-	switch recordType {
-	case model.BanTypeIP:
+	switch subject {
+	case model.BanSubjectIP:
 		if int(record.Count) >= s.getIPMaxFailedTimes(ctx) {
 			needBan = true
 		}
-	case model.BanTypeUser:
+	case model.BanSubjectUserIP:
 		if int(record.Count) >= s.getUserMaxFailedTimes(ctx) {
 			needBan = true
 		}
@@ -203,12 +209,64 @@ func (s *Service) AddFailedCount(ctx context.Context, keyName string, recordType
 	}
 
 	if needBan {
-		s.Ban(ctx, keyName, &BannedRecord{Type: recordType, Username: username, IP: IP})
+		s.Ban(ctx, model.Ban{Key: keyName, Subject: subject, Source: source, IP: IP, Username: username})
 	}
 }
 
-// RecordIPFailure increments the IP failure counter and bans if the threshold
-// is reached.  Used for both login failures and invalid session token attempts.
+// RecordIPFailure records an invalid session token attempt against the IP and
+// bans if the threshold is reached.
 func (s *Service) RecordIPFailure(ctx context.Context, IP string) {
-	s.AddFailedCount(ctx, IP, model.BanTypeIP, IP, "")
+	s.RecordFailure(ctx, IP, model.BanSubjectIP, model.BanSourceSessionToken, IP, "")
+}
+
+// ManualBan duration bounds.
+const (
+	minManualBanDuration = time.Minute
+	maxManualBanDuration = 30 * 24 * time.Hour
+)
+
+// ManualBan applies an immediate administrator ban with Source=Manual (no failure
+// counting involved). subject=UserIP requires username; the ban key is IP or
+// IP:username accordingly.
+func (s *Service) ManualBan(ctx context.Context, subject model.BanSubject, IP, username string, duration time.Duration, reason string) (BannedRecord, error) {
+	if subject != model.BanSubjectIP && subject != model.BanSubjectUserIP {
+		return BannedRecord{}, fmt.Errorf("subject must be %q or %q", model.BanSubjectIP, model.BanSubjectUserIP)
+	}
+	if _, err := netip.ParseAddr(IP); err != nil {
+		return BannedRecord{}, fmt.Errorf("invalid ip %q", IP)
+	}
+	if subject == model.BanSubjectUserIP && username == "" {
+		return BannedRecord{}, fmt.Errorf("username is required when subject is %q", model.BanSubjectUserIP)
+	}
+	if duration < minManualBanDuration || duration > maxManualBanDuration {
+		return BannedRecord{}, fmt.Errorf("duration must be between %s and %s", minManualBanDuration, maxManualBanDuration)
+	}
+	reason = cmp.Or(reason, "banned by administrator")
+
+	key := IP
+	if subject == model.BanSubjectUserIP {
+		key = IP + ":" + username
+	}
+	now := time.Now()
+	until := now.Add(duration)
+	if err := s.banCache.ApplyBan(ctx, model.Ban{
+		Key:         key,
+		Subject:     subject,
+		Source:      model.BanSourceManual,
+		IP:          IP,
+		Username:    username,
+		BannedUntil: &until,
+		Reason:      reason,
+	}); err != nil {
+		return BannedRecord{}, fmt.Errorf("persist manual ban: %w", err)
+	}
+	s.logger.Info("manual ban applied", "key", key, "subject", subject, "ip", IP, "username", username, "until", until, "reason", reason)
+	return BannedRecord{
+		Subject:  subject,
+		Source:   model.BanSourceManual,
+		Username: username,
+		IP:       IP,
+		BanTime:  now,
+		Reason:   reason,
+	}, nil
 }

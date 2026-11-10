@@ -9,18 +9,17 @@ import (
 	"time"
 
 	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/portal/httputil"
 
+	"design-cloud-engine/internal/contract"
 	"github.com/labstack/echo/v5"
 )
 
 type auditLogService interface {
 	ReadAuditLogTail(name string, tail, page int) (audit.LogTailResponse, error)
 	LogPath(name string) (string, bool)
-	ListExecutions(ctx context.Context, filter db.ExecutionListFilter) (*audit.ExecutionListResult, error)
+	ListExecutions(ctx context.Context, filter model.ExecutionListFilter) (*audit.ExecutionListResult, error)
 	GetExecutionByExecutionID(ctx context.Context, executionID string) (*audit.ExecutionRecordView, error)
 	FollowLogTail(ctx context.Context, name string, onLine func(string) error) error
 }
@@ -36,19 +35,28 @@ func newAuditHandler(auditSvc auditLogService) *auditHandler {
 // route: /api/admin/audit
 func (h *auditHandler) auditAdminAPI(g *echo.Group) {
 	g.GET("/logs/:name", h.getAuditLogTail)
+	g.GET("/logs/:name/stream", h.streamAuditLogRoute)
 	g.GET("/executions", h.listExecutions)
 	g.GET("/executions/:executionId", h.getExecutionByExecutionID)
 }
 
-func (h *auditHandler) getAuditLogTail(c *echo.Context) error {
+func isAuditLogName(name string) bool {
+	return name == "audit" || name == "security"
+}
+
+// --- GET /logs/:name/stream：SSE 长连接，tail-follow 从文件末尾推送新行
+func (h *auditHandler) streamAuditLogRoute(c *echo.Context) error {
 	name := c.Param("name")
-	if name != "audit" && name != "security" {
+	if !isAuditLogName(name) {
 		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "unknown audit log file: " + name})
 	}
+	return h.streamAuditLog(c, name)
+}
 
-	// SSE 长连接：tail-follow 从文件末尾推送新行
-	if c.QueryParam("stream") == "true" {
-		return h.streamAuditLog(c, name)
+func (h *auditHandler) getAuditLogTail(c *echo.Context) error {
+	name := c.Param("name")
+	if !isAuditLogName(name) {
+		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "unknown audit log file: " + name})
 	}
 
 	tail, err := httputil.ParseOptionalIntQuery(c, "tail")
@@ -69,7 +77,7 @@ func (h *auditHandler) getAuditLogTail(c *echo.Context) error {
 }
 
 func (h *auditHandler) listExecutions(c *echo.Context) error {
-	filter := db.ExecutionListFilter{
+	filter := model.ExecutionListFilter{
 		ServerNode: c.QueryParam("serverNode"),
 		ActionName: c.QueryParam("actionName"),
 	}
@@ -93,16 +101,15 @@ func (h *auditHandler) listExecutions(c *echo.Context) error {
 		filter.To = &to
 	}
 
-	if v, ok, err := parseOptionalIntQueryFlag(c, "limit"); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
-	} else if ok {
-		filter.Limit = v
+	page, err := httputil.ParseOptionalListPage(c)
+	if err != nil {
+		if he, ok := err.(*echo.HTTPError); ok {
+			return c.JSON(he.Code, httputil.Response{Message: fmt.Sprint(he.Message)})
+		}
+		return httputil.RespondError(c, err)
 	}
-	if v, ok, err := parseOptionalIntQueryFlag(c, "offset"); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
-	} else if ok {
-		filter.Offset = v
-	}
+	filter.Limit = page.Limit
+	filter.Offset = page.Offset
 
 	result, err := h.audit.ListExecutions(c.Request().Context(), filter)
 	if err != nil {
@@ -119,7 +126,7 @@ func (h *auditHandler) getExecutionByExecutionID(c *echo.Context) error {
 
 	view, err := h.audit.GetExecutionByExecutionID(c.Request().Context(), executionID)
 	if err != nil {
-		if errors.Is(err, common.ErrNotFound) {
+		if errors.Is(err, contract.ErrNotFound) {
 			return c.JSON(http.StatusNotFound, httputil.Response{Message: err.Error()})
 		}
 		return httputil.RespondError(c, err)
@@ -155,20 +162,6 @@ func parseOptionalTimeQuery(c *echo.Context, name string) (time.Time, bool, erro
 		return time.Time{}, false, fmt.Errorf("invalid %s timestamp: %s", name, raw)
 	}
 	return t, true, nil
-}
-
-// parseOptionalIntQueryFlag returns (0, false, nil) when the parameter is
-// missing. The bool distinguishes "absent" from "explicitly zero".
-func parseOptionalIntQueryFlag(c *echo.Context, name string) (int, bool, error) {
-	raw := c.QueryParam(name)
-	if raw == "" {
-		return 0, false, nil
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, false, fmt.Errorf("invalid %s: %s", name, raw)
-	}
-	return v, true, nil
 }
 
 // streamAuditLog serves an SSE tail-follow stream for audit/security logs.

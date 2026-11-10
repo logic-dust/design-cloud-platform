@@ -8,21 +8,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
-	"design-cloud-engine/internal/server/service/settings/schema"
+	"design-cloud-engine/internal/platform/config"
 )
-
-// appLogPath returns an empty string in dev builds so the logger writes to stdout,
-// unless the DCE_DEV_LOG_TO_FILE environment variable is set to a truthy value.
-func appLogPath(cfg *config.Config) string {
-	if slices.Contains([]string{"true", "TRUE", "1"}, os.Getenv("DCE_DEV_LOG_TO_FILE")) {
-		return cfg.AppLogPath()
-	}
-	return ""
-}
 
 // setupServerDevEnv initializes the development environment prerequisites for the Server.
 // This runs before cluster control node startup to ensure dev settings and mock data.
@@ -47,9 +37,6 @@ func setupServerDevEnv(cfg *config.Config, store *db.Store, log *slog.Logger) er
 func ensureDevData(ctx context.Context, repos *db.Repos, log *slog.Logger, cfg *config.Config) error {
 	log.Debug("🔧 Ensuring dev data...")
 
-	if err := ensureDevLimits(ctx, repos, log); err != nil {
-		return err
-	}
 	if err := ensureDevAgentSettings(ctx, repos, log); err != nil {
 		return err
 	}
@@ -91,37 +78,16 @@ func ensureDevAgentSettings(ctx context.Context, repos *db.Repos, log *slog.Logg
 		return fmt.Errorf("failed to load dev agent settings: %w", err)
 	}
 
-	// 仅当设置了 DCE_DEV_MOCK_LAUNCHER=true 时，用 tmp 下的 mock launcher 覆盖 settings
-	if os.Getenv("DCE_DEV_MOCK_LAUNCHER") == "true" {
-		mockLauncherPath := filepath.Join(os.TempDir(), "dce-mock-launcher")
-		if agentSettings.LauncherPath != mockLauncherPath {
-			agentSettings.LauncherPath = mockLauncherPath
+	// 仅当设置了 DCE_DEV_MOCK_EXEC_BIN=true 时，用 tmp 下的 mock PrivilegedExec 覆盖 settings
+	if os.Getenv("DCE_DEV_MOCK_EXEC_BIN") == "true" {
+		mockExecBinPath := filepath.Join(os.TempDir(), "dce-mock-dcexec")
+		if agentSettings.ExecBinPath != mockExecBinPath {
+			agentSettings.ExecBinPath = mockExecBinPath
 			if err := repos.Setting.Save(ctx, string(schema.DomainAgent), agentSettings); err != nil {
 				return fmt.Errorf("failed to save dev agent settings: %w", err)
 			}
-			log.Info("🔧 Dev agent settings override applied", "launcherPath", mockLauncherPath)
+			log.Info("🔧 Dev agent settings override applied", "execBinPath", mockExecBinPath)
 		}
 	}
-	return nil
-}
-
-func ensureDevLimits(ctx context.Context, repos *db.Repos, log *slog.Logger) error {
-	var auth schema.AuthSettings
-	if err := repos.Setting.Load(ctx, string(schema.DomainAuth), &auth); err != nil {
-		return fmt.Errorf("failed to load dev auth settings: %w", err)
-	}
-
-	const devMaxLoginSessionsPerUser = 3
-	if auth.MaxLoginSessionsPerUser == devMaxLoginSessionsPerUser {
-		log.Info("🔧 Dev limits override already applied", "maxLoginSessionsPerUser", devMaxLoginSessionsPerUser)
-		return nil
-	}
-
-	previous := auth.MaxLoginSessionsPerUser
-	auth.MaxLoginSessionsPerUser = devMaxLoginSessionsPerUser
-	if err := repos.Setting.Save(ctx, string(schema.DomainAuth), auth); err != nil {
-		return fmt.Errorf("failed to save dev auth settings: %w", err)
-	}
-	log.Info("🔧 Dev limits override applied", "maxLoginSessionsPerUser", devMaxLoginSessionsPerUser, "previous", previous)
 	return nil
 }

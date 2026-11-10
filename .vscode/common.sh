@@ -1,280 +1,392 @@
 #!/bin/bash
-# Common - 远程部署/调试公共函数库
-# 被 remote-run.sh / remote-debug.sh / remote-build-debug.sh 复用
+# Common — 两条开发流程与隧道/清理/状态任务的唯一实现
 #
-# 命名约定:
-#   *_local            在本地执行（如本地编译 engine）
-#   *_to_remote        从本地上传到远程（上传方向明确）
-#   remote_* / *_remote 在远程主机上执行（如远程清理/启动/等待）
+#   run_flow push 本地编译(dc-exec+engine) → scp 上传 → 安装 /opt/dce → dlv 启动
+#   run_flow build rsync 源码 → 远程编译      → 安装 /opt/dce → dlv 启动
+#   cleanup_all / show_status
 #
-# 调用方必须先 source env.sh（提供 SSH/路径变量与 print_* 系列 helper），
-# 本库不再重复 source，避免二次加载。
-
-set -e
-
-# 前置检查：SSH 连通性
-check_ssh_connection || exit 1
+# push 与 build 只差“产物怎么来”，其余（安装、dc-exec 权限、配置预检、dlv 启动与 API 校验）完全共用。
+#
+# 关键约束（lab 实测，勿删）：
+#   1) systemd 单元 design-cloud-engine 常驻占用 1234/52255，且被 kill 后自动重启 → 启动前必须 stop
+#   2) dc-exec 需 setcap cap_setuid,cap_setgid+ep（须本地盘），属主须与 engine 一致
+#   3) /opt 仅 root 可写：staging → root install；安装前须停进程，否则覆盖运行中二进制会 ETXTBSY
+#   4) engine 以 hpcadmin 运行 → /opt/dce 及其 data/certs/logs 须属 hpcadmin
+#   5) 密钥 /etc/design-cloud/* 属 dce 且 0600，hpcadmin 读不到 → 复制到 /opt/dce
+#
+# 本库不在 source 时做 SSH 前置校验：调用方按需检查，便于 clean 类本地任务照常运行。
 
 ################################
-# SSH / scp 封装
+# SSH / scp / 安装
 ################################
 
-# 在远程执行命令：ssh_remote [-f] <命令...>
-#   示例: ssh_remote "pwd"; ssh_remote -f "setsid ... &"
 ssh_remote() {
   local FLAGS=()
-  while [ "$#" -gt 0 ] && [[ "$1" == -* ]]; do
-    FLAGS+=("$1")
-    shift
-  done
+  while [ "$#" -gt 0 ] && [[ "$1" == -* ]]; do FLAGS+=("$1"); shift; done
   ssh -p "${SSH_PORT}" "${FLAGS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" "$@"
 }
 
-# 上传文件到远程：scp_to_remote <本地路径> <远程目标路径>
-scp_to_remote() {
-  scp -P "${SSH_PORT}" "$1" "${REMOTE_USER}@${REMOTE_HOST}:$2"
+ssh_root() {
+  local FLAGS=()
+  while [ "$#" -gt 0 ] && [[ "$1" == -* ]]; do FLAGS+=("$1"); shift; done
+  ssh -p "${SSH_PORT}" "${FLAGS[@]}" "${ROOT_USER}@${REMOTE_HOST}" "$@"
+}
+
+# -C：调试二进制约 2x 压缩（44MB → ~19MB 等效），慢链路上收益明显
+scp_to_remote() { scp -C -P "${SSH_PORT}" "$1" "${REMOTE_USER}@${REMOTE_HOST}:$2"; }
+
+# 安装文件并归 REMOTE_USER（属组用 chown 的 "user:" 简写 = 该用户主组）
+install_root() { ssh_root "install -m $3 '$1' '$2' && chown '${REMOTE_USER}:' '$2'"; }
+
+require_ssh() { check_ssh_connection || exit 1; }
+
+################################
+# 产物来源（A/B 唯一差异）
+################################
+
+# push：本地编译 → 上传 staging
+stage_push_artifacts() {
+  print_step "[1] 本地编译 dc-exec + engine..."   # push 流程起始步
+  if ! make -s -C "${SCRIPT_DIR}/.." \
+    EXEC_BIN_OUT="${LOCAL_EXEC_BIN}" ENGINE_OUT="${LOCAL_ENGINE}" \
+    ENGINE_GC_FLAGS="all=-N -l" dcexec-dev engine-dev -j2; then
+    print_error "本地编译失败"; exit 1
+  fi
+  print_success "编译完成"
+  scp_to_remote "${LOCAL_ENGINE}" "${STAGING_ENGINE}" || { print_error "engine 上传失败"; exit 1; }
+  scp_to_remote "${LOCAL_EXEC_BIN}" "${STAGING_EXEC_BIN}" || { print_error "dc-exec 上传失败"; exit 1; }
+  verify_md5 "${LOCAL_ENGINE}" "${STAGING_ENGINE}" "engine"
+  verify_md5 "${LOCAL_EXEC_BIN}" "${STAGING_EXEC_BIN}" "dcexec"
+  print_success "上传完成（md5 一致）"
+}
+
+verify_md5() {
+  local L R
+  L="$(md5sum "$1" | awk '{print $1}')"
+  R="$(ssh_remote "md5sum '$2' 2>/dev/null | awk '{print \$1}'")"
+  [ -n "${R}" ] && [ "${L}" = "${R}" ] || { print_error "$3 md5 不一致（本地 ${L} vs 远程 ${R:-空}）"; exit 1; }
+}
+
+# build：rsync 源码 → 远程编译 → 就地 cp 到 staging
+stage_build_artifacts() {
+  print_step "[1] rsync 源码 → ${REMOTE_SRC_DIR}..."   # build 流程起始步
+  command -v rsync >/dev/null 2>&1 || { print_error "本地未安装 rsync"; exit 1; }
+  rsync -az --delete \
+    --include='*/' --include='*.go' --include='go.mod' --include='go.sum' \
+    --include='Makefile' \
+    --include='docs-site/static/images/logo.svg' \
+    --include='docs-site/static/favicon.ico' \
+    --include='internal/server/service/user/weakpasswords.txt' \
+    --include='internal/server/portal/web/**' \
+    --exclude='*' \
+    -e "ssh -p ${SSH_PORT}" \
+    "${SCRIPT_DIR}/../" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_SRC_DIR}/" \
+    || { print_error "rsync 失败"; exit 1; }
+
+  print_step "    远程编译 dc-exec + engine..."
+  # 远程源码树无 .git（rsync 不同步元数据）→ 版本信息由本地计算后传入
+  local COMMIT DIRTY
+  COMMIT="$(git -C "${SCRIPT_DIR}/.." rev-parse --short HEAD 2>/dev/null || true)"
+  DIRTY="$(git -C "${SCRIPT_DIR}/.." status --porcelain 2>/dev/null || true)"
+  ssh_remote "cd ${REMOTE_SRC_DIR} && make dcexec-dev engine-dev -j2 GIT_COMMIT='${COMMIT}' GIT_DIRTY='${DIRTY}'" \
+    || { print_error "远程编译失败"; exit 1; }
+  ssh_remote "cp -f '${REMOTE_SRC_DIR}/build/dc-engine-dev' '${STAGING_ENGINE}' &&
+              cp -f '${REMOTE_SRC_DIR}/build/dc-exec-dev' '${STAGING_EXEC_BIN}' &&
+              chmod 0755 '${STAGING_ENGINE}' '${STAGING_EXEC_BIN}'" \
+    || { print_error "产物整理失败"; exit 1; }
+  print_success "远程编译完成"
 }
 
 ################################
-# 远程进程管理
+# systemd 单元 / 远程进程
 ################################
 
-# 远程判断是否存在匹配进程（排除执行检查的 shell 自身）：remote_has_process <pgrep 模式>
-remote_has_process() {
-  ssh_remote "pgrep -f '$1' | grep -vx \"\$\$\" | grep -q ."
+# 单元 enabled 时 kill 进程会被自动拉起（表现为“端口仍被占用 / 刚起就退”），故启动前显式 stop
+stop_engine_unit() {
+  ssh_root "systemctl is-active ${ENGINE_UNIT} >/dev/null 2>&1" || return 0
+  print_step "停止 systemd 单元 ${ENGINE_UNIT}（占用 ${PORTAL_PORT}/52255）..."
+  ssh_root "systemctl stop ${ENGINE_UNIT}" || { print_error "停止 ${ENGINE_UNIT} 失败"; exit 1; }
+  print_success "已停止 ${ENGINE_UNIT}"
+  ssh_root "systemctl is-enabled ${ENGINE_UNIT} >/dev/null 2>&1" \
+    && print_warning "${ENGINE_UNIT} 仍开机自启；重启主机后需重跑本流程或手动 systemctl stop"
 }
 
-# 远程 kill 匹配进程（排除自身 PID）：remote_kill_pattern <pgrep 模式>
-remote_kill_pattern() {
-  ssh_remote "for p in \$(pgrep -f '$1' | grep -vx \"\$\$\"); do kill -9 \"\$p\" 2>/dev/null; done"
+# 用 root：进程属主可能不是 SSH 用户；排除远程 shell 自身 PID 避免自杀
+kill_remote_procs() {
+  ssh_root "for pat in 'dlv exec.*engine' '^${REMOTE_BINARY}( |\$)'; do
+    for p in \$(pgrep -f \"\$pat\" | grep -vx \"\$\$\"); do kill -9 \"\$p\" 2>/dev/null; done
+  done"
 }
 
-# 通用等待循环：wait_for_remote <描述> <最大秒数> <远程检查命令>
-#   远程检查命令返回 0 视为就绪
-wait_for_remote() {
-  local DESC="$1" MAX_WAIT="$2" CHECK_CMD="$3" i
-  echo "    → 等待 ${DESC}..."
-  for i in $(seq 1 "${MAX_WAIT}"); do
-    if ssh_remote "${CHECK_CMD}"; then
-      return 0
+################################
+# 安装 + 配置 + 密钥 + dcexec 权限
+################################
+
+install_and_configure() {
+  print_step "[2] 安装 → ${REMOTE_PATH}（属主 ${REMOTE_USER}）..."
+  # 整目录归 hpcadmin：data_dir 回退 BaseDir 时 engine 需在本目录建 certs/
+  ssh_root "mkdir -p '${REMOTE_PATH}' ${REMOTE_PATH}/data ${REMOTE_PATH}/logs &&
+            chown -R ${REMOTE_USER}: '${REMOTE_PATH}' &&
+            chmod 0755 '${REMOTE_PATH}'" || { print_error "准备 ${REMOTE_PATH} 失败"; exit 1; }
+
+  kill_remote_procs # 覆盖运行中二进制会 ETXTBSY
+  install_root "${STAGING_ENGINE}" "${REMOTE_BINARY}" 0755 || { print_error "engine 安装失败"; exit 1; }
+  install_root "${STAGING_EXEC_BIN}" "${REMOTE_EXEC_BIN}" 0755 || { print_error "dc-exec 安装失败"; exit 1; }
+  print_success "已安装 engine + dcexec"
+
+  # 配置（0600 hpcadmin）：配置中的相对密钥路径即指向 ${REMOTE_PATH}
+  scp_to_remote "${LOCAL_CONFIG}" "${REMOTE_TMP}/dc-config.$$" || { print_error "配置上传失败"; exit 1; }
+  install_root "${REMOTE_TMP}/dc-config.$$" "${REMOTE_CONFIG}" 0600 || { print_error "配置安装失败"; exit 1; }
+  print_success "配置已安装: ${REMOTE_CONFIG}"
+
+  # SECURITY-REVIEW: 实验室开发机上的有意复制，不是漏洞。
+  # /etc/design-cloud 属 dce 且 0600，hpcadmin 读不到；复制到 /opt/dce
+  # 并改属主后，以 hpcadmin 运行的 engine 才能读相对路径密钥。已存在则不覆盖。
+  local f
+  for f in ${REMOTE_SECRET_FILES}; do
+    ssh_root "test -f '${REMOTE_PATH}/${f}'" 2>/dev/null && continue
+    if ssh_root "test -f '${REMOTE_SECRET_SRC}/${f}'" 2>/dev/null; then
+      install_root "${REMOTE_SECRET_SRC}/${f}" "${REMOTE_PATH}/${f}" 0600 \
+        && print_success "已复制密钥 ${f}"
+    else
+      print_warning "密钥缺失: ${REMOTE_SECRET_SRC}/${f}（如引擎需要请手工放置到 ${REMOTE_PATH}/${f}）"
     fi
-    echo "    → 继续等待... (${i}s/${MAX_WAIT}s)"
+  done
+
+  print_step "设置 dc-exec 权限（属主 + setcap）..."
+  local OUT CAPS
+  # setcap 失败不中止：部分文件系统/受限环境不支持 file capabilities
+  OUT="$(ssh_root "chown ${REMOTE_USER}: '${REMOTE_EXEC_BIN}' && chmod 0700 '${REMOTE_EXEC_BIN}' &&
+    (setcap cap_setuid,cap_setgid+ep '${REMOTE_EXEC_BIN}' 2>/dev/null ||
+     /sbin/setcap cap_setuid,cap_setgid+ep '${REMOTE_EXEC_BIN}' 2>/dev/null ||
+     /usr/sbin/setcap cap_setuid,cap_setgid+ep '${REMOTE_EXEC_BIN}' 2>/dev/null || echo SETCAP_UNAVAILABLE)" 2>&1)" \
+    || { print_error "dc-exec 权限设置失败: ${OUT}"; exit 1; }
+  if printf '%s' "${OUT}" | grep -q SETCAP_UNAVAILABLE; then
+    print_warning "setcap 不可用（文件系统不支持或受限环境）——dc-exec 将拿不到特权能力"
+    return 0
+  fi
+  CAPS="$(ssh_root "getcap '${REMOTE_EXEC_BIN}' 2>/dev/null" | tr -d '\r')"
+  print_success "dc-exec ${REMOTE_USER} 0700 ${CAPS:-（capabilities 未确认）}"
+}
+
+################################
+# 配置预检（唯一事实来源：engine check-config）
+################################
+
+# 运行 engine check-config 并回显输出（失败返回 1）
+check_config_output() {
+  ssh_remote "cd '${REMOTE_PATH}' && '${REMOTE_BINARY}' check-config --config '${REMOTE_CONFIG}'" 2>&1
+}
+
+# 从 check-config 输出解析生效 portal 端点：PORTAL_HOST_RESOLVED / PORTAL_PORT_RESOLVED
+# （空 / 0.0.0.0 = 监听所有网卡 → 远程自测与隧道目标都用回环）
+parse_portal() {
+  local LINE
+  LINE="$(printf '%s\n' "$1" | sed -n 's/^ *portal=//p' | head -1)"
+  LINE="${LINE%% *}"
+  PORTAL_PORT_RESOLVED="${LINE##*:}"
+  PORTAL_HOST_RESOLVED="${LINE%:*}"
+  case "${PORTAL_HOST_RESOLVED}" in '' | 0.0.0.0) PORTAL_HOST_RESOLVED="127.0.0.1" ;; esac
+  [ -n "${PORTAL_PORT_RESOLVED}" ]
+}
+
+# 解析生效 portal 端点与 data_dir；data_dir 不可写则中止
+preflight_config() {
+  print_step "[3] 预检配置（check-config）..."
+  local OUT
+  if ! OUT="$(check_config_output)" || ! parse_portal "${OUT}"; then
+    print_error "配置校验失败（engine 会启动即退出）:"
+    printf '%s\n' "${OUT}" | tail -5
+    exit 1
+  fi
+  DATA_DIR_RESOLVED="$(printf '%s\n' "${OUT}" | sed -n 's/^ *data_dir=//p' | head -1)"
+  print_success "配置通过: portal=${PORTAL_HOST_RESOLVED}:${PORTAL_PORT_RESOLVED} data_dir=${DATA_DIR_RESOLVED:-（未输出）}"
+  [ "${PORTAL_PORT_RESOLVED}" = "${PORTAL_PORT}" ] \
+    || print_warning "实际 portal.port=${PORTAL_PORT_RESOLVED} ≠ env.sh ${PORTAL_PORT}（后续探测/隧道以实际值）"
+
+  # engine 启动时要在 <data_dir>/certs/cluster 建目录；不可写则启动即退出
+  if [ -n "${DATA_DIR_RESOLVED}" ]; then
+    ssh_remote "d='${DATA_DIR_RESOLVED}/certs/cluster'; while [ ! -e \"\$d\" ] && [ \"\$d\" != / ]; do d=\$(dirname \"\$d\"); done; [ -w \"\$d\" ]" \
+      || { print_error "data_dir 不可写: ${DATA_DIR_RESOLVED}/certs/cluster（以 ${REMOTE_USER} 运行 engine，须该用户可写）"; exit 1; }
+  fi
+}
+
+################################
+# dlv 启动 + 就绪校验
+################################
+
+ensure_dlv() {
+  local VER=""
+  ssh_remote "test -x '${REMOTE_DLV_CMD}'" 2>/dev/null \
+    && VER="$(ssh_remote "'${REMOTE_DLV_CMD}' version 2>/dev/null | awk '/Version:/{print \$2}'" 2>/dev/null || true)"
+  if [ -n "${VER}" ] && [ "${VER}" = "${DLV_VERSION#v}" ]; then
+    print_success "复用 dlv ${REMOTE_DLV_CMD} (${VER})"
+    return 0
+  fi
+
+  print_step "     安装 dlv ${DLV_VERSION}..."
+  local STAGING="${REMOTE_TMP}/dlv.$$" OUT
+  if OUT="$(ssh_remote "GOBIN='${REMOTE_TMP}' go install github.com/go-delve/delve/cmd/dlv@${DLV_VERSION} 2>&1" 2>&1)" \
+    && install_root "${REMOTE_TMP}/dlv" "${REMOTE_DLV_CMD}" 0755; then
+    print_success "dlv 已安装（远程 go install）"
+    return 0
+  fi
+  echo "    → go install 失败: $(printf '%s' "${OUT}" | tail -2 | tr '\n' ' ')"
+
+  print_info "回退本地交叉编译上传..."
+  local CAND SRC="" INFO
+  for CAND in "$(command -v dlv 2>/dev/null)" "$(go env GOPATH)/bin/dlv" "$(go env GOBIN)/dlv"; do
+    [ -n "${CAND}" ] && [ -x "${CAND}" ] || continue
+    INFO="$(file "${CAND}" 2>/dev/null || true)"
+    if printf '%s' "${INFO}" | grep -q "x86-64" && printf '%s' "${INFO}" | grep -q "statically linked"; then SRC="${CAND}"; break; fi
+  done
+  if [ -z "${SRC}" ]; then
+    [ -x "${LOCAL_DLV}" ] || GOBIN="$(dirname "${LOCAL_DLV}")" GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+      go install "github.com/go-delve/delve/cmd/dlv@${DLV_VERSION}" 2>&1 | tail -3 || { print_error "dlv 交叉编译失败"; exit 1; }
+    SRC="${LOCAL_DLV}"
+  fi
+  scp_to_remote "${SRC}" "${STAGING}" || { print_error "dlv 上传失败"; exit 1; }
+  install_root "${STAGING}" "${REMOTE_DLV_CMD}" 0755 || { print_error "dlv 安装失败"; exit 1; }
+  print_success "dlv 已安装: ${REMOTE_DLV_CMD}"
+}
+
+# dlv 是独立进程：engine 崩溃后它仍监听，故“dlv 监听”≠“engine 活着”，必须实测 API。
+start_dlv_and_verify() {
+  local LABEL="$1" i PROBE ALIVE=0
+  print_step "[4] dlv 启动 engine（以 ${REMOTE_USER} 运行）..."
+  # setsid + & + </dev/null：脱离 ssh 会话
+  # 登录 shell 继承实验室 module/LSF PATH；非交互 dlv 启动否则 JOB_SUBMIT 找不到 bsub 或卡在超时。
+  ssh_remote -f "cd '${REMOTE_PATH}' && setsid bash -lc 'exec \"${REMOTE_DLV_CMD}\" exec \"${REMOTE_BINARY}\" \
+    --listen=${DLV_BIND}:${REMOTE_DEBUG_PORT} --headless=true --api-version=2 --accept-multiclient --continue \
+    -- --config \"${REMOTE_CONFIG}\"' > ${REMOTE_DLV_LOG} 2>&1 < /dev/null &"
+
+  for i in $(seq 1 15); do
+    ssh_remote "pgrep -f 'dlv exec' >/dev/null 2>&1 && (netstat -ltn 2>/dev/null | grep -q ':${REMOTE_DEBUG_PORT} ' || ss -ltn 2>/dev/null | grep -q ':${REMOTE_DEBUG_PORT} ')" && break
+    [ "${i}" = "15" ] && { print_error "dlv 启动超时"; ssh_remote "tail -30 ${REMOTE_DLV_LOG}"; exit 1; }
     sleep 1
   done
-  return 1
-}
+  print_success "dlv 已监听 ${DLV_BIND}:${REMOTE_DEBUG_PORT}"
+  # 既有的内网调机做法（0.0.0.0 便于直连附加）；保留提示以便换网段/多人共用时能想起收紧
+  [ "${DLV_BIND}" = "0.0.0.0" ] && print_info "dlv 绑定 0.0.0.0（无认证，内网可 attach）；需要收紧见 DEBUG_GUIDE"
 
-# 清理远程旧进程（dlv + engine，不删二进制；供部署/调试前调用）
-cleanup_remote_processes() {
-  print_step "[2/5] 清理远程旧进程..."
-  echo "    → 远程 engine / dlv 进程..."
-  # 用 pgrep 收集 PID 再 kill，不用 pkill（安全机制会拦截 pkill，且误杀面大）
-  # 注意：pgrep -f 会把执行本清理命令的远程 shell 自身也匹配进来（其命令行含匹配串），
-  #       必须先排除 $$（远程 shell 自身 PID），否则清理会先 kill 掉自己而中断。
-  remote_kill_pattern "dlv exec.*engine" || true
-  remote_kill_pattern "design-cloud-engine" || true
-  sleep 2
-  print_success "远程进程已清理"
-}
-
-################################
-# engine 本地编译 → 推送到远程
-################################
-
-# 本地编译 engine（走 Makefile engine-dev 目标，脚本传 ENGINE_OUT 覆盖输出路径）
-build_engine_local() {
-  print_step "[1/5] 编译 engine..."
-  local MODE="${1:-debug}"
-  local MAKE_ARGS=("ENGINE_OUT=${LOCAL_BINARY}")
-  if [ "${MODE}" = "debug" ]; then
-    MAKE_ARGS+=("ENGINE_GC_FLAGS=all=-N -l")
-    print_info "使用调试编译（-gcflags=all=-N -l）"
-  elif [ "${MODE}" = "opt" ]; then
-    print_info "使用优化编译（关闭 -N -l）"
-  else
-    # 自定义标志：覆盖分支传任意 go build 标志（如 "-race"），需按空格分词成数组
-    read -r -a EXTRA_FLAGS <<<"${MODE}"
-    MAKE_ARGS+=("ENGINE_EXTRA_FLAGS=${EXTRA_FLAGS[*]}")
-    print_info "使用自定义编译标志: ${MODE}"
-  fi
-  if make -s -C "${SCRIPT_DIR}/.." "${MAKE_ARGS[@]}" engine-dev; then
-    print_success "编译成功: ${LOCAL_BINARY}"
-  else
-    print_error "编译失败"
-    exit 1
-  fi
-}
-
-# 上传二进制到远程 + md5 校验：upload_binary_to_remote
-upload_binary_to_remote() {
-  print_step "[3/5] 上传二进制到远程..."
-  echo "    → ${LOCAL_BINARY} → ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_BINARY}"
-  if scp_to_remote "${LOCAL_BINARY}" "${REMOTE_BINARY}"; then
-    print_success "上传成功"
-  else
-    print_error "上传失败"
-    exit 1
-  fi
-  # md5 校验：kill 后 SSH 会话 exit 255 可能导致 scp 静默失败，必须对比两侧 md5 确认
-  local LOCAL_MD5 REMOTE_MD5
-  LOCAL_MD5="$(md5sum "${LOCAL_BINARY}" | awk '{print $1}')"
-  REMOTE_MD5="$(ssh_remote "md5sum ${REMOTE_BINARY} 2>/dev/null | awk '{print \$1}'")"
-  if [ -n "${REMOTE_MD5}" ] && [ "${LOCAL_MD5}" = "${REMOTE_MD5}" ]; then
-    print_success "md5 校验一致: ${LOCAL_MD5}"
-  else
-    print_error "md5 不一致! 本地=${LOCAL_MD5} 远程=${REMOTE_MD5}"
-    exit 1
-  fi
-}
-
-# 上传配置文件到远程（可选）：upload_config_to_remote
-upload_config_to_remote() {
-  print_step "[4/5] 上传配置文件（可选）..."
-  if [ -f "${LOCAL_CONFIG}" ]; then
-    echo "    → ${LOCAL_CONFIG} → ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_CONFIG_FILE}"
-    if scp_to_remote "${LOCAL_CONFIG}" "${REMOTE_CONFIG_FILE}"; then
-      print_success "配置已上传"
-    else
-      print_warning "配置上传失败，继续..."
+  for i in $(seq 1 25); do
+    if ssh_remote "pgrep -f '^${REMOTE_BINARY}( |\$)' >/dev/null 2>&1"; then
+      ALIVE=1
+    elif [ "${ALIVE}" -eq 1 ] || [ "${i}" -gt 6 ]; then
+      print_error "engine 进程已退出（dlv 仍在监听）"
+      ssh_remote "tail -40 ${REMOTE_DLV_LOG}" 2>/dev/null || true
+      exit 1
     fi
-  else
-    print_warning "本地配置文件不存在，跳过"
-  fi
-}
-
-# 组合：本地编译 → 远程清理 → 上传（不含远程启动）
-deploy_engine_to_remote() {
-  build_engine_local "$1"
-  cleanup_remote_processes
-  upload_binary_to_remote
-  upload_config_to_remote
-}
-
-################################
-# 远程启动
-################################
-
-# 远程直接启动 engine（不带 dlv）：start_engine_remote <engine 参数...>
-start_engine_remote() {
-  local ENGINE_ARGS="$*"
-  ssh_remote -f "cd ${REMOTE_PATH} && setsid ${REMOTE_BINARY} ${ENGINE_ARGS} > /tmp/engine-remote.log 2>&1 < /dev/null &"
-}
-
-# 远程启动 dlv debug engine（headless）：start_dlv_debug <engine 参数...>
-start_dlv_debug() {
-  local ENGINE_ARGS="$*"
-  ssh_remote -f "cd ${REMOTE_PATH} && setsid ${REMOTE_DLV_CMD} exec ${REMOTE_BINARY} \
-    --listen=0.0.0.0:${REMOTE_DEBUG_PORT} --headless=true --api-version=2 --accept-multiclient --continue \
-    -- ${ENGINE_ARGS} > ${REMOTE_DLV_LOG} 2>&1 < /dev/null &"
-}
-
-# 等待 dlv 启动并监听调试端口：wait_dlv_ready [最大秒数]
-wait_dlv_ready() {
-  local MAX_WAIT="${1:-15}"
-  wait_for_remote "dlv 启动并监听端口 ${REMOTE_DEBUG_PORT}" "${MAX_WAIT}" \
-    "pgrep -f 'dlv exec.*engine' | grep -vx \"\$\$\" | grep -q . && (netstat -ltnp 2>/dev/null | grep -q ':${REMOTE_DEBUG_PORT} ' || ss -ltn 2>/dev/null | grep -q ':${REMOTE_DEBUG_PORT} ')"
-}
-
-################################
-# dlv 管理
-################################
-
-# 确保远程 dlv 可用：复用已存在 → 远程 go install → 回退本地编译上传
-ensure_remote_dlv() {
-  # 复用远程 dlv 前校验版本：Go 升级后旧 dlv（如 v1.27 对 go1.27）会报
-  # "Version of Delve is too old" 而无法调试，需按 DLV_VERSION 重装
-  local REMOTE_DLV_VER=""
-  if ssh_remote "test -x '${REMOTE_DLV_CMD}'" 2>/dev/null; then
-    REMOTE_DLV_VER="$(ssh_remote "${REMOTE_DLV_CMD} version 2>/dev/null | awk '/Version:/{print \$2}'" 2>/dev/null || true)"
-  fi
-  if [ -n "${REMOTE_DLV_VER}" ] && [ "${REMOTE_DLV_VER}" = "${DLV_VERSION#v}" ]; then
-    print_success "复用远程 dlv: ${REMOTE_DLV_CMD} (${REMOTE_DLV_VER})"
-    return 0
-  fi
-  if [ -n "${REMOTE_DLV_VER}" ]; then
-    print_info "远程 dlv 版本 ${REMOTE_DLV_VER} ≠ 期望 ${DLV_VERSION#v}，重新安装..."
-  fi
-  print_info "远程安装 dlv (go install ${DLV_VERSION})..."
-  if ssh_remote "GOBIN=${REMOTE_PATH} go install github.com/go-delve/delve/cmd/dlv@${DLV_VERSION}"; then
-    print_success "远程 dlv 安装完成: ${REMOTE_DLV_CMD}"
-    return 0
-  fi
-  print_warning "远程 go install dlv 失败，回退本地编译上传..."
-  local LOCAL_DLV_SRC=""
-  local cand DLV_INFO
-  for cand in "$(command -v dlv 2>/dev/null)" "$(go env GOPATH)/bin/dlv" "$(go env GOBIN)/dlv"; do
-    [ -z "${cand}" ] && continue
-    [ ! -x "${cand}" ] && continue
-    DLV_INFO="$(file "${cand}" 2>/dev/null || true)"
-    if printf '%s' "${DLV_INFO}" | grep -q "x86-64" && printf '%s' "${DLV_INFO}" | grep -q "statically linked"; then
-      LOCAL_DLV_SRC="${cand}"
-      break
+    PROBE="$(ssh_remote "curl -s --max-time 5 http://${PORTAL_HOST_RESOLVED}:${PORTAL_PORT_RESOLVED}/api/version" 2>/dev/null || true)"
+    if printf '%s' "${PROBE}" | grep -q '"version"'; then
+      print_success "Portal API 已就绪: ${PROBE}"
+      echo ""
+      print_separator
+      print_success "${LABEL} 就绪：engine(hpcadmin) + dlv:${REMOTE_DEBUG_PORT} + API:${PORTAL_PORT_RESOLVED}"
+      print_separator
+      print_info "API（本机直连）: curl http://${REMOTE_HOST}:${PORTAL_PORT_RESOLVED}/api/version"
+      print_info "附加调试: VSCode 选 Remote ${LABEL} 按 F5（${REMOTE_HOST}:${REMOTE_DEBUG_PORT}）"
+      print_info "日志: ssh -p ${SSH_PORT} ${REMOTE_USER}@${REMOTE_HOST} 'tail -f ${REMOTE_DLV_LOG}'"
+      echo ""
+      return 0
     fi
+    echo "    → 等待 Portal API... (${i}s/25s)"
+    sleep 1
   done
-  if [ -z "${LOCAL_DLV_SRC}" ]; then
-    if [ ! -x "${LOCAL_DLV}" ]; then
-      print_info "本地交叉编译静态 dlv..."
-      if ! GOBIN="$(dirname "${LOCAL_DLV}")" GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-        go install "github.com/go-delve/delve/cmd/dlv@${DLV_VERSION}" 2>&1 | tail -5; then
-        print_error "dlv 编译失败（可能需要网络拉取模块，或固定 DLV_VERSION 到已缓存版本）"
-        return 1
-      fi
-    fi
-    LOCAL_DLV_SRC="${LOCAL_DLV}"
-  fi
-  if ! scp_to_remote "${LOCAL_DLV_SRC}" "${REMOTE_DLV_CMD}"; then
-    print_error "dlv 上传失败"
-    return 1
-  fi
-  ssh_remote "chmod +x '${REMOTE_DLV_CMD}'"
-  print_success "dlv 已上传并设为可执行: ${REMOTE_DLV_CMD}"
+  print_error "Portal API 未就绪"
+  ssh_remote "tail -40 ${REMOTE_DLV_LOG}" 2>/dev/null || true
+  exit 1
 }
 
 ################################
-# 配置与数据库设置同步
+# 主流程
 ################################
 
-# 同步远程数据库中 agent.launcherPath 配置：
-# 开发/调试环境（如 /share/apps/design-cloud）与生产 RPM 环境（/opt/design-cloud）路径不同，
-# engine 运行时从数据库读取 agent.launcherPath，必须保证数据库中的路径与当前部署环境匹配，
-# 否则会触发 dc-launcher 的 L0/L1 校验失败（能力丢失、权限超标或 UID 不匹配）。
-sync_remote_launcher_path() {
-  local TARGET_LAUNCHER="${1:-${REMOTE_PATH}/dc-launcher}"
-  print_info "同步远程数据库 agent.launcherPath 为 ${TARGET_LAUNCHER}..."
+# run_flow <push|build>
+run_flow() {
+  local FLOW="$1" LABEL
+  require_ssh
 
-  local SQL_STATEMENTS="INSERT INTO settings (domain, value) VALUES ('agent', json_build_object('launcherPath', '${TARGET_LAUNCHER}', 'vnc', json_build_object('binDir', '/opt/TurboVNC/bin', 'scanEnabled', true, 'scanInterval', 1800), 'monitor', json_build_object('resourceReportEnabled', true, 'resourceReportInterval', 60, 'diskMounts', '[]'::json))) ON CONFLICT (domain) DO UPDATE SET value = jsonb_set(settings.value::jsonb, '{launcherPath}', to_jsonb('${TARGET_LAUNCHER}'::text))::text; UPDATE cache_versions SET version = version + 1 WHERE name = 'settings';"
+  # staging：push 上传到此、build 就地 cp 到此，安装步骤统一从这里取
+  STAGING_ENGINE="${REMOTE_TMP}/dc-engine.$$"
+  STAGING_EXEC_BIN="${REMOTE_TMP}/dc-exec.$$"
 
-  local SYNCED=false
-  # 优先尝试以 REMOTE_USER 凭 dbpwd 访问本地 PostgreSQL
-  if ssh_remote "test -f '${REMOTE_PATH}/dbpwd'" 2>/dev/null; then
-    if printf '%s\n' "${SQL_STATEMENTS}" | ssh_remote "cd '${REMOTE_PATH}' && PGPASSWORD=\$(cat dbpwd) psql -h 127.0.0.1 -U dc -d dc" >/dev/null 2>&1; then
-      SYNCED=true
-    fi
-  fi
+  print_separator
+  case "${FLOW}" in
+    push)  LABEL="Push"
+           echo -e "${COLOR_BLUE}push: 本地编译 → 推送产物 → 安装 ${REMOTE_PATH} → dlv 启动（engine 以 ${REMOTE_USER} 运行）${COLOR_NC}" ;;
+    build) LABEL="Build"
+           echo -e "${COLOR_BLUE}build: rsync 源码 + 远程编译 → 安装 ${REMOTE_PATH} → dlv 启动（engine 以 ${REMOTE_USER} 运行）${COLOR_NC}" ;;
+    *)     print_error "用法: run_flow push|build"; exit 2 ;;
+  esac
+  echo -e "${COLOR_BLUE}目标: ${REMOTE_USER}@${REMOTE_HOST}${COLOR_NC}"
+  print_separator
 
-  # 若以远程用户未成功，尝试以 root (su - postgres) 执行
-  if [ "${SYNCED}" != "true" ]; then
-    if printf '%s\n' "${SQL_STATEMENTS}" | ssh -p "${SSH_PORT}" "${ROOT_USER}@${REMOTE_HOST}" "su - postgres -c 'psql -d dc'" >/dev/null 2>&1; then
-      SYNCED=true
-    fi
-  fi
-
-  if [ "${SYNCED}" = "true" ]; then
-    print_success "数据库 agent.launcherPath 已同步为 ${TARGET_LAUNCHER}"
-  else
-    print_warning "未能自动更新数据库 agent.launcherPath（数据库可能未启动或认证失败），请注意核对设置"
-  fi
+  stop_engine_unit   # 先释放 1234/52255
+  case "${FLOW}" in
+    push)  stage_push_artifacts ;;
+    build) stage_build_artifacts ;;
+  esac
+  install_and_configure
+  preflight_config
+  start_dlv_and_verify "${LABEL}"
 }
 
-# 检测远程 engine 配置文件（优先 config.toml，其次 config.dev.toml）
-detect_remote_config() {
-  local CFG=""
-  for cfg in "${REMOTE_PATH}/config.toml" "${REMOTE_PATH}/config.dev.toml"; do
-    if ssh_remote "test -f '${cfg}'" 2>/dev/null; then
-      CFG="${cfg}"
-      break
-    fi
+cleanup_all() {
+  print_separator
+  echo -e "${COLOR_BLUE}清理调试环境 → ${REMOTE_HOST}${COLOR_NC}"
+  print_separator
+  # 用 root：进程属主可能不是 SSH 用户；无需 SSH 用户侧前置校验
+  ssh -p "${SSH_PORT}" "${ROOT_USER}@${REMOTE_HOST}" "for pat in 'dlv exec.*engine' '^${REMOTE_BINARY}( |\$)'; do
+    for p in \$(pgrep -f \"\$pat\" | grep -vx \"\$\$\"); do kill -9 \"\$p\" 2>/dev/null; done
+  done" 2>/dev/null || print_warning "远程清理失败（root SSH 不可用？）"
+  print_success "远程 dlv/engine 已清理"
+}
+
+show_status() {
+  print_separator
+  echo -e "${COLOR_BLUE}远程状态 → ${REMOTE_USER}@${REMOTE_HOST}${COLOR_NC}"
+  print_separator
+
+  echo "=== 直连可达性（本机 → 远程）==="
+  local P OK
+  for P in "${REMOTE_DEBUG_PORT}" "${PORTAL_PORT}"; do
+    if timeout 3 bash -c "exec 3<>/dev/tcp/${REMOTE_HOST}/${P}" 2>/dev/null; then OK="可直达"; else OK="不可达"; fi
+    echo "  ${REMOTE_HOST}:${P} ← ${OK}"
   done
-  [ -n "${CFG}" ] || CFG="${REMOTE_PATH}/config.toml"
-  echo "${CFG}"
+
+  # 远程命令一律写成单行：多行字符串在本环境下可能被折叠成一行，导致语法错误。
+  # pgrep 模式用 '[d]lv' 而非 'dlv'，避免把执行本检查的远程 shell 自身也匹配进来。
+  echo "=== 远程进程 ==="
+  ssh_remote "pgrep -fa '[d]lv exec' || echo '  (dlv 未运行)'" 2>/dev/null | head -3 || echo "  (SSH 失败)"
+
+  echo "=== 远程端口 ==="
+  ssh_remote "(netstat -ltn 2>/dev/null || ss -ltn 2>/dev/null) | grep -E ':${REMOTE_DEBUG_PORT} |:${PORTAL_PORT} |:52255 ' || echo '  (无)'" 2>/dev/null || echo "  (SSH 失败)"
+
+  echo "=== Portal API ==="
+  ssh_remote "curl -s --max-time 5 http://127.0.0.1:${PORTAL_PORT}/api/version || echo '  (无响应)'" 2>/dev/null || echo "  (SSH 失败)"
+
+  echo "=== dlv 监听 ==="
+  if [ "${DLV_BIND}" = "0.0.0.0" ]; then
+    echo "  ${DLV_BIND}:${REMOTE_DEBUG_PORT}（0.0.0.0 = 本机可直连附加；无认证，内网可 attach）"
+  else
+    echo "  ${DLV_BIND}:${REMOTE_DEBUG_PORT}（仅回环，需 ssh -L 才能附加）"
+  fi
+
+  echo "=== dc-exec L1 约束（属主=engine 用户 / 0700 / cap_setuid+setgid / 非硬链接）==="
+  local STAT
+  STAT="$(ssh_root "stat -c '%U %G %a %h' '${REMOTE_EXEC_BIN}' 2>/dev/null" 2>/dev/null | tr -d '\r')"
+  if [ -z "${STAT}" ]; then
+    echo "  ⚠️  未安装或 root SSH 不可用: ${REMOTE_EXEC_BIN}"
+  else
+    local OU OG MODE NLINK CAPS
+    read -r OU OG MODE NLINK <<<"${STAT}"
+    CAPS="$(ssh_root "getcap '${REMOTE_EXEC_BIN}' 2>/dev/null" 2>/dev/null | tr -d '\r')"
+    echo "  ${REMOTE_EXEC_BIN}  ${OU}:${OG}  ${MODE}  Nlink=${NLINK}"
+    [ "${OU}" = "${REMOTE_USER}" ] || echo "    ⚠️  属主须为 ${REMOTE_USER}（checkCaller 校验父进程 realUID == 属主）"
+    [ "${MODE}" = "700" ] || echo "    ⚠️  权限须为 700（dc-exec 拒绝 group/other 有任何权限）"
+    [ "${NLINK}" = "1" ] || echo "    ⚠️  存在硬链接（Nlink=${NLINK}），dc-exec 会拒绝运行"
+    printf '%s' "${CAPS}" | grep -q cap_setuid || echo "    ⚠️  缺少 cap_setuid（L0 校验会失败）"
+    printf '%s' "${CAPS}" | grep -q cap_setgid || echo "    ⚠️  缺少 cap_setgid（L0 校验会失败）"
+  fi
 }

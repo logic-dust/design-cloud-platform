@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -15,39 +14,45 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"sync"
 	"time"
 
 	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/common/host"
-	"design-cloud-engine/internal/config"
-	pb "design-cloud-engine/internal/contract/proto"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
-	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 	"design-cloud-engine/internal/server/cache"
-	"design-cloud-engine/internal/server/control"
-	"design-cloud-engine/internal/server/control/leader"
+	"design-cloud-engine/internal/server/controlplane"
+	"design-cloud-engine/internal/server/controlplane/leader"
+	agentregistry "design-cloud-engine/internal/server/controlplane/registry"
 	"design-cloud-engine/internal/server/portal"
-	"design-cloud-engine/internal/server/service"
-	nodeService "design-cloud-engine/internal/server/service/node"
-	"design-cloud-engine/internal/server/service/push"
+	"design-cloud-engine/internal/server/portal/api"
+	"design-cloud-engine/internal/server/push"
+	nodesvc "design-cloud-engine/internal/server/service/node"
+	"design-cloud-engine/internal/server/service/settings"
 
 	"github.com/labstack/echo/v5"
 )
 
 // Server manages both Http and gRPC servers
 type Server struct {
-	ctx             context.Context
-	portalServer    *echo.Echo
-	portalLogCloser io.Closer // closes the access log writer on shutdown
-	cfg             *config.Config
-	controlServer   *control.Server
-	services        *service.Container
-	leaseRepo       *db.TaskLeaseRepo
-	logger          *slog.Logger
-	cancelHTTP      context.CancelFunc
-	leader          *leader.Elector
-	auditSvc        *audit.Service
+	ctx               context.Context
+	portalServer      *echo.Echo
+	portalLogCloser   io.Closer // closes the access log writer on shutdown
+	cfg               *config.Config
+	workerCtx         context.Context
+	cancelWorkers     context.CancelFunc
+	backgroundWorkers []<-chan struct{}
+	controlServer     *controlplane.Server
+	services          *assembly
+	leaseRepo         *db.TaskLeaseRepo
+	logger            *slog.Logger
+	cancelHTTP        context.CancelFunc
+	httpDone          chan struct{}
+	stopJanitors      func()
+	resourceCloseOnce sync.Once
+	leader            *leader.Elector
+	auditSvc          *audit.Service
 }
 
 // PrepareCrypto ensures the cluster CA and node certificate exist before NewServer.
@@ -61,8 +66,8 @@ func PrepareCrypto(logger *slog.Logger, cfg *config.Config) error {
 	nodeID := cfg.Runtime.NodeID
 
 	// --- Ensure the cluster CA exists (generated on first start, reused afterwards).
-	if _, err := nodeService.InitializeCA(cfg.ClusterCACertPath(), cfg.ClusterCAKeyPath(), false); err != nil {
-		if !errors.Is(err, nodeService.ErrCAExists) {
+	if _, err := nodesvc.InitializeCA(cfg.ClusterCACertPath(), cfg.ClusterCAKeyPath(), false); err != nil {
+		if !errors.Is(err, nodesvc.ErrCAExists) {
 			return fmt.Errorf("initialize cluster CA: %w", err)
 		}
 		logger.Debug("Cluster CA already exists, reusing")
@@ -78,7 +83,9 @@ func NewServer(ctx context.Context, logger *slog.Logger, cfg *config.Config, sto
 	nodeID := cfg.Runtime.NodeID
 
 	repos := db.NewRepos(store)
-	leaderElector := leader.NewElector(nodeID, logger.With("component", "leader"), repos.TaskLease)
+	leaderElector := leader.NewElector(nodeID, logger.With("component", "leader"), repos.TaskLease,
+		leader.WithLeaseTTL(time.Duration(cfg.Cluster.LeaseTTL)*time.Second),
+		leader.WithRenewInterval(time.Duration(cfg.Cluster.RenewInterval)*time.Second))
 
 	auditSvc, err := audit.NewService(audit.Config{
 		PrimaryLogPath:  cfg.AuditLogPath(),
@@ -90,7 +97,7 @@ func NewServer(ctx context.Context, logger *slog.Logger, cfg *config.Config, sto
 		return nil, fmt.Errorf("failed to init audit service: %w", err)
 	}
 	// Attach the execution repository so the audit API can list/get execution
-	// records under /api/admin/audit/executions. Safe to do before NewContainer
+	// records under /api/admin/audit/executions. Safe to do before newAssembly
 	// because auditService is only used through its public methods.
 	auditSvc.WithExecutionRepo(repos.Execution)
 	defer func() {
@@ -101,13 +108,14 @@ func NewServer(ctx context.Context, logger *slog.Logger, cfg *config.Config, sto
 		}
 	}()
 
-	certs := control.Certs{
+	certs := controlplane.Certs{
 		CertPath: cfg.ClusterNodeCertPath(nodeID),
 		KeyPath:  cfg.ClusterNodeKeyPath(nodeID),
 		CAPath:   cfg.ClusterCACertPath(),
 	}
 
-	controlServer, err := control.NewControlPlane(
+	// 步骤 1：先构造控制面运行时（注册表/派发器/转发客户端），它不依赖任何业务服务。
+	controlRT, err := controlplane.NewRuntime(
 		cfg.Cluster,
 		certs,
 		nodeID,
@@ -116,82 +124,73 @@ func NewServer(ctx context.Context, logger *slog.Logger, cfg *config.Config, sto
 		repos,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create control runtime: %w", err)
 	}
 
-	services, err := service.NewContainer(
-		controlServer.Executor(), controlServer, cfg, repos, logger, auditSvc,
+	// 降级即自隔离：失去租约时由 Elector 回调控制面，主动断全部 Agent 流并失败在途派发。
+	leaderElector.SetDemotionHook(controlRT.HandleLeaderDemotion)
+
+	// 步骤 2：构造业务服务，只消费运行时能力（派发器 / 采集触发 / 配置推送）。
+	services, err := newAssembly(
+		controlRT, cfg, repos, logger, auditSvc,
+		agentRegistryConnectionChecker{registry: controlRT.Registry()}, // node.ConnectionChecker
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init services: %w", err)
 	}
-	controlServer.SetSettingsProvider(services.Settings)
-	controlServer.SetAlertEvaluator(services.Alert)
-	controlServer.SetPublisher(services.Push)
-	controlServer.SetControlEventHandler(services.Connection)
-	services.Settings.SetOnUpdated(controlServer.BroadcastSettingsUpdate)
-	services.Node.SetSettingsPusher(controlServer)
 
-	// Configure cross-control push notification relaying
-	services.Push.SetClusterForwarder(func(ctx context.Context, targetType string, userIDs []string, role model.Role, msg push.Message) {
-		if len(cfg.Cluster.Servers) <= 1 {
-			return
-		}
-		var payloadJSON string
-		if msg.Payload != nil {
-			if b, err := json.Marshal(msg.Payload); err == nil {
-				payloadJSON = string(b)
-			}
-		}
-		req := &pb.ForwardClusterEventRequest{
-			SourceNodeId: cfg.Runtime.NodeID,
-			TargetType:   targetType,
-			UserIds:      userIDs,
-			Role:         int32(role),
-			EventName:    string(msg.Name),
-			PayloadJson:  payloadJSON,
-		}
-
-		if leaderElector != nil && !leaderElector.IsLeader() {
-			leaderID := leaderElector.LeaderID()
-			if leaderID != "" && leaderID != cfg.Runtime.NodeID && controlServer.Forwarder() != nil {
-				common.SafeGo(logger, "forward-cluster-event-standby", func() {
-					fCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer cancel()
-					_ = controlServer.Forwarder().ForwardClusterEvent(fCtx, leaderID, req)
-				})
-			}
-			return
-		}
-
-		if controlServer.Forwarder() != nil {
-			for _, srv := range cfg.Cluster.Servers {
-				nodeIDs, err := host.ExpandHostPattern(srv)
-				if err != nil {
-					continue
-				}
-				for _, nid := range nodeIDs {
-					if nid == cfg.Runtime.NodeID {
-						continue
-					}
-					targetID := nid
-					common.SafeGo(logger, "forward-cluster-event-leader", func() {
-						fCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-						defer cancel()
-						_ = controlServer.Forwarder().ForwardClusterEvent(fCtx, targetID, req)
-					})
-				}
-			}
-		}
+	// 步骤 3：业务端口就绪后再构造入站 gRPC 适配，所有依赖在此时固定。
+	controlServer, err := controlplane.NewServer(controlRT, controlplane.ServiceDeps{
+		SettingsProvider:        services.Infra.Settings,
+		AlertEvaluator:          services.Domain.Alert,
+		Publisher:               services.Infra.Push,
+		ConnectionReportHandler: services.Domain.Connection,
+		SettingsPusher:          services.SettingsPusher,
+		CertHooks:               newCertRenewalAdapter(cfg, services, logger),
 	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create control server: %w", err)
+	}
+	subscribeAgentSettingsPush(services.Infra.Settings, services.SettingsPusher.Broadcast)
+	subscribeDesktopSettingsRefresh(services.Infra.Settings, services.Infra.Push)
 
-	portalServer, portalLogCloser, err := portal.CreateEchoServer(logger, cfg, services)
+	// 集群事件转发由 newInfra 在构造 push.Hub 注入 controlplane.NewClusterEventForwarder，
+	// 此处不再内联闭包，也不存在运行期 SetClusterForwarder。
+
+	portalServer, portalLogCloser, err := portal.CreateEchoServer(logger, cfg, api.Dependencies{
+		Settings: services.Infra.Settings,
+		Audit:    services.Infra.Audit,
+		Push:     services.Infra.Push,
+
+		User:       services.Domain.User,
+		Role:       services.Domain.Role,
+		File:       services.Domain.File,
+		Scheduler:  services.Domain.Scheduler,
+		Node:       services.Domain.Node,
+		Proxy:      services.Domain.Proxy,
+		Session:    services.Domain.Session,
+		Security:   services.Domain.Security,
+		App:        services.Domain.App,
+		License:    services.Domain.License,
+		Connection: services.Domain.Connection,
+		System:     services.Application.System,
+		Storage:    services.Domain.Storage,
+		Overview:   services.Application.Overview,
+		Ticket:     services.Domain.Ticket,
+		Desktop:    services.Domain.Desktop,
+		Alert:      services.Domain.Alert,
+
+		Identity: services.Application.Identity,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create portal server: %w", err)
 	}
 
+	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	server := &Server{
 		ctx:             ctx,
+		workerCtx:       workerCtx,
+		cancelWorkers:   cancelWorkers,
 		portalServer:    portalServer,
 		portalLogCloser: portalLogCloser,
 		cfg:             cfg,
@@ -202,9 +201,6 @@ func NewServer(ctx context.Context, logger *slog.Logger, cfg *config.Config, sto
 		leader:          leaderElector,
 		auditSvc:        auditSvc,
 	}
-	// Certificate lifecycle engine: inspection, expiry alerts and CSR-based
-	// auto-renewal (agent trigger + control node self-renewal with hot reload).
-	controlServer.SetCertRenewalHooks(newCertRenewalAdapter(cfg, services, server))
 	return server, nil
 }
 
@@ -220,43 +216,72 @@ func (sm *Server) Start(grpcPort string, errCh chan<- error) error {
 		if success {
 			return
 		}
+		if sm.cancelHTTP != nil {
+			sm.cancelHTTP()
+		}
+		if sm.httpDone != nil {
+			<-sm.httpDone
+		}
+		if sm.services != nil && sm.services.Domain.User != nil {
+			sm.services.Domain.User.StopAsyncSyncs()
+		}
+		sm.stopBackgroundWorkers()
 		for _, s := range slices.Backward(started) {
 			s()
 		}
+		sm.closeLoggingResources()
 	}()
 
 	// --- 初始化并确保管理员账号一致性 (动态启停控制)
-	if err := sm.services.User.InitAdminAccounts(sm.ctx, sm.cfg.Admin.EnableThreeRoles); err != nil {
+	if err := sm.services.Domain.User.InitAdminAccounts(sm.ctx, sm.cfg.Admin.EnableThreeRoles); err != nil {
 		return fmt.Errorf("failed to init admin accounts: %w", err)
 	}
 
-	if err := sm.services.Proxy.Start(); err != nil {
+	if err := sm.services.Domain.Proxy.Start(); err != nil {
 		return fmt.Errorf("failed to start proxy service: %w", err)
 	}
 	started = append(started, func() {
-		if err := sm.services.Proxy.Stop(); err != nil {
+		if err := sm.services.Domain.Proxy.Stop(); err != nil {
 			sm.logger.Warn("Failed to stop Proxy after start failure", "error", err)
 		}
 	})
 
 	// Start control gRPC server (synchronous listen check)
-	if err := sm.controlServer.Start(":" + grpcPort); err != nil {
+	controlErrors, err := sm.controlServer.Start(":" + grpcPort)
+	if err != nil {
 		return fmt.Errorf("failed to start control gRPC server: %w", err)
 	}
 	started = append(started, sm.controlServer.Stop)
 	sm.logger.Info("Control gRPC Server started", "port", grpcPort)
+	go func() {
+		select {
+		case serveErr, ok := <-controlErrors:
+			if !ok || serveErr == nil {
+				return
+			}
+			select {
+			case errCh <- fmt.Errorf("control gRPC server failed: %w", serveErr):
+			case <-sm.ctx.Done():
+			default:
+				sm.logger.Error("Failed to send control gRPC server error to errCh (buffer full)", "error", serveErr)
+			}
+		case <-sm.ctx.Done():
+		}
+	}()
 
 	// Persist the control node's own certificate metadata (issuance report). Best
 	// effort: a failure must never block startup, and the handshake self-heal
 	// backfills subject/expiry on the built-in agent's first handshake.
-	if err := sm.persistOwnCertMetadata(); err != nil {
+	if err := persistOwnCertMetadata(sm.ctx, sm.cfg, sm.services); err != nil {
 		sm.logger.Warn("Failed to persist own certificate metadata", "error", err)
 	}
 
 	// Start Http Server (async)
 	httpReady := make(chan struct{})
 	httpStartErr := make(chan error, 1)
+	sm.httpDone = make(chan struct{})
 	go func() {
+		defer close(sm.httpDone)
 		addr := sm.cfg.Portal.Host + ":" + sm.cfg.Portal.Port
 		sm.logger.Info("Starting Portal Server", "addr", addr, "tls_enabled", sm.cfg.Portal.TLS)
 		httpCtx, cancel := context.WithCancel(sm.ctx)
@@ -287,64 +312,103 @@ func (sm *Server) Start(grpcPort string, errCh chan<- error) error {
 		started = append(started, sm.leader.Stop)
 	}
 
-	sm.services.Session.StartCleanupLoop(sm.ctx, sm.leaseRepo, sm.cfg.Runtime.NodeID)
-	sm.services.User.StartSyncScheduler(sm.ctx, sm.logger.With("task", "user_sync"))
-	if sm.services.Invalidator != nil {
-		sm.services.Invalidator.Start(sm.ctx, len(sm.cfg.Cluster.Servers) <= 1)
+	sm.backgroundWorkers = append(sm.backgroundWorkers,
+		sm.services.Domain.Session.StartCleanupLoop(sm.workerCtx, sm.leaseRepo, sm.cfg.Runtime.NodeID),
+		sm.services.Domain.Connection.StartStoppedPruneLoop(sm.workerCtx, sm.leaseRepo, sm.cfg.Runtime.NodeID),
+		sm.services.Domain.User.StartSyncScheduler(sm.workerCtx, sm.logger.With("task", "user_sync")),
+	)
+	if sm.services.Infra.Invalidator != nil {
+		sm.services.Infra.Invalidator.Start(sm.ctx, len(sm.cfg.Cluster.Servers) <= 1)
 	}
 
 	// 统一启动所有已注册 TTL 缓存的后台过期清理
-	cache.StartJanitors(cache.JanitorInterval)
+	sm.stopJanitors = cache.StartJanitors(cache.JanitorInterval)
 
 	success = true
 	return nil
 }
 
-// Stop gracefully shuts down both Http and gRPC servers
-// Shutdown order: Http -> gRPC (reverse of startup)
+// Stop gracefully shuts down both Http and gRPC servers.
 func (sm *Server) Stop() {
 	sm.logger.Info("Stopping server services...")
+	if sm.cancelWorkers != nil {
+		sm.cancelWorkers()
+	}
 
 	// Stop Http Server (graceful shutdown via context cancellation, 10s default timeout)
 	if sm.cancelHTTP != nil {
 		sm.cancelHTTP()
 	}
+	if sm.httpDone != nil {
+		<-sm.httpDone
+	}
+	if sm.services.Domain.User != nil {
+		sm.services.Domain.User.StopAsyncSyncs()
+	}
 
-	if err := sm.services.Proxy.Stop(); err != nil {
+	if err := sm.services.Domain.Proxy.Stop(); err != nil {
 		sm.logger.Warn("Failed to stop Proxy gracefully", "error", err)
 	}
 
-	// Flush in-memory auth failure records to DB before shutdown.
-	if sm.services.BanCache != nil {
-		sm.services.BanCache.Stop()
-	}
-
-	if sm.services.Session != nil {
-		sm.services.Session.Close()
-	}
-
-	if sm.services.Invalidator != nil {
-		sm.services.Invalidator.Stop()
-	}
-
-	// Stop control gRPC server
-	sm.controlServer.Stop()
-
+	// 先释放选主租约并触发降级钩子：此时 gRPC 仍可用，Agent 能收到重定向并立即迁移。
 	if sm.leader != nil {
 		sm.leader.Stop()
 	}
-	if sm.auditSvc != nil {
-		if err := sm.auditSvc.Close(); err != nil {
-			sm.logger.Warn("Failed to close audit service", "error", err)
-		}
+
+	// Stop accepting and drain Agent RPCs before closing the services they call.
+	sm.controlServer.Stop()
+	sm.waitBackgroundWorkers()
+
+	if sm.stopJanitors != nil {
+		sm.stopJanitors()
 	}
-	if sm.portalLogCloser != nil {
-		if err := sm.portalLogCloser.Close(); err != nil {
-			sm.logger.Warn("Failed to close portal access log writer", "error", err)
-		}
+	if sm.services.Infra.Invalidator != nil {
+		sm.services.Infra.Invalidator.Stop()
 	}
 
+	// Flush in-memory auth failure records to DB before shutdown.
+	if sm.services.Infra.BanCache != nil {
+		sm.services.Infra.BanCache.Stop()
+	}
+
+	if sm.services.Domain.Session != nil {
+		sm.services.Domain.Session.Close()
+	}
+
+	sm.closeLoggingResources()
+
 	sm.logger.Info("Server services stopped")
+}
+
+func (sm *Server) stopBackgroundWorkers() {
+	if sm.cancelWorkers != nil {
+		sm.cancelWorkers()
+	}
+	sm.waitBackgroundWorkers()
+}
+
+func (sm *Server) waitBackgroundWorkers() {
+	for _, done := range sm.backgroundWorkers {
+		if done != nil {
+			<-done
+		}
+	}
+	sm.backgroundWorkers = nil
+}
+
+func (sm *Server) closeLoggingResources() {
+	sm.resourceCloseOnce.Do(func() {
+		if sm.auditSvc != nil {
+			if err := sm.auditSvc.Close(); err != nil {
+				sm.logger.Warn("Failed to close audit service", "error", err)
+			}
+		}
+		if sm.portalLogCloser != nil {
+			if err := sm.portalLogCloser.Close(); err != nil {
+				sm.logger.Warn("Failed to close portal access log writer", "error", err)
+			}
+		}
+	})
 }
 
 // ensureNodeCert auto-generates a node certificate if one does not exist at
@@ -361,17 +425,19 @@ func ensureNodeCert(logger *slog.Logger, cfg *config.Config, nodeID string) erro
 		hosts = append(hosts, ips...)
 	}
 
-	if _, err := nodeService.IssueNodeCert(nodeService.CertOptions{
+	res, err := nodesvc.IssueNodeCert(nodesvc.CertOptions{
 		CommonName: nodeID,
 		Hosts:      hosts,
-		ValidDays:  nodeService.ControlNodeCertValidDays,
+		ValidDays:  nodesvc.ControlNodeCertValidDays,
 		CACertFile: cfg.ClusterCACertPath(),
 		CAKeyFile:  cfg.ClusterCAKeyPath(),
 		CertFile:   cfg.ClusterNodeCertPath(nodeID),
 		KeyFile:    cfg.ClusterNodeKeyPath(nodeID),
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("issue node certificate: %w", err)
 	}
+	nodesvc.CommitCertPair(res.CertPath, res.KeyPath)
 	logger.Info("Node certificate auto-generated", "node_id", nodeID)
 	return nil
 }
@@ -380,8 +446,52 @@ func ensureNodeCert(logger *slog.Logger, cfg *config.Config, nodeID string) erro
 // and expiry to the nodes table right after the control server created/updated its
 // own row (UpsertSelf). Best-effort by design: it must never block startup, and
 // the handshake self-heal corrects the metadata once the built-in agent connects.
-func (sm *Server) persistOwnCertMetadata() error {
-	certPath := sm.cfg.ClusterNodeCertPath(sm.cfg.Runtime.NodeID)
+func localIPv4s() ([]string, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	var ips []string
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ip4 := ipnet.IP.To4(); ip4 != nil {
+				ips = append(ips, ip4.String())
+			}
+		}
+	}
+	return ips, nil
+}
+
+// agentRegistryConnectionChecker adapts the control-plane agent registry to
+// node.Service's NodeConnectionChecker (maintenance exit uses live connections).
+type agentRegistryConnectionChecker struct {
+	registry *agentregistry.Registry
+}
+
+func (c agentRegistryConnectionChecker) IsConnected(nodeID string) bool {
+	if c.registry == nil {
+		return false
+	}
+	return c.registry.IsConnected(nodeID)
+}
+
+// certRenewalAdapter implements controlplane.CertRenewalHooks, bridging the control
+// plane's certificate lifecycle engine to the settings policy, the node service
+// (CSR signing + metadata persistence + audit) and this server's own cert paths.
+type certRenewalAdapter struct {
+	cfg      *config.Config
+	services *assembly
+	logger   *slog.Logger
+}
+
+func newCertRenewalAdapter(cfg *config.Config, services *assembly, logger *slog.Logger) *certRenewalAdapter {
+	return &certRenewalAdapter{cfg: cfg, services: services, logger: logger}
+}
+
+// persistOwnCertMetadata 把本机证书指纹写入 DB（prev=old，current=new）。
+// 启动期与续期后共用同一实现，避免两处指纹口径漂移。
+func persistOwnCertMetadata(ctx context.Context, cfg *config.Config, services *assembly) error {
+	certPath := cfg.ClusterNodeCertPath(cfg.Runtime.NodeID)
 	pemBytes, err := os.ReadFile(certPath)
 	if err != nil {
 		return fmt.Errorf("read node certificate: %w", err)
@@ -397,9 +507,9 @@ func (sm *Server) persistOwnCertMetadata() error {
 	sum := sha256.Sum256(cert.Raw)
 	fingerprint := hex.EncodeToString(sum[:])
 
-	ctx, cancel := context.WithTimeout(sm.ctx, 5*time.Second)
+	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if _, err := sm.services.Node.UpdateCert(ctx, sm.cfg.Runtime.NodeID, fingerprint, cert.Subject.String(), cert.NotAfter); err != nil {
+	if _, err := services.Domain.Node.UpdateCert(dbCtx, cfg.Runtime.NodeID, fingerprint, cert.Subject.String(), cert.NotAfter); err != nil {
 		return fmt.Errorf("update cert metadata: %w", err)
 	}
 	return nil
@@ -408,68 +518,149 @@ func (sm *Server) persistOwnCertMetadata() error {
 // renewOwnControlCert re-signs this control node's certificate in place, keeping
 // .prev backups for rollback. The listener picks the new certificate up on the
 // next handshake via GetCertificate hot reload (no restart).
-func (sm *Server) renewOwnControlCert(_ context.Context) error {
-	nodeID := sm.cfg.Runtime.NodeID
-	certPath := sm.cfg.ClusterNodeCertPath(nodeID)
-	keyPath := sm.cfg.ClusterNodeKeyPath(nodeID)
+func (a *certRenewalAdapter) renewOwnControlCert(ctx context.Context) error {
+	nodeID := a.cfg.Runtime.NodeID
+	certPath := a.cfg.ClusterNodeCertPath(nodeID)
+	keyPath := a.cfg.ClusterNodeKeyPath(nodeID)
 
-	if err := backupForRenewal(certPath); err != nil {
-		return fmt.Errorf("backup current certificate: %w", err)
-	}
-	if err := backupForRenewal(keyPath); err != nil {
-		return fmt.Errorf("backup current key: %w", err)
-	}
-
+	// IssueNodeCert publishes cert+key as a pair and keeps <path>.prev for
+	// rollback if the second write (or the DB binding step) fails. Snapshots are
+	// removed after the binding is committed.
 	hosts := []string{nodeID, "localhost", "127.0.0.1"}
 	if ips, err := localIPv4s(); err == nil {
 		hosts = append(hosts, ips...)
 	}
-	if _, err := nodeService.IssueNodeCert(nodeService.CertOptions{
+	res, err := nodesvc.IssueNodeCert(nodesvc.CertOptions{
 		CommonName: nodeID,
 		Hosts:      hosts,
-		ValidDays:  nodeService.ControlNodeCertValidDays,
-		CACertFile: sm.cfg.ClusterCACertPath(),
-		CAKeyFile:  sm.cfg.ClusterCAKeyPath(),
+		ValidDays:  nodesvc.ControlNodeCertValidDays,
+		CACertFile: a.cfg.ClusterCACertPath(),
+		CAKeyFile:  a.cfg.ClusterCAKeyPath(),
 		CertFile:   certPath,
 		KeyFile:    keyPath,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("re-sign control node certificate: %w", err)
 	}
 
-	// Rotate the fingerprint in DB (prev=old, current=new) with the same
-	// best-effort semantics as issuance reporting: a failure must not block the
-	// new certificate, and the dual fingerprint keeps both authenticatable.
-	if err := sm.persistOwnCertMetadata(); err != nil {
-		sm.logger.Warn("Failed to persist renewed control certificate metadata", "error", err)
+	// Rotate the fingerprint in DB (prev=old, current=new). If the DB step fails,
+	// restore the previous pair so this control node keeps a cert/DB-consistent
+	// identity and the renewal loop can retry on the next tick.
+	if err := persistOwnCertMetadata(ctx, a.cfg, a.services); err != nil {
+		if rbErr := nodesvc.RollbackCertPair(res.CertPath, res.KeyPath); rbErr != nil {
+			a.logger.Error("Failed to roll back control certificate after DB failure", "error", rbErr)
+		}
+		a.logger.Warn("Failed to persist renewed control certificate metadata; restored previous pair", "error", err)
+		return nil
 	}
+	nodesvc.CommitCertPair(res.CertPath, res.KeyPath)
 	return nil
 }
 
-// backupForRenewal moves path to <path>.prev (replacing any older backup).
-func backupForRenewal(path string) error {
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
+func (a *certRenewalAdapter) Policy(ctx context.Context) (controlplane.CertPolicy, error) {
+	settings, err := a.services.Infra.Settings.GetCertSettings(ctx)
+	if err != nil {
+		return controlplane.CertPolicy{}, err
 	}
-	prev := path + ".prev"
-	_ = os.Remove(prev)
-	return os.Rename(path, prev)
+	return controlplane.CertPolicy{
+		AutoRenewMode:   settings.AutoRenewMode,
+		RenewBeforeDays: settings.RenewBeforeDays,
+		MaxAttempts:     settings.MaxAttempts,
+		BackoffHours:    settings.BackoffScheduleHours,
+	}, nil
 }
 
-func localIPv4s() ([]string, error) {
-	addrs, err := net.InterfaceAddrs()
+func (a *certRenewalAdapter) SignCSR(csrPEM []byte, commonName string, hosts []string, validDays int) ([]byte, string, string, time.Time, error) {
+	certPEM, result, err := nodesvc.SignNodeCSR(nodesvc.CSRSignOptions{
+		CSRPEM:     csrPEM,
+		CommonName: commonName,
+		Hosts:      hosts,
+		ValidDays:  validDays,
+		CACertFile: a.cfg.ClusterCACertPath(),
+		CAKeyFile:  a.cfg.ClusterCAKeyPath(),
+	})
 	if err != nil {
-		return nil, err
+		return nil, "", "", time.Time{}, err
 	}
-	var ips []string
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ip4 := ipnet.IP.To4(); ip4 != nil {
-				ips = append(ips, ip4.String())
-			}
+	expiresAt, err := time.Parse(time.RFC3339, result.ExpiresAt)
+	if err != nil {
+		return nil, "", "", time.Time{}, fmt.Errorf("parse certificate expiry: %w", err)
+	}
+	return certPEM, result.Fingerprint, result.Subject, expiresAt, nil
+}
+
+func (a *certRenewalAdapter) CAPEM() ([]byte, error) {
+	return os.ReadFile(a.cfg.ClusterCACertPath())
+}
+
+func (a *certRenewalAdapter) CAKeyPEM() ([]byte, error) {
+	return os.ReadFile(a.cfg.ClusterCAKeyPath())
+}
+
+func (a *certRenewalAdapter) UpdateCert(ctx context.Context, nodeID, fingerprint, subject string, expiresAt time.Time) error {
+	_, err := a.services.Domain.Node.UpdateCert(ctx, nodeID, fingerprint, subject, expiresAt)
+	return err
+}
+
+func (a *certRenewalAdapter) LogRenew(ctx context.Context, nodeID, phase, message string) {
+	a.services.Domain.Node.LogCertRenew(ctx, nodeID, phase, message)
+}
+
+func (a *certRenewalAdapter) RenewControlNodeCert(ctx context.Context) error {
+	return a.renewOwnControlCert(ctx)
+}
+
+// agentSettingsPushDomains lists global settings domains that affect pb.AgentSettings.
+var agentSettingsPushDomains = []schema.Domain{
+	schema.DomainAgent,
+	schema.DomainStorage,
+	schema.DomainLicense,
+	schema.DomainScheduler,
+}
+
+func agentSettingsDomainsChanged(domains []schema.Domain) bool {
+	for _, d := range domains {
+		if slices.Contains(agentSettingsPushDomains, d) {
+			return true
 		}
 	}
-	return ips, nil
+	return false
+}
+
+// subscribeAgentSettingsPush pushes effective agent settings only when a domain
+// that contributes to GetAgentSettingsForNode / UpdateSettingsCommand changes.
+func subscribeAgentSettingsPush(svc *settings.Service, broadcast func(ctx context.Context) error) {
+	if svc == nil || broadcast == nil {
+		return
+	}
+	svc.SubscribeDomains(func(ctx context.Context, domains []schema.Domain) error {
+		if !agentSettingsDomainsChanged(domains) {
+			return nil
+		}
+		return broadcast(ctx)
+	})
+}
+
+// subscribeDesktopSettingsRefresh notifies Portal clients when the desktop domain changes.
+func subscribeDesktopSettingsRefresh(svc *settings.Service, pub push.Publisher) {
+	if svc == nil || pub == nil {
+		return
+	}
+	svc.SubscribeDomains(func(ctx context.Context, domains []schema.Domain) error {
+		if !slices.Contains(domains, schema.DomainDesktop) {
+			return nil
+		}
+		pub.Broadcast(ctx, desktopSettingsRefreshMessage())
+		return nil
+	})
+}
+
+func desktopSettingsRefreshMessage() push.Message {
+	return push.Message{
+		Name: push.EventSystem,
+		Payload: push.EventPayload{
+			Action: "refresh",
+			Extra:  map[string]string{"domain": schema.DomainDesktop.String()},
+		},
+	}
 }

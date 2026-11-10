@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"design-cloud-engine/internal/common"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
 )
@@ -62,6 +62,14 @@ func (s *Service) ListAccessible(ctx context.Context, username string) ([]model.
 	return apps, nil
 }
 
+func (s *Service) ListAccessiblePage(ctx context.Context, username string, limit, offset int) ([]model.App, int64, error) {
+	apps, total, err := s.appRepo.ListAccessiblePage(ctx, username, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list accessible apps for user %s: %w", username, err)
+	}
+	return apps, total, nil
+}
+
 // GetByID returns an app by ID.
 func (s *Service) GetByID(ctx context.Context, id uint) (model.App, error) {
 	app, err := s.appRepo.GetByID(ctx, id)
@@ -84,7 +92,7 @@ func (s *Service) GetAccessibleByID(ctx context.Context, id uint, username strin
 		return model.App{}, fmt.Errorf("check access app %d user %s: %w", app.ID, username, err)
 	}
 	if !hasAccess {
-		return model.App{}, common.NewForbiddenError("permission denied")
+		return model.App{}, contract.NewForbiddenError("permission denied")
 	}
 	return app, nil
 }
@@ -183,6 +191,15 @@ func (s *Service) ListUsers(ctx context.Context, appID uint) ([]string, error) {
 	return users, nil
 }
 
+// ListUsersPage returns a page of usernames authorized for an app.
+func (s *Service) ListUsersPage(ctx context.Context, appID uint, limit, offset int) ([]string, int64, error) {
+	users, total, err := s.appRepo.ListAuthorizedUsersPage(ctx, appID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list users for app %d: %w", appID, err)
+	}
+	return users, total, nil
+}
+
 func (s *Service) resolveUsers(ctx context.Context, usernames []string) ([]model.User, error) {
 	if len(usernames) == 0 {
 		return nil, nil
@@ -218,7 +235,7 @@ func (s *Service) resolveUsers(ctx context.Context, usernames []string) ([]model
 		}
 		for _, name := range uniqueNames {
 			if !found[name] {
-				return nil, fmt.Errorf("user %q: %w", name, common.ErrNotFound)
+				return nil, fmt.Errorf("user %q: %w", name, contract.ErrNotFound)
 			}
 		}
 	}
@@ -228,7 +245,7 @@ func (s *Service) resolveUsers(ctx context.Context, usernames []string) ([]model
 
 func mapAppStoreError(op string, err error) error {
 	if errors.Is(err, db.ErrAppNameExists) {
-		return common.NewConflictError("app name already exists", ErrAppNameConflict)
+		return contract.NewConflictError("app name already exists", ErrAppNameConflict)
 	}
 	return fmt.Errorf("%s app: %w", op, err)
 }

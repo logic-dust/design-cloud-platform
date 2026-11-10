@@ -3,7 +3,7 @@
    防闪烁 (FOUC) 自动初始化与亮/暗主题无缝切换
    ============================================================ */
 (function (global) {
-  const THEME_KEY = 'dc-dashboard-theme';
+  const THEME_KEY = 'dc-overview-theme';
 
   function getTheme() {
     return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark';

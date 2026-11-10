@@ -1,8 +1,8 @@
 package api
 
 import (
-	"context"
 	"net/http"
+	"strings"
 
 	"design-cloud-engine/internal/server/portal/httputil"
 	usersvc "design-cloud-engine/internal/server/service/user"
@@ -19,13 +19,15 @@ func (h *userHandler) adminSystemUsersAPI(g *echo.Group) {
 	g.POST("/sync", h.adminSyncUsers)
 	g.POST("/id-mappings/refresh", h.adminRefreshIDMappingCache)
 	g.PATCH("/:user", h.adminUpdateUser)
+	g.DELETE("/:user", h.adminDeleteUser)
 	g.POST("/:user/reset-password", h.adminResetUserPassword)
 }
 
 // --- 获取所有用户（管理员）
 func (h *userHandler) adminListUsers(c *echo.Context) error {
-	p := httputil.ParsePagination(c, 50, 200)
-	userList, total, err := h.user.List(c.Request().Context(), p.Limit, p.Offset)
+	p := httputil.ParsePage(c)
+	q := strings.TrimSpace(c.QueryParam("q"))
+	userList, total, err := h.user.List(c.Request().Context(), p.Limit, p.Offset, q)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
@@ -43,7 +45,9 @@ func (h *userHandler) adminGetUser(c *echo.Context) error {
 
 // --- 同步系统/LDAP用户（管理员）
 func (h *userHandler) adminSyncUsers(c *echo.Context) error {
-	go h.user.SyncUsers(context.Background(), h.logger.With("component", "user_sync_api"))
+	if !h.user.TriggerSyncAsync(h.logger.With("component", "user_sync_api")) {
+		return c.NoContent(http.StatusServiceUnavailable)
+	}
 	return c.NoContent(http.StatusAccepted)
 }
 
@@ -85,11 +89,19 @@ func (h *userHandler) adminUpdateUser(c *echo.Context) error {
 		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
 	}
 
-	result, err := h.user.AdminUpdate(c.Request().Context(), session, c.Param("user"), req)
+	result, err := h.identity.UpdateUserStatus(c.Request().Context(), session, c.Param("user"), req)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
 	return httputil.RespondData(c, result)
+}
+
+// --- 删除用户（管理员）：关闭代理、结束 VNC，并删除连接行与会话存在记录
+func (h *userHandler) adminDeleteUser(c *echo.Context) error {
+	if err := h.identity.DeleteUser(c.Request().Context(), c.Param("user")); err != nil {
+		return httputil.RespondError(c, err)
+	}
+	return c.NoContent(http.StatusNoContent)
 }
 
 // --- 重置用户密码（管理员）

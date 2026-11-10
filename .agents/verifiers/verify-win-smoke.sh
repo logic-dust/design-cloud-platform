@@ -2,7 +2,7 @@
 # Verifier: Windows 节点实机冒烟（编译级门禁之外的执行级证据）。
 #
 # 覆盖：
-#   1) 枚举所有"能在 Windows 上编译出测试二进制"的包（launcher 链路已被 !windows 排除），
+#   1) 枚举所有"能在 Windows 上编译出测试二进制"的包（dc-exec 链路已被 !windows 排除），
 #      交叉编译 → 推送 → **在真实 Windows 上执行**（本机只能 -c 编译，不能执行）；
 #   2) 逐包汇总 PASS/FAIL；
 #   3) 若当前账户是管理员：SCM 服务 install/start/status/stop/uninstall 全流程
@@ -76,7 +76,7 @@ for pkg in "${PKGS[@]}"; do
   NAMES+=("${name}")
 done
 make win-agent >/dev/null
-echo "    built ${#NAMES[@]} test binaries + design-cloud-engine.exe"
+echo "    built ${#NAMES[@]} test binaries + dc-engine.exe"
 
 # Minimal agent-only config: hostname is not listed in controls → pure agent.
 # Absolute --config path is required for SCM install; relative config.toml is not enough.
@@ -84,9 +84,7 @@ cat >"${WORK_DIR}/config.toml" <<'EOF'
 [log]
 dir = "logs"
 app_level = "INFO"
-max_age = 30
-max_size = 100
-max_backups = 10
+access_level = "INFO"
 
 [cluster]
 port = 50051
@@ -100,7 +98,7 @@ EOF
 echo "[2/5] 推送产物到 ${REMOTE_DIR} ..."
 ssh "${SSH_OPTS[@]}" "${WIN_HOST}" "New-Item -ItemType Directory -Force -Path '${REMOTE_DIR}' | Out-Null; Remove-Item -Path '${REMOTE_DIR}\\*.test.exe' -Force -ErrorAction SilentlyContinue; 'dir ready'"
 scp -q "${WORK_DIR}"/*.test.exe "${WIN_HOST}:${REMOTE_DIR}/"
-scp -q build/design-cloud-engine.exe "${WIN_HOST}:${REMOTE_DIR}/"
+scp -q build/dc-engine.exe "${WIN_HOST}:${REMOTE_DIR}/"
 scp -q "${WORK_DIR}/config.toml" "${WIN_HOST}:${REMOTE_DIR}/config.toml"
 
 echo "[3/5] 在真实 Windows 上执行单测..."
@@ -135,7 +133,7 @@ for name in "${NAMES[@]}"; do
 done
 echo "    实机单测：PASS ${passed} / FAIL ${failed}"
 
-REMOTE_EXE="${REMOTE_DIR}\\design-cloud-engine.exe"
+REMOTE_EXE="${REMOTE_DIR}\\dc-engine.exe"
 if [ "${failed}" -gt 0 ]; then
   echo "    失败包详情（复跑取输出）："
   for name in "${FAILED_NAMES[@]}"; do

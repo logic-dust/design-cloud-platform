@@ -7,42 +7,43 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"syscall"
 
 	"design-cloud-engine/cmd/engine/command"
-	fsutil "design-cloud-engine/internal/common/fs"
-	"design-cloud-engine/internal/config"
 	"design-cloud-engine/internal/db"
+	"design-cloud-engine/internal/platform/config"
+	fsutil "design-cloud-engine/internal/platform/fs"
 	"design-cloud-engine/internal/server"
 	"design-cloud-engine/internal/server/service/settings"
 	usersvc "design-cloud-engine/internal/server/service/user"
+
+	"golang.org/x/sys/unix"
 )
 
 // --- 1. Pre-flight Environment Validation ---
 
 // checkPlatformPreconditions performs process-level pre-flight environment checks for Linux.
-// It executes as the very first line of main() (Fail-Fast): running as root is strictly prohibited
-// across all commands to prevent permission corruptions on config files, DB, or TLS materials.
+// It executes as the very first line of main(): restores PR_SET_DUMPABLE to 1 in case
+// capabilities (e.g. AmbientCapabilities in systemd) caused the kernel to clear dumpable,
+// which prevents child processes (like PrivilegedExec) from reading /proc/<ppid>/exe for parent verification.
 func checkPlatformPreconditions() error {
-	runUser, err := user.Current()
-	if err != nil {
-		return fmt.Errorf("resolve current user: %w", err)
-	}
-	if runUser.Uid == "0" {
-		return fmt.Errorf("running as root is not allowed for security reasons")
-	}
+	_ = unix.Prctl(unix.PR_SET_DUMPABLE, 1, 0, 0, 0)
 	return nil
 }
 
 // --- 2. Runtime Lifecycle Supervision (Daemon) ---
 
 // runWithLifecycle provides the process lifecycle driver for Linux.
-// It acquires an exclusive process lockfile to prevent multi-instance runs,
+// It strictly prohibits running the daemon background service as root for security reasons,
+// acquires an exclusive process lockfile to prevent multi-instance runs,
 // intercepts POSIX SIGINT/SIGTERM for graceful context cancellation, and cleans up the lock on exit.
 func runWithLifecycle(_ *command.Flags, runFn func(ctx context.Context) error) error {
+	if os.Geteuid() == 0 || os.Getuid() == 0 {
+		return fmt.Errorf("running daemon service as root is not allowed for security reasons (please run as non-root service user, e.g. design-cloud)")
+	}
+
 	unlock, err := acquireProcessLock()
 	if err != nil {
 		return err

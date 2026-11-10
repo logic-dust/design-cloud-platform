@@ -8,10 +8,10 @@ import (
 	"testing"
 
 	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
+	"design-cloud-engine/internal/platform/config"
 	"design-cloud-engine/internal/server/service/settings"
-	"design-cloud-engine/internal/server/service/settings/schema"
 )
 
 func newTestSettingsSvcWithFileSettings(t *testing.T, fs schema.FileSettings) *settings.Service {
@@ -28,7 +28,7 @@ func newTestSettingsSvcWithFileSettings(t *testing.T, fs schema.FileSettings) *s
 		t.Fatalf("migrate: %v", err)
 	}
 	repos := db.NewRepos(store)
-	svc, err := settings.NewService(repos.Setting, &audit.Service{}, nil)
+	svc, err := settings.NewService(repos.Setting, nil, &audit.Service{}, nil, repos.CacheVersion, repos.Node)
 	if err != nil {
 		t.Fatalf("settings service: %v", err)
 	}
@@ -57,6 +57,7 @@ func TestFileService_Disabled(t *testing.T) {
 		UploadEnabled:       true,
 		DownloadApprovalTTL: 86400,
 		UploadMaxSizeBytes:  1024 * 1024,
+		ListMaxEntries:      schema.ListMaxEntriesDefault,
 	})
 	svcWithMock := &Service{
 		settingsSvc: settingsSvc,
@@ -100,6 +101,7 @@ func TestExtraLocation_PolicyNotReadOnly(t *testing.T) {
 		UploadEnabled:       true,
 		DownloadApprovalTTL: 86400,
 		UploadMaxSizeBytes:  1024 * 1024,
+		ListMaxEntries:      schema.ListMaxEntriesDefault,
 		Locations: []schema.FileLocationSettings{
 			{
 				Name:    "shared",

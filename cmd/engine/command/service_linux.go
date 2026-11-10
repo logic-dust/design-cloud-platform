@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"time"
 
-	"design-cloud-engine/internal/common"
-	fsutil "design-cloud-engine/internal/common/fs"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/cmd/engine/console"
+	"design-cloud-engine/internal/platform/config"
+	fsutil "design-cloud-engine/internal/platform/fs"
 )
 
 func runServiceCommand(_ *Flags, args []string) error {
@@ -31,10 +31,10 @@ func runServiceCommand(_ *Flags, args []string) error {
 }
 
 func printServiceUsage() {
-	common.PrintStderr("Usage: %s service <status|stop>\n\n", config.AppName)
-	common.PrintStderr("Subcommands:\n")
-	common.PrintStderr("  status                   Check if local engine process is running\n")
-	common.PrintStderr("  stop                     Gracefully stop local engine process\n")
+	console.PrintStderr("Usage: %s service <status|stop>\n\n", config.AppName)
+	console.PrintStderr("Subcommands:\n")
+	console.PrintStderr("  status                   Check if local engine process is running\n")
+	console.PrintStderr("  stop                     Gracefully stop local engine process\n")
 }
 
 // ProcessStartTime returns the process start time ticks from /proc/<pid>/stat.
@@ -120,26 +120,26 @@ func runLinuxServiceStatus() error {
 		return fmt.Errorf("service status error: %w", err)
 	}
 	if !locked {
-		common.PrintlnStdout("Engine is NOT running")
+		console.PrintlnStdout("Engine is NOT running")
 		return fmt.Errorf("process not running")
 	}
 
 	pid, starttime, err := readPIDRecord()
 	if err != nil {
-		common.PrintStdout("Engine is RUNNING (active exclusive lock held)\n")
+		console.PrintStdout("Engine is RUNNING (active exclusive lock held)\n")
 		return nil
 	}
 
 	_, status, _ := checkProcessAlive(pid, starttime)
 	switch status {
 	case processRunning:
-		common.PrintStdout("Engine is RUNNING (PID %d)\n", pid)
+		console.PrintStdout("Engine is RUNNING (PID %d)\n", pid)
 		return nil
 	case processPermissionDenied:
-		common.PrintStdout("Engine is RUNNING (PID %d) - Permission Denied to inspect process\n", pid)
+		console.PrintStdout("Engine is RUNNING (PID %d) - Permission Denied to inspect process\n", pid)
 		return nil
 	default:
-		common.PrintStdout("Engine is RUNNING (PID %d, active exclusive lock held)\n", pid)
+		console.PrintStdout("Engine is RUNNING (PID %d, active exclusive lock held)\n", pid)
 		return nil
 	}
 }
@@ -151,7 +151,7 @@ func runLinuxServiceStop() error {
 		return fmt.Errorf("cannot stop: %w", err)
 	}
 	if !locked {
-		common.PrintStdout("Engine is not running\n")
+		console.PrintStdout("Engine is not running\n")
 		return nil
 	}
 
@@ -168,7 +168,7 @@ func runLinuxServiceStop() error {
 	if err := process.Signal(syscall.SIGTERM); err != nil {
 		return fmt.Errorf("failed to send stop signal to process %d: %w", pid, err)
 	}
-	common.PrintStdout("Sent stop signal to process %d, waiting for exit...\n", pid)
+	console.PrintStdout("Sent stop signal to process %d, waiting for exit...\n", pid)
 
 	deadline := time.NewTimer(30 * time.Second)
 	defer deadline.Stop()
@@ -178,18 +178,18 @@ func runLinuxServiceStop() error {
 	for {
 		curLocked, _ := isProcessLocked(path)
 		if !curLocked {
-			common.PrintStdout("Stopped process %d\n", pid)
+			console.PrintStdout("Stopped process %d\n", pid)
 			return nil
 		}
 		select {
 		case <-ticker.C:
 		case <-deadline.C:
-			common.PrintStdout("Stop timed out, sending SIGKILL to process %d\n", pid)
+			console.PrintStdout("Stop timed out, sending SIGKILL to process %d\n", pid)
 			_ = process.Signal(syscall.SIGKILL)
 			time.Sleep(500 * time.Millisecond)
 			curLocked, _ := isProcessLocked(path)
 			if !curLocked {
-				common.PrintStdout("Stopped process %d\n", pid)
+				console.PrintStdout("Stopped process %d\n", pid)
 				return nil
 			}
 			return fmt.Errorf("failed to stop process %d", pid)

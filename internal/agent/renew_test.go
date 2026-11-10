@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -97,7 +98,7 @@ func (p *renewTestPKI) issue(t *testing.T, cn string, notAfter time.Time) ([]byt
 }
 
 func (p *renewTestPKI) newAgent() *Agent {
-	return NewAgent(nil, Config{
+	return NewAgent(context.Background(), nil, Config{
 		NodeID: "node-1",
 		TLS: TLSClientConfig{
 			CertPath: p.certPath,
@@ -211,7 +212,7 @@ func TestNoteRenewalFailureRollsBack(t *testing.T) {
 	agent.renewActive = true
 	agent.renewMu.Unlock()
 
-	for i := 0; i < certRenewRollbackFailures; i++ {
+	for range certRenewRollbackFailures {
 		agent.noteRenewalFailure()
 	}
 
@@ -248,7 +249,7 @@ func TestNoteAuthRejectionRollsBackToPrev(t *testing.T) {
 		t.Fatalf("simulate broken cert: %v", err)
 	}
 
-	for i := 0; i < certAuthRejectionRollbackFailures; i++ {
+	for range certAuthRejectionRollbackFailures {
 		agent.noteAuthRejection()
 	}
 
@@ -294,7 +295,7 @@ func TestNoteAuthRejectionWithoutBackupIsInert(t *testing.T) {
 	pki := newRenewTestPKI(t)
 	agent := pki.newAgent()
 
-	for i := 0; i < certAuthRejectionRollbackFailures; i++ {
+	for range certAuthRejectionRollbackFailures {
 		agent.noteAuthRejection()
 	}
 

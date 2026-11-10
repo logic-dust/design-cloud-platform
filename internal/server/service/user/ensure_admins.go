@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"design-cloud-engine/internal/common/crypto"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/crypto"
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"

@@ -1,13 +1,14 @@
 package api
 
 import (
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"design-cloud-engine/internal/server/portal/httputil"
-	"design-cloud-engine/internal/server/service/push"
+	"design-cloud-engine/internal/server/push"
 
 	"github.com/labstack/echo/v5"
 )
@@ -40,7 +41,10 @@ func (h *eventsHandler) eventsStream(c *echo.Context) error {
 	}
 
 	// hub 按 username 路由（业务唯一标识），与各服务推送寻址一致
-	client := h.hub.Register(sess.Username, sess.Role)
+	client, err := h.hub.Register(sess.Username, sess.Role)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "too many event streams")
+	}
 	defer h.hub.Unregister(client)
 
 	ticker := time.NewTicker(heartbeatInterval)

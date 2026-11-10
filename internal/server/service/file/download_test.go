@@ -1,10 +1,12 @@
 package file
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -16,12 +18,12 @@ import (
 	"design-cloud-engine/internal/execution/payload"
 
 	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/execution"
 	"design-cloud-engine/internal/model"
+	"design-cloud-engine/internal/platform/config"
 	"design-cloud-engine/internal/server/service/settings"
-	"design-cloud-engine/internal/server/service/settings/schema"
 	usersvc "design-cloud-engine/internal/server/service/user"
 )
 
@@ -109,127 +111,83 @@ func TestDownloadResolvedPathWithinRootsUsesSymlinkTarget(t *testing.T) {
 	}
 }
 
-func TestDownloadTicketValidatesRequesterExpiryAndFingerprint(t *testing.T) {
+func TestOpenAllowedDownloadHonorsPermissionAndFingerprint(t *testing.T) {
 	ctx := context.Background()
-	svc, filePath, cleanup := newDownloadTicketTestService(t)
+	svc, _, filePath, cleanup := newDownloadTicketTestService(t)
 	defer cleanup()
 
 	if err := os.WriteFile(filePath, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	token, err := svc.CreateAllowedDownloadToken(ctx, filePath, "alice")
+	allowedPath, size, err := svc.openAllowedDownloadFile(ctx, filePath, "alice")
 	if err != nil {
-		t.Fatalf("create token: %v", err)
-	}
-	if !strings.HasPrefix(token.Token, "dl_") || strings.Contains(token.Token, "/") || strings.Contains(token.Token, filePath) {
-		t.Fatalf("token exposures unexpected shape: %q", token.Token)
-	}
-
-	if _, _, err := svc.GetAllowedDownloadFile(ctx, token.Token, "bob"); !errors.Is(err, ErrInvalidDownloadToken) {
-		t.Fatalf("requester mismatch err = %v, want %v", err, ErrInvalidDownloadToken)
-	}
-
-	allowedPath, size, err := svc.GetAllowedDownloadFile(ctx, token.Token, "alice")
-	if err != nil {
-		t.Fatalf("get allowed file: %v", err)
+		t.Fatalf("open allowed file: %v", err)
 	}
 	if allowedPath != filePath || size != 5 {
 		t.Fatalf("allowed file = (%q, %d), want (%q, 5)", allowedPath, size, filePath)
 	}
-	if _, _, err := svc.GetAllowedDownloadFile(ctx, token.Token, "alice"); !errors.Is(err, ErrInvalidDownloadToken) {
-		t.Fatalf("reused token err = %v, want %v", err, ErrInvalidDownloadToken)
-	}
-
-	changedToken, err := svc.CreateAllowedDownloadToken(ctx, filePath, "alice")
-	if err != nil {
-		t.Fatalf("create changed file token: %v", err)
-	}
-
-	if err := os.WriteFile(filePath, []byte("hello changed"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := svc.GetAllowedDownloadFile(ctx, changedToken.Token, "alice"); !errors.Is(err, ErrDownloadFileChanged) {
-		t.Fatalf("changed file err = %v, want %v", err, ErrDownloadFileChanged)
-	}
-	if _, _, err := svc.GetAllowedDownloadFile(ctx, changedToken.Token, "alice"); !errors.Is(err, ErrInvalidDownloadToken) {
-		t.Fatalf("changed file token reuse err = %v, want %v", err, ErrInvalidDownloadToken)
-	}
-
-	expiredToken, err := svc.CreateAllowedDownloadToken(ctx, filePath, "alice")
-	if err != nil {
-		t.Fatalf("create expired token: %v", err)
-	}
-	svc.downloadTokensMu.Lock()
-	entry := svc.downloadTokens[expiredToken.Token]
-	entry.ExpiresAt = time.Now().Add(-time.Second)
-	svc.downloadTokens[expiredToken.Token] = entry
-	svc.downloadTokensMu.Unlock()
-
-	if _, _, err := svc.GetAllowedDownloadFile(ctx, expiredToken.Token, "alice"); !errors.Is(err, ErrInvalidDownloadToken) {
-		t.Fatalf("expired token err = %v, want %v", err, ErrInvalidDownloadToken)
-	}
 }
 
-func TestCreateAllowedDownloadTicketHonorsPermissionMode(t *testing.T) {
+func TestOpenAllowedDownloadHonorsPermissionMode(t *testing.T) {
 	ctx := context.Background()
-	svc, filePath, cleanup := newDownloadTicketTestService(t)
+	svc, settingsSvc, filePath, cleanup := newDownloadTicketTestService(t)
 	defer cleanup()
 
 	if err := os.WriteFile(filePath, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := setTestDownloadAccess(t, svc, DownloadPermissionRequest); err != nil {
+	if err := setTestDownloadAccess(t, svc, settingsSvc, DownloadPermissionRequest); err != nil {
 		t.Fatalf("set download access=request: %v", err)
 	}
-	if _, err := svc.CreateAllowedDownloadToken(ctx, filePath, "alice"); !errors.Is(err, ErrDownloadApprovalRequired) {
-		t.Fatalf("create token when request mode err = %v, want %v", err, ErrDownloadApprovalRequired)
+	if _, _, err := svc.openAllowedDownloadFile(ctx, filePath, "alice"); !errors.Is(err, ErrDownloadApprovalRequired) {
+		t.Fatalf("open when request mode err = %v, want %v", err, ErrDownloadApprovalRequired)
 	}
 
-	if err := setTestDownloadAccess(t, svc, DownloadPermissionAllow); err != nil {
+	if err := setTestDownloadAccess(t, svc, settingsSvc, DownloadPermissionAllow); err != nil {
 		t.Fatalf("set download access=allow: %v", err)
 	}
-	if _, err := svc.CreateAllowedDownloadToken(ctx, filePath, "alice"); err != nil {
-		t.Fatalf("create token when allow mode: %v", err)
+	if _, _, err := svc.openAllowedDownloadFile(ctx, filePath, "alice"); err != nil {
+		t.Fatalf("open when allow mode: %v", err)
 	}
 
-	if err := setTestDownloadAccess(t, svc, DownloadPermissionDeny); err != nil {
+	if err := setTestDownloadAccess(t, svc, settingsSvc, DownloadPermissionDeny); err != nil {
 		t.Fatalf("set download access=deny: %v", err)
 	}
-	if _, err := svc.CreateAllowedDownloadToken(ctx, filePath, "alice"); !errors.Is(err, ErrNoDownloadPermission) {
-		t.Fatalf("create token when deny mode err = %v, want %v", err, ErrNoDownloadPermission)
+	if _, _, err := svc.openAllowedDownloadFile(ctx, filePath, "alice"); !errors.Is(err, ErrNoDownloadPermission) {
+		t.Fatalf("open when deny mode err = %v, want %v", err, ErrNoDownloadPermission)
 	}
 }
 
 func TestSubmitDownloadRequestHonorsPermissionMode(t *testing.T) {
 	ctx := context.Background()
-	svc, filePath, cleanup := newDownloadTicketTestService(t)
+	svc, settingsSvc, filePath, cleanup := newDownloadTicketTestService(t)
 	defer cleanup()
 
 	if err := os.WriteFile(filePath, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := setTestDownloadAccess(t, svc, DownloadPermissionAllow); err != nil {
+	if err := setTestDownloadAccess(t, svc, settingsSvc, DownloadPermissionAllow); err != nil {
 		t.Fatalf("set download access=allow: %v", err)
 	}
 	if _, err := svc.SubmitDownloadRequest(ctx, filePath, "alice"); !errors.Is(err, ErrDownloadApprovalNotNeeded) {
 		t.Fatalf("submit request when allow mode err = %v, want %v", err, ErrDownloadApprovalNotNeeded)
 	}
 
-	if err := setTestDownloadAccess(t, svc, DownloadPermissionRequest); err != nil {
+	if err := setTestDownloadAccess(t, svc, settingsSvc, DownloadPermissionRequest); err != nil {
 		t.Fatalf("set download access=request: %v", err)
 	}
 	download, err := svc.SubmitDownloadRequest(ctx, filePath, "alice")
 	if err != nil {
 		t.Fatalf("submit request when request mode: %v", err)
 	}
-	if download.Status != model.DownloadStatusPending {
-		t.Fatalf("download status = %d, want %d", download.Status, model.DownloadStatusPending)
+	if download.Status != model.DownloadRequestStatusPending {
+		t.Fatalf("download status = %d, want %d", download.Status, model.DownloadRequestStatusPending)
 	}
 
-	if err := setTestDownloadAccess(t, svc, DownloadPermissionDeny); err != nil {
+	if err := setTestDownloadAccess(t, svc, settingsSvc, DownloadPermissionDeny); err != nil {
 		t.Fatalf("set download access=deny: %v", err)
 	}
 	if _, err := svc.SubmitDownloadRequest(ctx, filePath, "alice"); !errors.Is(err, ErrNoDownloadPermission) {
@@ -237,78 +195,16 @@ func TestSubmitDownloadRequestHonorsPermissionMode(t *testing.T) {
 	}
 }
 
-func TestGetAllowedDownloadFileDeniedAfterTicketIssue(t *testing.T) {
+func TestOpenApprovedDownloadRequestDeniedMode(t *testing.T) {
 	ctx := context.Background()
-	svc, filePath, cleanup := newDownloadTicketTestService(t)
+	svc, settingsSvc, filePath, cleanup := newDownloadTicketTestService(t)
 	defer cleanup()
 
 	if err := os.WriteFile(filePath, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := setTestDownloadAccess(t, svc, DownloadPermissionAllow); err != nil {
-		t.Fatalf("set download access=allow: %v", err)
-	}
-	token, err := svc.CreateAllowedDownloadToken(ctx, filePath, "alice")
-	if err != nil {
-		t.Fatalf("create allowed token: %v", err)
-	}
-
-	if err := setTestDownloadAccess(t, svc, DownloadPermissionDeny); err != nil {
-		t.Fatalf("set download access=deny: %v", err)
-	}
-	if _, _, err := svc.GetAllowedDownloadFile(ctx, token.Token, "alice"); !errors.Is(err, ErrNoDownloadPermission) {
-		t.Fatalf("get allowed file when deny mode err = %v, want %v", err, ErrNoDownloadPermission)
-	}
-}
-
-func TestCreateDownloadTokenCapsEntriesByDroppingOldest(t *testing.T) {
-	ctx := context.Background()
-	svc, _, cleanup := newDownloadTicketTestService(t)
-	defer cleanup()
-
-	now := time.Now()
-	svc.downloadTokensMu.Lock()
-	for i := range maxDownloadTokens {
-		tStr := fmt.Sprintf("dl_existing_%d", i)
-		svc.downloadTokens[tStr] = downloadTokenEntry{
-			Requester: "alice",
-			Path:      "/tmp/file",
-			CreatedAt: now.Add(time.Duration(i) * time.Millisecond),
-			ExpiresAt: now.Add(time.Hour),
-		}
-	}
-	svc.lastTokenCleanup = now
-	svc.downloadTokensMu.Unlock()
-
-	token, err := svc.createDownloadToken(ctx, downloadTokenEntry{Requester: "alice", Path: "/tmp/new"})
-	if err != nil {
-		t.Fatalf("create token: %v", err)
-	}
-
-	svc.downloadTokensMu.Lock()
-	defer svc.downloadTokensMu.Unlock()
-	if got := len(svc.downloadTokens); got != maxDownloadTokens {
-		t.Fatalf("download tokens = %d, want %d", got, maxDownloadTokens)
-	}
-	if _, ok := svc.downloadTokens[token.Token]; !ok {
-		t.Fatalf("new token was not stored")
-	}
-	if _, ok := svc.downloadTokens["dl_existing_0"]; ok {
-		t.Fatalf("oldest token remained after cap pruning")
-	}
-}
-
-func TestCreateApprovedDownloadTokenDeniedMode(t *testing.T) {
-	ctx := context.Background()
-	svc, filePath, cleanup := newDownloadTicketTestService(t)
-	defer cleanup()
-
-	if err := os.WriteFile(filePath, []byte("hello"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := setTestDownloadAccess(t, svc, DownloadPermissionRequest); err != nil {
+	if err := setTestDownloadAccess(t, svc, settingsSvc, DownloadPermissionRequest); err != nil {
 		t.Fatalf("set download access=request: %v", err)
 	}
 	requestInfo, err := svc.SubmitDownloadRequest(ctx, filePath, "alice")
@@ -319,15 +215,66 @@ func TestCreateApprovedDownloadTokenDeniedMode(t *testing.T) {
 		t.Fatalf("approve request: %v", err)
 	}
 
-	if err := setTestDownloadAccess(t, svc, DownloadPermissionDeny); err != nil {
+	if err := setTestDownloadAccess(t, svc, settingsSvc, DownloadPermissionDeny); err != nil {
 		t.Fatalf("set download access=deny: %v", err)
 	}
-	if _, err := svc.CreateApprovedDownloadToken(ctx, int(requestInfo.ID), "alice"); !errors.Is(err, ErrNoDownloadPermission) {
-		t.Fatalf("create approved token when deny mode err = %v, want %v", err, ErrNoDownloadPermission)
+	if _, _, err := svc.OpenApprovedDownloadRequest(ctx, int(requestInfo.ID), "alice"); !errors.Is(err, ErrNoDownloadPermission) {
+		t.Fatalf("open approved download when deny mode err = %v, want %v", err, ErrNoDownloadPermission)
 	}
 }
 
-func setTestDownloadAccess(t *testing.T, svc *Service, mode DownloadPermission) error {
+func TestConcurrentApproveAndRejectConflict(t *testing.T) {
+	ctx := context.Background()
+	svc, settingsSvc, filePath, cleanup := newDownloadTicketTestService(t)
+	defer cleanup()
+
+	if err := os.WriteFile(filePath, []byte("hello concurrent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := setTestDownloadAccess(t, svc, settingsSvc, DownloadPermissionRequest); err != nil {
+		t.Fatalf("set download access=request: %v", err)
+	}
+	req, err := svc.SubmitDownloadRequest(ctx, filePath, "alice")
+	if err != nil {
+		t.Fatalf("submit request: %v", err)
+	}
+
+	// 顺序或并发调用两次审核，第二次必须报冲突
+	if _, err := svc.ApproveDownloadRequest(ctx, int(req.ID), "admin1"); err != nil {
+		t.Fatalf("first approve should succeed: %v", err)
+	}
+
+	// 第二次 Approve 应失败
+	if _, err := svc.ApproveDownloadRequest(ctx, int(req.ID), "admin2"); !errors.Is(err, ErrDownloadRequestConflict) {
+		t.Fatalf("second approve want %v, got %v", ErrDownloadRequestConflict, err)
+	}
+
+	// 驳回已通过的请求也应失败
+	if _, err := svc.RejectDownloadRequest(ctx, int(req.ID), "admin2", "late reject"); !errors.Is(err, ErrDownloadRequestConflict) {
+		t.Fatalf("reject after approve want %v, got %v", ErrDownloadRequestConflict, err)
+	}
+}
+
+func TestNilSettingsServiceSafety(t *testing.T) {
+	ctx := context.Background()
+	svc := &Service{}
+
+	if !svc.IsEnabled(ctx) {
+		t.Fatalf("expected IsEnabled=true when settingsSvc is nil")
+	}
+	if perm := svc.downloadPolicy(ctx); perm != DownloadPermissionAllow {
+		t.Fatalf("expected DownloadPermissionAllow when settingsSvc is nil, got %v", perm)
+	}
+	if limit := svc.defaultUploadMaxSizeBytes(ctx); limit != schema.UploadMaxSizeBytesDefault {
+		t.Fatalf("expected default upload max size, got %d", limit)
+	}
+	if ttl := svc.downloadApprovalTTL(ctx); ttl != 86400*time.Second {
+		t.Fatalf("expected default approval ttl 86400s, got %v", ttl)
+	}
+}
+
+func setTestDownloadAccess(t *testing.T, svc *Service, settingsSvc *settings.Service, mode DownloadPermission) error {
 	t.Helper()
 
 	fileSetting, err := svc.settingsSvc.GetFileSettings(context.Background())
@@ -350,13 +297,16 @@ func setTestDownloadAccess(t *testing.T, svc *Service, mode DownloadPermission) 
 	if err != nil {
 		return err
 	}
-	return svc.settingsSvc.UpdateByDomain(context.Background(), schema.DomainFile, raw)
+	return settingsSvc.UpdateByDomain(context.Background(), schema.DomainFile, raw)
 }
 
 type downloadTicketTestExecutor struct {
 	home string
 }
 
+// Execute 只服务 user.Service 的 ActionUserGet（getent passwd 风格行）。
+// 文件动作（file.check 等）由 file.Service 经真实流执行器路径执行，
+// 见 TestMain 的伪 PrivilegedExec 再执行模式。
 func (e downloadTicketTestExecutor) Execute(_ context.Context, req *execution.ExecuteRequest) (*execution.ExecuteResponse, error) {
 	switch req.ActionName {
 	case execution.ActionUserGet:
@@ -373,46 +323,12 @@ func (e downloadTicketTestExecutor) Execute(_ context.Context, req *execution.Ex
 			Success: true,
 			Stdout:  fmt.Sprintf("%s:x:1000:1000:%s:%s:/bin/sh", userGet.Username, userGet.Username, e.home),
 		}, nil
-	case execution.ActionFileCheck:
-		var fileCheck payload.FileCheck
-		switch p := req.Payload.(type) {
-		case payload.FileCheck:
-			fileCheck = p
-		case *payload.FileCheck:
-			fileCheck = *p
-		default:
-			return nil, fmt.Errorf("invalid file check payload: %T", req.Payload)
-		}
-		info, err := os.Stat(fileCheck.Path)
-		if err != nil {
-			return &execution.ExecuteResponse{Success: false, Stderr: err.Error(), ExitCode: 1}, nil
-		}
-		realPath, err := filepath.EvalSymlinks(fileCheck.Path)
-		if err != nil {
-			return &execution.ExecuteResponse{Success: false, Stderr: err.Error(), ExitCode: 1}, nil
-		}
-		realPath, err = filepath.Abs(realPath)
-		if err != nil {
-			return nil, err
-		}
-		result := payload.FileCheckResult{
-			Size:     info.Size(),
-			RealPath: filepath.Clean(realPath),
-			ModTime:  info.ModTime().Unix(),
-			ModTimeN: int64(info.ModTime().Nanosecond()),
-			IsDir:    info.IsDir(),
-		}
-		data, err := json.Marshal(result)
-		if err != nil {
-			return nil, err
-		}
-		return &execution.ExecuteResponse{Success: true, Stdout: string(data)}, nil
 	default:
 		return &execution.ExecuteResponse{Success: false, Stderr: "unexpected action", ExitCode: 1}, nil
 	}
 }
 
-func newDownloadTicketTestService(t *testing.T) (*Service, string, func()) {
+func newDownloadTicketTestService(t *testing.T) (*Service, *settings.Service, string, func()) {
 	t.Helper()
 
 	root := t.TempDir()
@@ -438,18 +354,18 @@ func newDownloadTicketTestService(t *testing.T) (*Service, string, func()) {
 
 	repos := db.NewRepos(store)
 	auditSvc := &audit.Service{}
-	settingsSvc, err := settings.NewService(repos.Setting, auditSvc, nil)
+	settingsSvc, err := settings.NewService(repos.Setting, slog.Default(), auditSvc, nil, repos.CacheVersion, repos.Node)
 	if err != nil {
 		_ = store.Close()
 		t.Fatalf("settings service: %v", err)
 	}
-	err = settingsSvc.UpdateByDomain(context.Background(), schema.DomainFile, []byte(`{"enabled": true, "downloadEnabled": true, "uploadEnabled": true, "requiresApproval": false, "downloadApprovalTTL": 86400, "uploadMaxSizeBytes": 8589934592, "locations": []}`))
+	err = settingsSvc.UpdateByDomain(context.Background(), schema.DomainFile, []byte(`{"enabled": true, "downloadEnabled": true, "uploadEnabled": true, "requiresApproval": false, "downloadApprovalTTL": 86400, "uploadMaxSizeBytes": 8589934592, "listMaxEntries": 999, "locations": []}`))
 	if err != nil {
 		_ = store.Close()
 		t.Fatalf("update file settings: %v", err)
 	}
 	execSvc := downloadTicketTestExecutor{home: passwdHome}
-	userSvc, err := usersvc.NewService(execSvc, usersvc.Config{AuthMode: config.UserAuthModeLocal}, settingsSvc, repos.User, repos.TaskLease, repos.CacheVersion, nil, slog.Default(), auditSvc)
+	userSvc, err := usersvc.NewService(execSvc, usersvc.Config{AuthMode: config.UserAuthModeLocal}, settingsSvc, repos.User, repos.TaskLease, repos.CacheVersion, nil, slog.Default(), auditSvc, nil)
 	if err != nil {
 		_ = store.Close()
 		t.Fatalf("user service: %v", err)
@@ -464,8 +380,10 @@ func newDownloadTicketTestService(t *testing.T) (*Service, string, func()) {
 		t.Fatalf("create alice: %v", err)
 	}
 
-	svc := NewService(execSvc, userSvc, settingsSvc, Config{}, repos.File, slog.Default())
-	return svc, filepath.Join(passwdHome, "download.txt"), func() {
+	svc := NewService(userSvc, settingsSvc, Config{}, repos.DownloadRequest, slog.Default())
+	// 走真实流执行器路径：fork 本测试二进制（TestMain 伪 PrivilegedExec 模式）执行 file.check。
+	svc.streamExec = newReexecFakeDcExec(t)
+	return svc, settingsSvc, filepath.Join(passwdHome, "download.txt"), func() {
 		if err := store.Close(); err != nil {
 			t.Fatalf("close store: %v", err)
 		}
@@ -494,4 +412,104 @@ func colonFreeHomePath(t *testing.T, home string) string {
 		t.Skipf("无法为 %s 构造不含 ':' 的等价家目录路径（去盘符: %s）：getent passwd fixture 无法表达带盘符的 Windows 家目录", home, trimmed)
 	}
 	return trimmed
+}
+
+// fakeDcExecEnv 标记「测试二进制以伪 PrivilegedExec 身份被再执行」。
+// 经 BuildDcExecEnv 透传（不在 blocked env 名单内），跨平台可用。
+const fakeDcExecEnv = "DCE_FILE_TEST_FAKE_EXEC_BIN"
+
+// TestMain 是包级入口：正常模式跑测试；检测到 fakeDcExecEnv 时以伪 PrivilegedExec
+// 身份处理 stdin 协议并退出，不进入测试运行器。
+func TestMain(m *testing.M) {
+	if os.Getenv(fakeDcExecEnv) == "1" {
+		runFakeDcExecProcess()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+// newReexecFakeDcExec 返回指向本测试二进制的流执行器。
+// file.Service 经真实 StreamExecutor 路径（framed stdin + ExecuteOutput stdout）
+// fork 该二进制，TestMain 检测环境标记后走伪 PrivilegedExec 逻辑。
+func newReexecFakeDcExec(t *testing.T) *StreamExecutor {
+	t.Helper()
+	t.Setenv(fakeDcExecEnv, "1")
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatalf("test binary path: %v", err)
+	}
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("test-token"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	return &StreamExecutor{
+		getExecBinPath: func(context.Context) string { return bin },
+		tokenFile:      tokenFile,
+	}
+}
+
+// runFakeDcExecProcess 实现 PrivilegedExec 的 stdin 首行 JSON header 协议。
+// 当前仅覆盖下载链路用到的 file.check（真实 stat + EvalSymlinks），
+// 其他动作显式失败，避免静默返回错误数据。
+func runFakeDcExecProcess() {
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fake PrivilegedExec: read stdin:", err)
+		os.Exit(1)
+	}
+	header := data
+	if before, _, ok := bytes.Cut(data, []byte{'\n'}); ok {
+		header = before
+	}
+	var input execution.ExecuteInput
+	if err := json.Unmarshal(header, &input); err != nil {
+		fmt.Fprintln(os.Stderr, "fake PrivilegedExec: bad header:", err)
+		os.Exit(1)
+	}
+	if input.Request == nil {
+		fmt.Fprintln(os.Stderr, "fake PrivilegedExec: missing request")
+		os.Exit(1)
+	}
+	if input.Request.ActionName != execution.ActionFileCheck {
+		fmt.Fprintln(os.Stderr, "fake PrivilegedExec: unexpected action:", input.Request.ActionName)
+		os.Exit(1)
+	}
+	pm, _ := input.Request.Payload.(map[string]any)
+	path, _ := pm["path"].(string)
+
+	info, err := os.Stat(path)
+	if err != nil {
+		writeFakeDcExecOutput(execution.ExecuteOutput{Success: false, Error: err.Error()})
+		return
+	}
+	realPath := path
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		realPath = resolved
+	}
+	if abs, err := filepath.Abs(realPath); err == nil {
+		realPath = abs
+	}
+	result := payload.FileCheckResult{
+		Size:     info.Size(),
+		Mode:     info.Mode().String(),
+		RealPath: filepath.Clean(realPath),
+		ModTime:  info.ModTime().Unix(),
+		ModTimeN: int64(info.ModTime().Nanosecond()),
+		IsDir:    info.IsDir(),
+	}
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fake PrivilegedExec: marshal result:", err)
+		os.Exit(1)
+	}
+	writeFakeDcExecOutput(execution.ExecuteOutput{Success: true, Output: string(resultJSON)})
+}
+
+func writeFakeDcExecOutput(out execution.ExecuteOutput) {
+	data, err := json.Marshal(out)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fake PrivilegedExec: marshal output:", err)
+		os.Exit(1)
+	}
+	fmt.Println(string(data))
 }

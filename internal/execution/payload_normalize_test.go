@@ -1,7 +1,7 @@
 package execution_test
 
 import (
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"reflect"
 	"testing"
 
@@ -9,12 +9,12 @@ import (
 	"design-cloud-engine/internal/execution/payload"
 )
 
-// TestNormalizePayload_RoundTrippedLauncherRequest 复现引擎 → launcher 的真实 JSON 往返。
+// TestNormalizePayload_RoundTrippedDcExecRequest 复现引擎 → PrivilegedExec 的真实 JSON 往返。
 //
-// 引擎侧 Payload 为 json.RawMessage，序列化后 payload 以 JSON 对象上线；launcher 用
+// 引擎侧 Payload 为 json.RawMessage，序列化后 payload 以 JSON 对象上线；PrivilegedExec 用
 // json.Unmarshal 解到 any，必然得到 map[string]any。若不在解码边界收敛形态，
-// GetPayload 会判为未知类型而拒绝请求，使所有携带 payload 的 launcher 动作失败。
-func TestNormalizePayload_RoundTrippedLauncherRequest(t *testing.T) {
+// GetPayload 会判为未知类型而拒绝请求，使所有携带 payload 的 PrivilegedExec 动作失败。
+func TestNormalizePayload_RoundTrippedDcExecRequest(t *testing.T) {
 	t.Parallel()
 
 	req := &execution.ExecuteRequest{

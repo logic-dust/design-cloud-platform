@@ -2,7 +2,7 @@
 package model
 
 import (
-	"encoding/json"
+	json "design-cloud-engine/internal/platform/jsoncodec"
 	"fmt"
 	"strings"
 	"time"
@@ -82,10 +82,20 @@ type ExecutionRecord struct {
 	ServerNode  string          `gorm:"not null;type:varchar(64)"`
 	TargetNode  string          `gorm:"type:varchar(64)"`
 	Status      ExecutionStatus `gorm:"not null;index"`
-	Success     bool
 	ExitCode    int
 	SystemError string `gorm:"type:text"`
 	FinishedAt  *time.Time
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+}
+
+// ExecutionListFilter is the filter criteria for listing execution records.
+type ExecutionListFilter struct {
+	ServerNode string           // empty = any
+	ActionName string           // empty = any
+	Status     *ExecutionStatus // nil = any
+	From       *time.Time       // nil = no lower bound on CreatedAt
+	To         *time.Time       // nil = no upper bound on CreatedAt
+	Limit      int              // 0 = 默认 500；上限 2000（与 httputil.ParsePage 一致）
+	Offset     int              // 0 = start from the beginning
 }

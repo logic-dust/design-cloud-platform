@@ -7,13 +7,13 @@ import (
 	"log/slog"
 	"time"
 
-	"design-cloud-engine/internal/common"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/model"
 )
 
 // OfflineIssueCert performs offline certificate issuance directly on the server node.
 // It generates or signs node certificates using the local cluster CA, updates database
-// records (dual-fingerprint rotation, provisioned status), and emits audit logs.
+// records (dual-fingerprint rotation; runtime status unchanged until first connect), and emits audit logs.
 func (s *Service) OfflineIssueCert(ctx context.Context, req OfflineIssueCertRequest) (*OfflineIssueCertResult, error) {
 	nodeID, err := validateNodeID(req.NodeID)
 	if err != nil {
@@ -46,14 +46,13 @@ func (s *Service) OfflineIssueCert(ctx context.Context, req OfflineIssueCertRequ
 	var isNewNode bool
 	existing, err := s.nodeRepo.GetByNodeID(ctx, nodeID)
 	if err != nil {
-		if !errors.Is(err, common.ErrNotFound) {
+		if !errors.Is(err, contract.ErrNotFound) {
 			return nil, fmt.Errorf("lookup node %q: %w", nodeID, err)
 		}
 		isNewNode = true
 		newNode := model.Node{
 			NodeID:           nodeID,
 			IsServer:         req.IsServer,
-			Status:           model.NodeStatusProvisioned,
 			AllowConnections: true,
 		}
 		if err := s.nodeRepo.Create(ctx, &newNode); err != nil {
@@ -102,13 +101,8 @@ func (s *Service) OfflineIssueCert(ctx context.Context, req OfflineIssueCertRequ
 		return nil, fmt.Errorf("update cert in database: %w", err)
 	}
 
-	// For an offline-issued node, ensure token is cleared and status is provisioned
-	// if it is not already online.
-	if updatedNode.Status != model.NodeStatusOnline {
-		updatedNode.Status = model.NodeStatusProvisioned
-		updatedNode.Token = ""
-		_ = s.nodeRepo.UpdateAllFields(ctx, updatedNode)
-	}
+	_ = s.nodeRepo.SetEnrollmentToken(ctx, nodeID, "", time.Time{})
+	_ = updatedNode
 
 	s.auditSvc.LogNode(ctx, "NODE_CERT_OFFLINE_ISSUED", "success", nodeID, slog.LevelInfo, map[string]any{
 		"is_server":   req.IsServer,

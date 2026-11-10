@@ -1,3 +1,5 @@
+//go:build linux
+
 package probe
 
 import (
@@ -7,154 +9,126 @@ import (
 	"testing"
 )
 
-func TestParseVNCConnectionDetailsUsesRFBPort(t *testing.T) {
-	t.Parallel()
-
-	args := "/opt/TurboVNC/bin/Xvnc :1 -desktop TurboVNC: cent7:1 (hpcadmin) -auth /home/hpcadmin/.Xauthority -geometry 1240x900 -depth 24 -rfbauth /home/hpcadmin/.vnc/passwd -x509cert /home/hpcadmin/.vnc/x509_cert.pem -x509key /home/hpcadmin/.vnc/x509_private.pem -rfbport 5901 -fp catalogue:/etc/X11/fontpath.d"
-	connSnapshot := parseVNCConnectionDetails("5918", "hpcadmin", args, false)
-	if connSnapshot.PID != "5918" {
-		t.Fatalf("pid = %q, want 5918", connSnapshot.PID)
+func writeMockProcess(t *testing.T, root, pid, cmdline, status, ppidComm, environ, cgroup string) {
+	t.Helper()
+	dir := filepath.Join(root, pid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
 	}
-	if connSnapshot.Username != "hpcadmin" {
-		t.Fatalf("username = %q, want hpcadmin", connSnapshot.Username)
+	if err := os.WriteFile(filepath.Join(dir, "cmdline"), []byte(cmdline), 0o644); err != nil {
+		t.Fatalf("write cmdline: %v", err)
 	}
-	if connSnapshot.Display != 1 {
-		t.Fatalf("display = %d, want 1", connSnapshot.Display)
+	if err := os.WriteFile(filepath.Join(dir, "status"), []byte(status), 0o644); err != nil {
+		t.Fatalf("write status: %v", err)
 	}
-	if connSnapshot.Port != 5901 {
-		t.Fatalf("port = %d, want 5901", connSnapshot.Port)
-	}
-	if connSnapshot.ConnectionName != "TurboVNC: cent7:1 (hpcadmin)" {
-		t.Fatalf("connection name = %q", connSnapshot.ConnectionName)
-	}
-}
-
-func TestParseVNCConnectionDetailsFallsBackToDisplayPort(t *testing.T) {
-	t.Parallel()
-
-	args := "/usr/bin/Xtigervnc :2 -rfbauth /home/hpcadmin/.vnc/passwd"
-	connSnapshot := parseVNCConnectionDetails("6665", "hpcadmin", args, false)
-	if connSnapshot.Display != 2 {
-		t.Fatalf("display = %d, want 2", connSnapshot.Display)
-	}
-	if connSnapshot.Port != 5902 {
-		t.Fatalf("port = %d, want 5902", connSnapshot.Port)
-	}
-	if connSnapshot.ConnectionName != "vnc-hpcadmin-2" {
-		t.Fatalf("connection name = %q, want generated fallback", connSnapshot.ConnectionName)
-	}
-}
-
-func TestParseVNCConnectionDetailsUsesManagedAuthDirectoryName(t *testing.T) {
-	t.Parallel()
-
-	args := "/opt/TurboVNC/bin/Xvnc :8 -rfbauth /home/alice/.cache/design-cloud-engine/connections/gui-123/passwd"
-	connSnapshot := parseVNCConnectionDetails("7777", "alice", args, false)
-	if connSnapshot.ConnectionName != "gui-123" {
-		t.Fatalf("connection name = %q, want gui-123", connSnapshot.ConnectionName)
-	}
-	if connSnapshot.Port != 5908 {
-		t.Fatalf("port = %d, want 5908", connSnapshot.Port)
-	}
-}
-
-func TestParseVNCConnectionDetailsWithEnviron(t *testing.T) {
-	// Not setting parallel because we mutate global readProcEnvironFn
-	oldFn := readProcEnvironFn
-	defer func() { readProcEnvironFn = oldFn }()
-
-	readProcEnvironFn = func(pid string) map[string]string {
-		if pid == "8888" {
-			return map[string]string{
-				"DCE_CONNECTION_ID":   "456",
-				"DCE_CONNECTION_NAME": "env-name",
-			}
+	if environ != "" {
+		if err := os.WriteFile(filepath.Join(dir, "environ"), []byte(environ), 0o644); err != nil {
+			t.Fatalf("write environ: %v", err)
 		}
-		return map[string]string{}
 	}
-
-	args := "/usr/bin/Xvnc :10"
-	connSnapshot := parseVNCConnectionDetails("8888", "bob", args, false)
-
-	// ConnectionID is matched server-side via runtime user/port/PID, probe snapshot remains 0
-	if connSnapshot.ConnectionID != 0 {
-		t.Fatalf("ConnectionID = %d, want 0", connSnapshot.ConnectionID)
+	if cgroup != "" {
+		if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte(cgroup), 0o644); err != nil {
+			t.Fatalf("write cgroup: %v", err)
+		}
 	}
-	if connSnapshot.ConnectionName != "env-name" {
-		t.Fatalf("ConnectionName = %q, want env-name", connSnapshot.ConnectionName)
+	if ppidComm != "" {
+		// Mock PPid status parsing
+		ppid := "9999"
+		ppidDir := filepath.Join(root, ppid)
+		_ = os.MkdirAll(ppidDir, 0o755)
+		_ = os.WriteFile(filepath.Join(ppidDir, "comm"), []byte(ppidComm+"\n"), 0o644)
 	}
 }
 
-func TestCollectRemoteConnections_FromProc(t *testing.T) {
-	fakeProc := t.TempDir()
-	oldProc := procFSRoot
-	procFSRoot = fakeProc
-	defer func() { procFSRoot = oldProc }()
+func TestCollectConnectionRuntime_FromProc(t *testing.T) {
+	tmpDir := t.TempDir()
+	origProc := procFSRoot
+	procFSRoot = tmpDir
+	defer func() { procFSRoot = origProc }()
 
-	// 1. Create a non-matching process (bash)
-	bashDir := filepath.Join(fakeProc, "100")
-	if err := os.MkdirAll(bashDir, 0755); err != nil {
-		t.Fatalf("mkdir failed: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(bashDir, "cmdline"), []byte("/bin/bash\x00-i\x00"), 0644); err != nil {
-		t.Fatalf("write cmdline failed: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(bashDir, "status"), []byte("Name:\tbash\nUid:\t1000\t1000\t1000\t1000\n"), 0644); err != nil {
-		t.Fatalf("write status failed: %v", err)
-	}
+	// 1. Valid VNC process
+	cmdlineVNC := "Xvnc\x00:1\x00-desktop\x00My Desktop\x00-rfbport\x005901\x00"
+	statusVNC := "Name:\tXvnc\nUid:\t1000\t1000\t1000\t1000\nPPid:\t1\n"
+	writeMockProcess(t, tmpDir, "1234", cmdlineVNC, statusVNC, "", "", "")
 
-	// 2. Create a matching VNC process
-	vncDir := filepath.Join(fakeProc, "200")
-	if err := os.MkdirAll(vncDir, 0755); err != nil {
-		t.Fatalf("mkdir failed: %v", err)
-	}
-	vncCmdline := []byte("/opt/TurboVNC/bin/Xvnc\x00:5\x00-rfbport\x005905\x00-desktop\x00TurboVNC: host:5 (alice)\x00")
-	if err := os.WriteFile(filepath.Join(vncDir, "cmdline"), vncCmdline, 0644); err != nil {
-		t.Fatalf("write cmdline failed: %v", err)
-	}
-	// 3. Create a transient job VNC process (should be filtered out)
-	jobVncDir := filepath.Join(fakeProc, "300")
-	if err := os.MkdirAll(jobVncDir, 0755); err != nil {
-		t.Fatalf("mkdir failed: %v", err)
-	}
-	jobVncCmdline := []byte("/opt/TurboVNC/bin/Xvnc\x00:6\x00-rfbport\x005906\x00-desktop\x00dce-job-9999\x00")
-	if err := os.WriteFile(filepath.Join(jobVncDir, "cmdline"), jobVncCmdline, 0644); err != nil {
-		t.Fatalf("write cmdline failed: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(jobVncDir, "status"), []byte("Name:\tXvnc\nUid:\t1001\t1001\t1001\t1001\n"), 0644); err != nil {
-		t.Fatalf("write status failed: %v", err)
-	}
+	// 2. App / job GUI seat (dce-app* must be excluded)
+	cmdlineApp := "Xvnc\x00:2\x00-desktop\x00dce-app-123\x00-rfbport\x005902\x00"
+	statusApp := "Name:\tXvnc\nUid:\t1000\t1000\t1000\t1000\nPPid:\t1\n"
+	writeMockProcess(t, tmpDir, "9012", cmdlineApp, statusApp, "", "", "")
 
-	connections, err := CollectRemoteConnections(context.Background())
+	// 3. XRDP Xorg seat
+	cmdlineXRDP := "/usr/libexec/Xorg\x00:10\x00-config\x00xrdp/xorg.conf\x00"
+	statusXRDP := "Name:\tXorg\nUid:\t1000\t1000\t1000\t1000\nPPid:\t1\n"
+	writeMockProcess(t, tmpDir, "5555", cmdlineXRDP, statusXRDP, "", "", "")
+
+	// 4. Plain local Xorg without xrdp — ignored
+	cmdlineLocal := "/usr/libexec/Xorg\x00:0\x00-seat\x00seat0\x00"
+	statusLocal := "Name:\tXorg\nUid:\t1000\t1000\t1000\t1000\nPPid:\t1\n"
+	writeMockProcess(t, tmpDir, "1", cmdlineLocal, statusLocal, "", "", "")
+
+	// 5. VNC process without explicit -rfbport flag on cmdline, defaults to 5900+display (5903)
+	cmdlineNoFlag := "Xvnc\x00:3\x00-desktop\x00Wild Desktop\x00"
+	statusNoFlag := "Name:\tXvnc\nUid:\t1000\t1000\t1000\t1000\nPPid:\t1\n"
+	writeMockProcess(t, tmpDir, "2345", cmdlineNoFlag, statusNoFlag, "", "", "")
+
+	snapshot, err := CollectConnectionRuntime(context.Background())
 	if err != nil {
-		t.Fatalf("CollectRemoteConnections failed: %v", err)
+		t.Fatalf("CollectConnectionRuntime failed: %v", err)
 	}
-	if len(connections) != 1 {
-		t.Fatalf("got %d connections, want 1", len(connections))
+
+	if len(snapshot.VNCSeats) != 2 {
+		t.Fatalf("expected 2 VNC desktops, got %d: %+v", len(snapshot.VNCSeats), snapshot.VNCSeats)
 	}
-	s := connections[0]
-	if s.PID != "200" {
-		t.Fatalf("PID = %q, want 200", s.PID)
+	var vnc1, vnc3 *VNCSeatSnapshot
+	for i := range snapshot.VNCSeats {
+		switch snapshot.VNCSeats[i].PID {
+		case "1234":
+			vnc1 = &snapshot.VNCSeats[i]
+		case "2345":
+			vnc3 = &snapshot.VNCSeats[i]
+		}
 	}
-	if s.Display != 5 {
-		t.Fatalf("Display = %d, want 5", s.Display)
+	if vnc1 == nil || vnc1.Display != 1 || vnc1.Port != 5901 {
+		t.Errorf("unexpected VNC desktop 1: %+v", vnc1)
 	}
-	if s.Port != 5905 {
-		t.Fatalf("Port = %d, want 5905", s.Port)
+	if vnc3 == nil || vnc3.Display != 3 || vnc3.Port != 5903 {
+		t.Errorf("unexpected VNC desktop 3 (computed 5900+display): %+v", vnc3)
 	}
-	if s.ConnectionName != "TurboVNC: host:5 (alice)" {
-		t.Fatalf("ConnectionName = %q, want TurboVNC: host:5 (alice)", s.ConnectionName)
+	if len(snapshot.XRDPSeats) != 1 {
+		t.Fatalf("expected 1 XRDP desktop, got %d", len(snapshot.XRDPSeats))
 	}
-	if s.Protocol != "VNC" {
-		t.Fatalf("Protocol = %q, want VNC", s.Protocol)
+	xrdp := snapshot.XRDPSeats[0]
+	if xrdp.PID != "5555" || xrdp.Display != 10 {
+		t.Errorf("unexpected XRDP desktop: %+v", xrdp)
+	}
+
+	testCases := []struct {
+		args string
+		want int
+		ok   bool
+	}{
+		{"Xvnc :1 -rfbport 5901", 1, true},
+		{"/usr/bin/Xtigervnc :2 -desktop test", 2, true},
+		{"/usr/libexec/Xorg :10 -config xrdp/xorg.conf", 10, true},
+		{"xorgxrdp :11 -auth foo", 11, true},
+		{"other :12", 0, false},
+	}
+	for _, tc := range testCases {
+		got, ok := parseDisplayNumber(tc.args)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("parseDisplayNumber(%q) = (%d, %v), want (%d, %v)", tc.args, got, ok, tc.want, tc.ok)
+		}
 	}
 }
 
-func TestCheckRDPReadiness_Linux(t *testing.T) {
-	t.Parallel()
+func TestLookupUsernameByUID(t *testing.T) {
+	// Empty UID returns empty string
+	if got := lookupUsernameByUID(""); got != "" {
+		t.Errorf("expected empty string for empty UID, got %q", got)
+	}
 
-	got := CollectRDPReadiness()
-	if got.Determinate {
-		t.Errorf("CollectRDPReadiness on Linux must stay indeterminate, got %+v", got)
+	// UID 0 is root
+	if got := lookupUsernameByUID("0"); got != "root" {
+		t.Errorf("expected root for UID 0, got %q", got)
 	}
 }
