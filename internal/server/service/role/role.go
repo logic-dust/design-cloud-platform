@@ -2,57 +2,44 @@ package role
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
 	"design-cloud-engine/internal/audit"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/model"
 )
 
 var (
-	ErrInvalidRole                 = errors.New("invalid role")
-	ErrAdminUsernamePrefixRequired = errors.New("admin username prefix required")
+	// ErrInvalidRole is a client error: unsupported or forbidden role value.
+	ErrInvalidRole = contract.NewValidationError("invalid role")
+	// ErrAdminUsernamePrefixRequired is a client error: admin accounts need the role prefix.
+	ErrAdminUsernamePrefixRequired = contract.NewValidationError("admin username prefix required")
+	// ErrSuperAdminImmutable rejects role writes that would change the seeded SuperAdmin.
+	ErrSuperAdminImmutable = contract.NewForbiddenError("cannot modify superadmin role")
 )
-
-// UserRoleStore is the subset of db.UserRepo that role.Service needs.
-// This interface enables testing with a mock store.
-type UserRoleStore interface {
-	GetByName(ctx context.Context, username string) (model.User, error)
-	Update(ctx context.Context, user *model.User) error
-	ListMembersByRole(ctx context.Context, role model.Role, limit, offset int) ([]string, int64, error)
-}
 
 // Service handles role management (three-role mode: SecurityAdmin assigns roles).
 type Service struct {
-	userRepo                 UserRoleStore
-	auditSvc                 *audit.Service
-	deleteSessionsByUsername func(context.Context, string) error
+	userRepo UserRoleRepo
+	auditSvc *audit.Service
 }
 
 // NewService creates a role management service.
-func NewService(userRepo UserRoleStore, auditSvc *audit.Service) *Service {
+// Session eviction after role changes is orchestrated by the identity application layer
+// (identity.AssignRole), not by this service.
+func NewService(userRepo UserRoleRepo, auditSvc *audit.Service) *Service {
 	return &Service{
 		userRepo: userRepo,
 		auditSvc: auditSvc,
 	}
 }
 
-type SessionDeleter interface {
-	Delete(ctx context.Context, username string) error
-}
-
-// SetSessionInvalidator registers a deleter to evict a user's sessions on role mutation.
-func (s *Service) SetSessionInvalidator(deleter SessionDeleter) {
-	if deleter != nil {
-		s.deleteSessionsByUsername = deleter.Delete
-	}
-}
-
-// SetUserRole sets a single role for the target user.
-// Only callable from three-role mode (MW ensures SecurityAdmin).
-// SuperAdmin (RoleSuperAdmin) cannot be set — there is one default SuperAdmin.
+// SetUserRole sets a single role for the target user (atomic write only —
+// session eviction is orchestrated by identity.AssignRole).
+// The route is only mounted in three-role mode (see securityAdminAPI);
+// SuperAdmin (RoleSuperAdmin) can never be assigned nor modified.
 func (s *Service) SetUserRole(ctx context.Context, username string, role model.Role) (model.User, error) {
 	if !model.ValidRole(role) {
 		return model.User{}, fmt.Errorf("%w: %d", ErrInvalidRole, role)
@@ -64,15 +51,15 @@ func (s *Service) SetUserRole(ctx context.Context, username string, role model.R
 	// Validate username prefix for admin roles
 	switch role {
 	case model.RoleSystemAdmin:
-		if username != "systemadmin" && !strings.HasPrefix(username, "systemadmin_") {
+		if username != model.UsernameBuiltinSystemAdmin && !strings.HasPrefix(username, model.UsernameBuiltinSystemAdmin+"_") {
 			return model.User{}, fmt.Errorf("%w: systemadmin_ prefix required", ErrAdminUsernamePrefixRequired)
 		}
 	case model.RoleSecurityAdmin:
-		if username != "securityadmin" && !strings.HasPrefix(username, "securityadmin_") {
+		if username != model.UsernameBuiltinSecurityAdmin && !strings.HasPrefix(username, model.UsernameBuiltinSecurityAdmin+"_") {
 			return model.User{}, fmt.Errorf("%w: securityadmin_ prefix required", ErrAdminUsernamePrefixRequired)
 		}
 	case model.RoleAuditAdmin:
-		if username != "auditadmin" && !strings.HasPrefix(username, "auditadmin_") {
+		if username != model.UsernameBuiltinAuditAdmin && !strings.HasPrefix(username, model.UsernameBuiltinAuditAdmin+"_") {
 			return model.User{}, fmt.Errorf("%w: auditadmin_ prefix required", ErrAdminUsernamePrefixRequired)
 		}
 	}
@@ -81,6 +68,10 @@ func (s *Service) SetUserRole(ctx context.Context, username string, role model.R
 	if err != nil {
 		return model.User{}, fmt.Errorf("get user %q for role update: %w", username, err)
 	}
+	// SuperAdmin (dceadmin) is seeded and immutable through admin APIs.
+	if dbUser.Role == model.RoleSuperAdmin {
+		return model.User{}, ErrSuperAdminImmutable
+	}
 
 	scopesCleared := dbUser.AdminScopes != 0
 	dbUser.Role = role
@@ -88,21 +79,11 @@ func (s *Service) SetUserRole(ctx context.Context, username string, role model.R
 	if err := s.userRepo.Update(ctx, &dbUser); err != nil {
 		return model.User{}, fmt.Errorf("update user %q role: %w", username, err)
 	}
-	if err := s.evictUserSessions(ctx, username); err != nil {
-		return model.User{}, fmt.Errorf("delete sessions after role update: %w", err)
-	}
 	s.auditSvc.LogUser(ctx, "USER_ROLE_UPDATE", "success", username, slog.LevelInfo, map[string]any{
 		"role":               role.String(),
 		"admin_scopes_clear": scopesCleared,
 	})
 	return dbUser, nil
-}
-
-func (s *Service) evictUserSessions(ctx context.Context, username string) error {
-	if s.deleteSessionsByUsername != nil {
-		return s.deleteSessionsByUsername(ctx, username)
-	}
-	return nil
 }
 
 // ListRoleMembers returns paginated members of a single role.

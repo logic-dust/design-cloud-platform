@@ -9,10 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// absPath 返回当前平台上确实绝对的测试路径。POSIX 字面量（/opt/lsf/env.sh）在
-// Windows 上不是绝对路径，会让"合法配置"用例误报；os.TempDir() 在两个平台都绝对。
-func absPath(parts ...string) string {
-	return filepath.Join(append([]string{os.TempDir()}, parts...)...)
+// clusterLeaseDefaults 供 Cluster.Validate 单测用的 lease/保留期字段（与 getDefault 一致）。
+func clusterLeaseDefaults() (leaseTTL, renew, retention int) {
+	return DefaultLeaseTTLSeconds, DefaultRenewIntervalSeconds, DefaultExecutionRetentionDays
 }
 
 // ==================== Cluster.Servers Validate ====================
@@ -32,13 +31,17 @@ func TestCluster_Validate_Servers(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			leaseTTL, renew, retention := clusterLeaseDefaults()
 			c := Cluster{
-				Port:                 DefaultClusterPort,
-				HeartbeatInterval:    60,
-				ConnectTimeout:       10,
-				NodeHeartbeatTimeout: 180,
-				NodeCheckInterval:    120,
-				Servers:              tt.servers,
+				Port:                   DefaultClusterPort,
+				HeartbeatInterval:      60,
+				ConnectTimeout:         10,
+				NodeHeartbeatTimeout:   180,
+				NodeCheckInterval:      120,
+				LeaseTTL:               leaseTTL,
+				RenewInterval:          renew,
+				ExecutionRetentionDays: retention,
+				Servers:                tt.servers,
 			}
 			err := c.Validate()
 			if tt.wantErr == "" {
@@ -63,6 +66,26 @@ func TestPortal_Validate(t *testing.T) {
 			name:    "empty port",
 			portal:  Portal{ReadHeaderTimeout: 10, IdleTimeout: 120, RateLimit: 200, RateBurst: 600, TransferRateLimit: 10, TransferRateBurst: 30, WSRateLimit: 10, WSRateBurst: 30},
 			wantErr: "port is required",
+		},
+		{
+			name:    "behind reverse proxy without trusted cidr",
+			portal:  Portal{Port: "8080", BehindReverseProxy: true, ReadHeaderTimeout: 10, IdleTimeout: 120, RateLimit: 200, RateBurst: 600, TransferRateLimit: 10, TransferRateBurst: 30, WSRateLimit: 10, WSRateBurst: 30},
+			wantErr: "trusted_proxy_cidr is required when behind_reverse_proxy=true",
+		},
+		{
+			name:    "behind reverse proxy with invalid cidr",
+			portal:  Portal{Port: "8080", BehindReverseProxy: true, TrustedProxyCIDR: "not-a-cidr", ReadHeaderTimeout: 10, IdleTimeout: 120, RateLimit: 200, RateBurst: 600, TransferRateLimit: 10, TransferRateBurst: 30, WSRateLimit: 10, WSRateBurst: 30},
+			wantErr: "trusted_proxy_cidr must be a valid CIDR (e.g. 10.0.0.0/8): invalid CIDR address: not-a-cidr",
+		},
+		{
+			name:    "behind reverse proxy with valid cidr",
+			portal:  Portal{Port: "8080", BehindReverseProxy: true, TrustedProxyCIDR: "10.0.0.0/8", ReadHeaderTimeout: 10, IdleTimeout: 120, RateLimit: 200, RateBurst: 600, TransferRateLimit: 10, TransferRateBurst: 30, WSRateLimit: 10, WSRateBurst: 30},
+			wantErr: "",
+		},
+		{
+			name:    "trusted cidr ignored when not behind proxy",
+			portal:  Portal{Port: "8080", BehindReverseProxy: false, TrustedProxyCIDR: "not-a-cidr", ReadHeaderTimeout: 10, IdleTimeout: 120, RateLimit: 200, RateBurst: 600, TransferRateLimit: 10, TransferRateBurst: 30, WSRateLimit: 10, WSRateBurst: 30},
+			wantErr: "",
 		},
 		{
 			name:    "read_header_timeout too low",
@@ -160,14 +183,18 @@ func TestPortal_Validate(t *testing.T) {
 // ==================== Cluster.Validate ====================
 
 func TestCluster_Validate(t *testing.T) {
+	leaseTTL, renew, retention := clusterLeaseDefaults()
 	validCluster := Cluster{
 		Servers: []string{"node01"},
 		Port:    52255,
 
-		HeartbeatInterval:    60,
-		ConnectTimeout:       10,
-		NodeHeartbeatTimeout: 180,
-		NodeCheckInterval:    120,
+		HeartbeatInterval:      60,
+		ConnectTimeout:         10,
+		NodeHeartbeatTimeout:   180,
+		NodeCheckInterval:      120,
+		LeaseTTL:               leaseTTL,
+		RenewInterval:          renew,
+		ExecutionRetentionDays: retention,
 	}
 
 	tests := []struct {
@@ -177,7 +204,7 @@ func TestCluster_Validate(t *testing.T) {
 	}{
 		{
 			name:    "servers with empty hosts",
-			cluster: Cluster{Servers: []string{""}, Port: 52255, HeartbeatInterval: 60, ConnectTimeout: 10, NodeHeartbeatTimeout: 180, NodeCheckInterval: 120},
+			cluster: patchCluster(validCluster, func(c *Cluster) { c.Servers = []string{""} }),
 			wantErr: "servers[0] cannot be empty",
 		},
 		{
@@ -289,6 +316,11 @@ func TestDatabase_Validate_PureLogic(t *testing.T) {
 			wantErr:  "type is required",
 		},
 		{
+			name:     "unsupported type",
+			database: Database{Type: "mysql", MaxOpenConns: 10, ConnMaxLifetime: 0, MaxIdleConns: 5},
+			wantErr:  "type: invalid value",
+		},
+		{
 			name:     "sqlite without path",
 			database: Database{Type: DatabaseTypeSQLite, Path: "", MaxOpenConns: 10, ConnMaxLifetime: 0, MaxIdleConns: 5},
 			wantErr:  "path is required for sqlite",
@@ -351,37 +383,25 @@ func TestDatabase_Validate_PureLogic(t *testing.T) {
 	}
 }
 
-// ==================== Database.Validate (with password file) ====================
+// ==================== Validate / loadSecrets boundary ====================
 
-func TestDatabase_Validate_WithPasswordFile(t *testing.T) {
-	// Create a temp password file with correct permissions (0600)
-	passwordFile := filepath.Join(t.TempDir(), "dbpwd")
-	require.NoError(t, os.WriteFile(passwordFile, []byte("secret"), 0600))
+func TestDatabase_Validate_DoesNotTouchSecretFiles(t *testing.T) {
+	// Permission and existence of secret files belong to loadSecrets(). An
+	// environment-supplied password must not require a password file at all.
+	db := Database{
+		Type:            DatabaseTypePostgres,
+		Password:        "from-env",
+		PasswordFile:    "/nonexistent/dbpwd",
+		MaxOpenConns:    10,
+		ConnMaxLifetime: 0,
+		MaxIdleConns:    5,
+	}
+	assert.NoError(t, db.Validate())
+}
 
-	t.Run("valid password file", func(t *testing.T) {
-		db := Database{
-			Type:            DatabaseTypePostgres,
-			PasswordFile:    passwordFile,
-			MaxOpenConns:    10,
-			ConnMaxLifetime: 0,
-			MaxIdleConns:    5,
-		}
-		assert.NoError(t, db.Validate())
-	})
-
-	t.Run("password file not accessible", func(t *testing.T) {
-		db := Database{
-			Type:            DatabaseTypePostgres,
-			PasswordFile:    "/nonexistent/path",
-			MaxOpenConns:    10,
-			ConnMaxLifetime: 0,
-			MaxIdleConns:    5,
-		}
-		err := db.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "database.password_file not accessible")
-	})
-
+func TestLoadSecrets_EnvPasswordSkipsFileCheck(t *testing.T) {
+	cfg := Config{Database: Database{Password: "from-env", PasswordFile: "/nonexistent/dbpwd"}}
+	assert.NoError(t, cfg.loadSecrets())
 }
 
 // ==================== User.Validate (pure logic, no filesystem) ====================
@@ -396,6 +416,11 @@ func TestUser_Validate_PureLogic(t *testing.T) {
 			name:    "local auth mode (no LDAP validation)",
 			user:    User{AuthMode: UserAuthModeLocal},
 			wantErr: "",
+		},
+		{
+			name:    "unknown auth mode",
+			user:    User{AuthMode: "oauth"},
+			wantErr: "user.auth_mode: invalid value",
 		},
 		{
 			name:    "ldap empty server",
@@ -473,85 +498,6 @@ func TestUser_Validate_PureLogic(t *testing.T) {
 	}
 }
 
-// ==================== Log.Validate ====================
-
-func TestLog_Validate(t *testing.T) {
-	tests := []struct {
-		name    string
-		log     Log
-		wantErr string
-	}{
-		{name: "max_age zero", log: Log{MaxAge: 0, MaxSize: 10, MaxBackups: 5}, wantErr: "log.max_age must be > 0"},
-		{name: "max_age negative", log: Log{MaxAge: -1, MaxSize: 10, MaxBackups: 5}, wantErr: "log.max_age must be > 0"},
-		{name: "max_size zero", log: Log{MaxAge: 30, MaxSize: 0, MaxBackups: 5}, wantErr: "log.max_size must be > 0"},
-		{name: "max_size negative", log: Log{MaxAge: 30, MaxSize: -1, MaxBackups: 5}, wantErr: "log.max_size must be > 0"},
-		{name: "max_backups zero", log: Log{MaxAge: 30, MaxSize: 10, MaxBackups: 0}, wantErr: "log.max_backups must be > 0"},
-		{name: "max_backups negative", log: Log{MaxAge: 30, MaxSize: 10, MaxBackups: -1}, wantErr: "log.max_backups must be > 0"},
-		{name: "all valid", log: Log{MaxAge: 30, MaxSize: 100, MaxBackups: 10}, wantErr: ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.log.Validate()
-			if tt.wantErr == "" {
-				assert.NoError(t, err)
-			} else {
-				assert.Contains(t, err.Error(), tt.wantErr)
-			}
-		})
-	}
-}
-
-// ==================== Scheduler.Validate ====================
-
-func TestScheduler_Validate(t *testing.T) {
-	tests := []struct {
-		name      string
-		scheduler Scheduler
-		wantErr   string
-	}{
-		{
-			name:      "invalid name",
-			scheduler: Scheduler{Type: "invalid", EnvScript: "/opt/lsf/env.sh"},
-			wantErr:   `scheduler.type must be one of: lsf, slurm, openlava; got "invalid"`,
-		},
-		{
-			name:      "empty env_script",
-			scheduler: Scheduler{Type: JobSchedulerLSF, EnvScript: ""},
-			wantErr:   "scheduler.env_script is required",
-		},
-		{
-			name:      "relative env_script path",
-			scheduler: Scheduler{Type: JobSchedulerLSF, EnvScript: "scripts/env.sh"},
-			wantErr:   `scheduler.env_script must be an absolute path; got "scripts/env.sh"`,
-		},
-		{
-			name:      "valid LSF",
-			scheduler: Scheduler{Type: JobSchedulerLSF, EnvScript: absPath("lsf", "env.sh")},
-			wantErr:   "",
-		},
-		{
-			name:      "valid slurm",
-			scheduler: Scheduler{Type: JobSchedulerSlurm, EnvScript: absPath("slurm", "env.sh")},
-			wantErr:   "",
-		},
-		{
-			name:      "valid openlava",
-			scheduler: Scheduler{Type: JobSchedulerOpenLava, EnvScript: absPath("openlava", "env.sh")},
-			wantErr:   "",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.scheduler.Validate()
-			if tt.wantErr == "" {
-				assert.NoError(t, err)
-			} else {
-				assert.EqualError(t, err, tt.wantErr)
-			}
-		})
-	}
-}
-
 // ==================== checkSecretFilePermissions ====================
 
 func TestCheckSecretFilePermissions(t *testing.T) {
@@ -606,7 +552,7 @@ func TestValidateConfigFilePermissions(t *testing.T) {
 func TestConfig_Validate_Common(t *testing.T) {
 	// Common validation: Log, Cluster — always checked regardless of role
 	base := Config{
-		Log: Log{MaxAge: 30, MaxSize: 100, MaxBackups: 10},
+		Log: Log{Dir: "/var/log/design-cloud"},
 		Cluster: Cluster{
 			Servers: []string{"node01"},
 			Port:    52255,
@@ -627,14 +573,6 @@ func TestConfig_Validate_Common(t *testing.T) {
 		assert.Contains(t, err.Error(), "cluster.servers: at least one cluster server is required")
 	})
 
-	t.Run("log validation failure", func(t *testing.T) {
-		cfg := base
-		cfg.Log.MaxAge = 0
-		err := cfg.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "log: log.max_age must be > 0")
-	})
-
 	t.Run("cluster validation failure", func(t *testing.T) {
 		cfg := base
 		cfg.Cluster.Port = 0
@@ -647,22 +585,25 @@ func TestConfig_Validate_Common(t *testing.T) {
 func TestConfig_Validate_ServerRole(t *testing.T) {
 	base := Config{
 		Runtime: RuntimeState{ServerEnabled: true},
-		Log:     Log{MaxAge: 30, MaxSize: 100, MaxBackups: 10},
-		Cluster: Cluster{
-			Servers: []string{"node01"},
-			Port:    52255,
-
-			HeartbeatInterval:    60,
-			ConnectTimeout:       10,
-			NodeHeartbeatTimeout: 180,
-			NodeCheckInterval:    120,
-		},
+		Log:     Log{Dir: "/var/log/design-cloud"},
+		Cluster: func() Cluster {
+			leaseTTL, renew, retention := clusterLeaseDefaults()
+			return Cluster{
+				Servers:                []string{"node01"},
+				Port:                   52255,
+				HeartbeatInterval:      60,
+				ConnectTimeout:         10,
+				NodeHeartbeatTimeout:   180,
+				NodeCheckInterval:      120,
+				LeaseTTL:               leaseTTL,
+				RenewInterval:          renew,
+				ExecutionRetentionDays: retention,
+			}
+		}(),
 
 		Portal:   Portal{Port: "443", ReadHeaderTimeout: 10, IdleTimeout: 120, RateLimit: 200, RateBurst: 600, TransferRateLimit: 10, TransferRateBurst: 30, WSRateLimit: 10, WSRateBurst: 30},
 		Database: Database{Type: DatabaseTypePostgres, MaxOpenConns: 100, ConnMaxLifetime: 0, MaxIdleConns: 10},
 		User:     User{AuthMode: UserAuthModeLocal},
-		// Scheduler 驱动由 server 装配消费（service/scheduler.NewService），随 ServerEnabled 校验。
-		Scheduler: Scheduler{Type: JobSchedulerLSF, EnvScript: absPath("lsf", "env.sh")},
 	}
 
 	t.Run("all server fields valid", func(t *testing.T) {
@@ -703,30 +644,26 @@ func TestConfig_Validate_ServerRole(t *testing.T) {
 		assert.Contains(t, err.Error(), "user:")
 	})
 
-	t.Run("scheduler validation failure when server enabled", func(t *testing.T) {
-		cfg := base
-		cfg.Scheduler.Type = "invalid"
-		err := cfg.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "scheduler:")
-	})
 }
 
 func TestConfig_Validate_AgentRole(t *testing.T) {
 	base := Config{
 		Runtime: RuntimeState{ServerEnabled: false},
-		Log:     Log{MaxAge: 30, MaxSize: 100, MaxBackups: 10},
-		Cluster: Cluster{
-			Servers: []string{"node01"},
-			Port:    52255,
-
-			HeartbeatInterval:    60,
-			ConnectTimeout:       10,
-			NodeHeartbeatTimeout: 180,
-			NodeCheckInterval:    120,
-		},
-
-		Scheduler: Scheduler{Type: JobSchedulerLSF, EnvScript: "/opt/lsf/env.sh"},
+		Log:     Log{Dir: "/var/log/design-cloud"},
+		Cluster: func() Cluster {
+			leaseTTL, renew, retention := clusterLeaseDefaults()
+			return Cluster{
+				Servers:                []string{"node01"},
+				Port:                   52255,
+				HeartbeatInterval:      60,
+				ConnectTimeout:         10,
+				NodeHeartbeatTimeout:   180,
+				NodeCheckInterval:      120,
+				LeaseTTL:               leaseTTL,
+				RenewInterval:          renew,
+				ExecutionRetentionDays: retention,
+			}
+		}(),
 	}
 
 	t.Run("all agent fields valid", func(t *testing.T) {
@@ -734,20 +671,12 @@ func TestConfig_Validate_AgentRole(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("scheduler NOT validated for agent role (consumer is server)", func(t *testing.T) {
-		cfg := base
-		cfg.Scheduler.Type = "invalid" // agent 不消费 Scheduler，不应报错
-		err := cfg.Validate()
-		assert.NoError(t, err)
-	})
-
 	t.Run("server-only components unvalidated for agent role", func(t *testing.T) {
 		cfg := base
-		// Portal, Database, User, Scheduler all invalid — skipped for pure agent role
+		// Portal, Database, User all invalid — skipped for pure agent role
 		cfg.Portal = Portal{Port: ""}
 		cfg.Database = Database{Type: ""}
 		cfg.User = User{AuthMode: UserAuthModeLDAP}
-		cfg.Scheduler = Scheduler{Type: "invalid", EnvScript: ""}
 		err := cfg.Validate()
 		assert.NoError(t, err)
 	})

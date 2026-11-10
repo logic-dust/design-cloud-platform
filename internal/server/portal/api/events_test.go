@@ -14,7 +14,7 @@ import (
 
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/portal/httputil"
-	"design-cloud-engine/internal/server/service/push"
+	"design-cloud-engine/internal/server/push"
 
 	"github.com/labstack/echo/v5"
 )

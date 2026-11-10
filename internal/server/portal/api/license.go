@@ -1,10 +1,7 @@
 package api
 
 import (
-	"net/http"
-
 	"design-cloud-engine/internal/server/portal/httputil"
-	"design-cloud-engine/internal/server/service"
 	licensesvc "design-cloud-engine/internal/server/service/license"
 
 	"github.com/labstack/echo/v5"
@@ -14,8 +11,8 @@ type licenseHandler struct {
 	license *licensesvc.Service
 }
 
-func newLicenseHandler(svc *service.Container) *licenseHandler {
-	return &licenseHandler{license: svc.License}
+func newLicenseHandler(licenseSvc *licensesvc.Service) *licenseHandler {
+	return &licenseHandler{license: licenseSvc}
 }
 
 // route: /api/licenses
@@ -28,11 +25,12 @@ func (h *licenseHandler) licensesAPI(g *echo.Group) {
 
 // --- 获取许可证服务列表
 func (h *licenseHandler) listLicenseServices(c *echo.Context) error {
-	list, err := h.license.List(c.Request().Context())
+	p := httputil.ParsePage(c)
+	list, total, err := h.license.ListPage(c.Request().Context(), p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: list})
+	return httputil.RespondPage(c, list, total)
 }
 
 func (h *licenseHandler) getLicenseService(c *echo.Context) error {
@@ -46,7 +44,7 @@ func (h *licenseHandler) getLicenseService(c *echo.Context) error {
 		return httputil.RespondError(c, err)
 	}
 
-	return c.JSON(http.StatusOK, httputil.Response{Data: licService})
+	return httputil.RespondOK(c, licService)
 }
 
 // --- 获取许可证服务的功能列表
@@ -60,7 +58,7 @@ func (h *licenseHandler) getLicenseFeatures(c *echo.Context) error {
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: features})
+	return httputil.RespondOK(c, features)
 }
 
 // --- 获取许可证服务状态
@@ -74,5 +72,5 @@ func (h *licenseHandler) getLicenseStatus(c *echo.Context) error {
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: result})
+	return httputil.RespondOK(c, result)
 }

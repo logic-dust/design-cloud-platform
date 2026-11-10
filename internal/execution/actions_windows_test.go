@@ -18,17 +18,17 @@ func TestWindowsActionsRegistration(t *testing.T) {
 			continue
 		}
 		if !spec.IsDirect() {
-			t.Errorf("action %s must be Direct on Windows, but requires launcher", name)
+			t.Errorf("action %s must be Direct on Windows, but requires dc-exec", name)
 		}
 		if spec.NewPayload == nil {
 			t.Errorf("action %s must define NewPayload", name)
 		}
 	}
 
-	// 关键架构红线：Windows Phase 1 严禁注册任何需要 Launcher 的动作
+	// 关键架构红线：Windows Phase 1 严禁注册任何需要 PrivilegedExec 的动作
 	for name, spec := range Actions {
 		if !spec.IsDirect() {
-			t.Errorf("Windows must NOT register launcher action: %s", name)
+			t.Errorf("Windows must NOT register PrivilegedExec action: %s", name)
 		}
 	}
 }

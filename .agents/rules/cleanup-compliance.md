@@ -6,11 +6,15 @@
 ## 0. 兼容性分界原则 (API vs. Internal)
 
 - **对外契约（Portal REST API / WebSocket）**：纯新增端点或可选字段属于安全演进；破坏性修改/删除既有契约前必须与用户协商，达成共识后更新所有消费者、文档与 `.http` 测试。细节见 [`api-development.md`](api-development.md)。
-- **内部一切实现（Service / DB Model / SQL / Launcher / Agent / Proto）**：**坚决执行零历史兼容**！
+- **内部一切实现（Service / DB Model / SQL / dc-exec / Agent / Proto）**：**坚决执行零历史兼容**！
   - 严禁引入兼容别名（如 `type Old = New`、`var ErrOld = ErrNew`）；
   - 严禁编写 fallback 兜底分支或多版本嗅探；
   - 严禁保留已下线字段的废弃列映射；
   - 历史行为完全由 Git 追溯，重构即全量对齐最新设计。
+- **Portal JSON 字段命名（发版前单轨）**：
+  - 引擎定义的 REST/WS 业务 JSON（节点、连接、设置、会话等）统一 **camelCase**；不保留 snake_case 别名，不为同一语义提供多种 key。
+  - **唯一透传例外 — 调度器作业**：`GET` 作业列表/详情返回的 `Jobs` 数组元素为调度器原生键名（Slurm 多为 `snake_case`，LSF 多为大写）；`Fields` 为建议展示列，同样使用原生键名。驱动层只做裁剪/投影，**禁止**对作业字段做大小写或命名归一化。见 [`docs-site/docs/api/_index.md`](../../docs-site/docs/api/_index.md) 与 [`user.md` Scheduler 章节](../../docs-site/docs/api/user.md)。
+  - 数据库列名、GORM `Where`/`Joins` 片段中的 snake_case 属于持久化层，与 HTTP JSON 契约无关。
 
 ## 1. 迁移必须删除旧实现
 
@@ -30,13 +34,13 @@ func newFoo() { ... }
 
 ## 2. 路由变更必须同步测试文件
 
-任何路由路径、方法、参数的变更，必须 **立即**更新 `test/api/*.http` 中的对应请求。
+任何路由路径、方法、参数的变更，必须 **立即**更新 `test/portal/*.http` 中的对应请求。
 
 ```go
 // api.go — 修改路由
 g.PUT("/users/:user/role", ...)
 
-// test/api/05-access-securityadmin.http — 同步修改  
+// test/portal/05-access-security-admin.http — 同步修改  
 PUT {{addr}}/api/admin/security/users/{{username}}/role
 ```
 

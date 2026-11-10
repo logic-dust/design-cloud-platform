@@ -1,116 +1,198 @@
 package proxy
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/contract"
 )
 
-func newProxyStoreTunnel(connectionID uint, otp string, status Status, expiresAt time.Time) *Tunnel {
-	return &Tunnel{
+func newProxyStoreSession(connectionID uint, requester string) *ProxyConnection {
+	return &ProxyConnection{
 		ConnectionID: connectionID,
-		OTP:          otp,
-		Status:       status,
-		ExpiresAt:    expiresAt,
+		Requester:    requester,
+		Status:       StatusActive,
+		StartedAt:    time.Now(),
 		Protocol:     contract.VNCProtocol,
-		Host:         "node-a",
+		Host:         "10.0.0.5",
 		Port:         5901,
-		Username:     "alice",
+		Username:     "owner",
 	}
 }
 
-func TestTunnelStoreGetByOTPRemovesExpiredPending(t *testing.T) {
-	t.Parallel()
-
-	store := newTunnelStore()
-	tunnel := newProxyStoreTunnel(1, "otp-expired", StatusPending, time.Now().Add(-time.Minute))
-	store.Create(tunnel)
-
-	_, err := store.GetByOTP("otp-expired")
-	if !errors.Is(err, common.ErrNotFound) {
-		t.Fatalf("GetByOTP error = %v, want not found", err)
-	}
-	if _, ok := store.byConnection[1]; ok {
-		t.Fatalf("expired pending tunnel remained in byConnection")
-	}
-	if _, ok := store.byOTP["otp-expired"]; ok {
-		t.Fatalf("expired pending tunnel remained in byOTP")
+func storeRegister(t *testing.T, store *proxySessionRegistry, session *ProxyConnection) {
+	t.Helper()
+	_, _, err := store.RegisterActive(sessionQuota{
+		MaxGlobal:    0,
+		MaxPerUser:   0,
+		ConnectionID: session.ConnectionID,
+		Requester:    session.Requester,
+	}, session, newProxyConnectionLifecycle(t.Context()))
+	if err != nil {
+		t.Fatalf("RegisterActive: %v", err)
 	}
 }
 
-func TestTunnelStoreActivateRemovesExpiredPending(t *testing.T) {
+func TestRegisterActiveRejectsWhenGlobalCapReached(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now()
-	store := newTunnelStore()
-	tunnel := newProxyStoreTunnel(1, "otp-expired", StatusPending, now.Add(-time.Minute))
-	store.Create(tunnel)
+	store := newProxySessionRegistry()
+	storeRegister(t, store, newProxyStoreSession(1, "alice"))
 
-	_, err := store.Activate("otp-expired", now)
-	if !errors.Is(err, ErrProxyTunnelActivateFailed) {
-		t.Fatalf("Activate error = %v, want activation failure", err)
-	}
-	if _, ok := store.byConnection[1]; ok {
-		t.Fatalf("expired pending tunnel remained in byConnection")
-	}
-	if _, ok := store.byOTP["otp-expired"]; ok {
-		t.Fatalf("expired pending tunnel remained in byOTP")
+	_, _, err := store.RegisterActive(sessionQuota{
+		MaxGlobal:    1,
+		MaxPerUser:   0,
+		ConnectionID: 2,
+		Requester:    "bob",
+	}, newProxyStoreSession(2, "bob"), newProxyConnectionLifecycle(t.Context()))
+	if !errors.Is(err, ErrProxyMaxSessionsReached) {
+		t.Fatalf("error = %v, want max sessions", err)
 	}
 }
 
-func TestTunnelStoreGetByConnectionIDRemovesExpiredPending(t *testing.T) {
+func TestDifferentRequestersOnSameConnectionCoexist(t *testing.T) {
 	t.Parallel()
 
-	store := newTunnelStore()
-	tunnel := newProxyStoreTunnel(1, "otp-expired", StatusPending, time.Now().Add(-time.Minute))
-	store.Create(tunnel)
+	store := newProxySessionRegistry()
+	storeRegister(t, store, newProxyStoreSession(1, "alice"))
+	storeRegister(t, store, newProxyStoreSession(1, "bob"))
 
-	_, err := store.GetByConnectionID(1)
-	if !errors.Is(err, common.ErrNotFound) {
-		t.Fatalf("GetByConnectionID error = %v, want not found", err)
+	if _, err := store.GetByConnectionIDAndRequester(1, "alice"); err != nil {
+		t.Fatalf("alice session: %v", err)
 	}
-	if _, ok := store.byConnection[1]; ok {
-		t.Fatalf("expired pending tunnel remained in byConnection")
-	}
-	if _, ok := store.byOTP["otp-expired"]; ok {
-		t.Fatalf("expired pending tunnel remained in byOTP")
+	if _, err := store.GetByConnectionIDAndRequester(1, "bob"); err != nil {
+		t.Fatalf("bob session: %v", err)
 	}
 }
 
-func TestTunnelStoreListAndCountSkipExpiredPendingWithoutImmediateFullPrune(t *testing.T) {
+func TestExclusiveConnectionReplacesPriorSession(t *testing.T) {
 	t.Parallel()
 
-	store := newTunnelStore()
-	expired := newProxyStoreTunnel(1, "otp-expired", StatusPending, time.Now().Add(-time.Minute))
-	active := newProxyStoreTunnel(2, "otp-active", StatusActive, time.Now().Add(time.Hour))
-	store.Create(expired)
-	store.Create(active)
+	store := newProxySessionRegistry()
+	first := newProxyStoreSession(1, "alice")
+	storeRegister(t, store, first)
+	oldID := store.byAnchorRequester[sessionKeyFor(1, 0, "alice")]
 
-	store.mu.Lock()
-	store.nextPruneAt = time.Now().Add(time.Hour)
-	store.mu.Unlock()
+	_, _, err := store.RegisterActive(sessionQuota{
+		MaxGlobal: 0, MaxPerUser: 0,
+		ConnectionID: 1, Requester: "alice",
+	}, newProxyStoreSession(1, "alice"), newProxyConnectionLifecycle(t.Context()))
+	if err != nil {
+		t.Fatalf("RegisterActive: %v", err)
+	}
+	newID := store.byAnchorRequester[sessionKeyFor(1, 0, "alice")]
+	if newID == oldID {
+		t.Fatalf("expected new session id")
+	}
+}
 
-	if got := store.CountActive(); got != 1 {
-		t.Fatalf("CountActive = %d, want 1", got)
-	}
-	tunnels := store.List()
-	if len(tunnels) != 1 || tunnels[0].ConnectionID != 2 {
-		t.Fatalf("List = %+v, want only active tunnel", tunnels)
-	}
-	if _, ok := store.byConnection[1]; !ok {
-		t.Fatalf("expired pending tunnel was fully pruned before nextPruneAt")
-	}
+func TestCheckQuotaAccountsForReplacement(t *testing.T) {
+	t.Parallel()
 
-	store.mu.Lock()
-	store.nextPruneAt = time.Time{}
-	store.mu.Unlock()
-	if got := store.CountActive(); got != 1 {
-		t.Fatalf("CountActive after due prune = %d, want 1", got)
+	store := newProxySessionRegistry()
+	storeRegister(t, store, newProxyStoreSession(1, "alice"))
+
+	if err := store.CheckQuota(sessionQuota{MaxGlobal: 1, ConnectionID: 1, Requester: "alice"}); err != nil {
+		t.Fatalf("replacement should not hit cap: %v", err)
 	}
-	if _, ok := store.byConnection[1]; ok {
-		t.Fatalf("expired pending tunnel remained after due prune")
+	if err := store.CheckQuota(sessionQuota{MaxGlobal: 1, ConnectionID: 2, Requester: "bob"}); !errors.Is(err, ErrProxyMaxSessionsReached) {
+		t.Fatalf("new session should be capped: %v", err)
+	}
+}
+
+func TestProxyConnectionLifecycleAttachAfterCloseClosesSocket(t *testing.T) {
+	t.Parallel()
+
+	life := newProxyConnectionLifecycle(t.Context())
+	client, server := net.Pipe()
+	tcp, ws := life.Close()
+	CloseDetachedSockets(tcp, ws)
+	life.AttachTCP(server)
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+}
+
+func TestRegisterActiveConcurrentCap(t *testing.T) {
+	t.Parallel()
+
+	store := newProxySessionRegistry()
+	var wg sync.WaitGroup
+	var rejected atomic.Int32
+	for i := range 8 {
+		wg.Go(func() {
+			requester := fmt.Sprintf("user-%d", i)
+			connectionID := uint(i + 1)
+			_, _, err := store.RegisterActive(sessionQuota{
+				MaxGlobal:    2,
+				MaxPerUser:   0,
+				ConnectionID: connectionID,
+				Requester:    requester,
+			}, newProxyStoreSession(connectionID, requester), newProxyConnectionLifecycle(context.Background()))
+			if errors.Is(err, ErrProxyMaxSessionsReached) {
+				rejected.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	if got := len(store.List()); got > 2 {
+		t.Fatalf("store has %d sessions, want <= 2", got)
+	}
+	if rejected.Load() == 0 {
+		t.Fatal("expected some quota rejections")
+	}
+}
+
+func TestRemoveByIDDoesNotAffectReplacementSession(t *testing.T) {
+	t.Parallel()
+
+	store := newProxySessionRegistry()
+	storeRegister(t, store, newProxyStoreSession(1, "alice"))
+	oldID := store.byAnchorRequester[sessionKeyFor(1, 0, "alice")]
+
+	stored, _, err := store.RegisterActive(sessionQuota{
+		MaxGlobal: 0, MaxPerUser: 0,
+		ConnectionID: 1, Requester: "alice",
+	}, newProxyStoreSession(1, "alice"), newProxyConnectionLifecycle(t.Context()))
+	if err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	newID := stored.session.ID
+
+	if _, err := store.RemoveByID(oldID); !errors.Is(err, contract.ErrNotFound) {
+		t.Fatalf("RemoveByID(old) = %v, want not found", err)
+	}
+	got, err := store.GetByConnectionIDAndRequester(1, "alice")
+	if err != nil {
+		t.Fatalf("current session missing: %v", err)
+	}
+	if got.ID != newID {
+		t.Fatalf("got session id=%d, want id=%d", got.ID, newID)
+	}
+}
+
+func TestRemoveAllByRequester(t *testing.T) {
+	t.Parallel()
+
+	store := newProxySessionRegistry()
+	storeRegister(t, store, newProxyStoreSession(1, "alice"))
+	storeRegister(t, store, newProxyStoreSession(2, "alice"))
+	storeRegister(t, store, newProxyStoreSession(3, "bob"))
+
+	_ = store.RemoveAllByRequester("alice")
+	if _, err := store.GetByConnectionIDAndRequester(1, "alice"); !errors.Is(err, contract.ErrNotFound) {
+		t.Fatal("alice session 1 should be gone")
+	}
+	if _, err := store.GetByConnectionIDAndRequester(2, "alice"); !errors.Is(err, contract.ErrNotFound) {
+		t.Fatal("alice session 2 should be gone")
+	}
+	if _, err := store.GetByConnectionIDAndRequester(3, "bob"); err != nil {
+		t.Fatalf("bob session should remain: %v", err)
 	}
 }

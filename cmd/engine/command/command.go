@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"design-cloud-engine/internal/common"
+	"design-cloud-engine/cmd/engine/console"
 	"design-cloud-engine/internal/config"
 )
 
@@ -23,8 +23,8 @@ type Flags struct {
 	ConfigFile string // --config: config-file mode
 	Servers    string // --servers: cluster server host list (join mode)
 	Port       int    // --port: cluster gRPC port (join mode only)
-	DataDir    string // --data-dir: certificate base directory (join mode only)
-	LogDir     string // --log-dir: log directory override (both modes)
+	StateDir   string // --state-dir: persistent state root (join mode only)
+	LogDir     string // --log-dir: audit/security log directory override (both modes)
 	LogLevel   string // --log-level: application log level override (both modes)
 
 	explicit map[string]bool
@@ -79,7 +79,7 @@ func ParseFlags(args []string, errOut io.Writer, programName string) (*Flags, []
 	})
 
 	if *showVersion {
-		common.PrintStdout("%s version %s\n", config.AppName, config.VERSION)
+		console.PrintStdout("%s version %s\n", config.AppName, config.VERSION)
 		os.Exit(0)
 	}
 
@@ -90,9 +90,9 @@ func bindStartFlags(fs *flag.FlagSet, f *Flags) {
 	fs.StringVar(&f.ConfigFile, "config", "", "config file path (default \"config.toml\")")
 	fs.StringVar(&f.Servers, "servers", "", "cluster server host list, comma separated (join mode), e.g. mgt01,mgt02")
 	fs.IntVar(&f.Port, "port", config.DefaultClusterPort, "cluster gRPC port (join mode only)")
-	fs.StringVar(&f.DataDir, "data-dir", "", "certificate base directory (join mode only)")
-	fs.StringVar(&f.LogDir, "log-dir", "", "log directory (overrides log.dir; both modes)")
-	fs.StringVar(&f.LogLevel, "log-level", "", "application log level: DEBUG/INFO/WARN/ERROR (overrides log.app_level; both modes)")
+	fs.StringVar(&f.StateDir, "state-dir", "", "persistent state root (join mode only)")
+	fs.StringVar(&f.LogDir, "log-dir", "", "audit/security log directory (overrides log.dir; both modes)")
+	fs.StringVar(&f.LogLevel, "log-level", "", "pin application log level DEBUG/INFO/WARN/ERROR (overrides log.app_level and Settings agent.logLevel; both modes)")
 }
 
 // ResolveStartMode decides how the persistent engine is started:
@@ -106,13 +106,13 @@ func bindStartFlags(fs *flag.FlagSet, f *Flags) {
 func ResolveStartMode(f *Flags) (StartMode, error) {
 	hasConfig := f.Explicit("config")
 	hasServers := f.Explicit("servers")
-	hasJoinOnly := f.Explicit("port") || f.Explicit("data-dir")
+	hasJoinOnly := f.Explicit("port") || f.Explicit("state-dir")
 
 	if hasConfig && hasServers {
 		return StartModeConfig, fmt.Errorf("cannot specify both --config and --servers: choose one")
 	}
 	if hasJoinOnly && !hasServers {
-		return StartModeConfig, fmt.Errorf("--port and --data-dir are only valid with --servers")
+		return StartModeConfig, fmt.Errorf("--port and --state-dir are only valid with --servers")
 	}
 
 	switch {
@@ -130,7 +130,7 @@ func ResolveStartMode(f *Flags) (StartMode, error) {
 		"no configuration specified and default %q not found;\n"+
 			"use one of:\n"+
 			"  %s [--config <path>]                              (config-file mode)\n"+
-			"  %s --servers <hosts> [--port] [--data-dir <dir>]  (configless agent)",
+			"  %s --servers <hosts> [--port] [--state-dir <dir>]  (configless agent)",
 		config.DefaultConfigFile, config.AppName, config.AppName)
 }
 
@@ -144,8 +144,8 @@ func StartArgv(f *Flags, mode StartMode) ([]string, error) {
 			return nil, fmt.Errorf("cluster port must be in range 1024..65535; got %d", f.Port)
 		}
 		out = append(out, "--servers", f.Servers, "--port", strconv.Itoa(f.Port))
-		if f.DataDir != "" {
-			out = append(out, "--data-dir", f.DataDir)
+		if f.StateDir != "" {
+			out = append(out, "--state-dir", f.StateDir)
 		}
 	case StartModeConfig:
 		cfgPath := cmp.Or(f.ConfigFile, config.DefaultConfigFile)
@@ -173,7 +173,7 @@ func MergeFlags(parent *Flags, args []string, errOut io.Writer, name string) (*F
 		ConfigFile: parent.ConfigFile,
 		Servers:    parent.Servers,
 		Port:       parent.Port,
-		DataDir:    parent.DataDir,
+		StateDir:   parent.StateDir,
 		LogDir:     parent.LogDir,
 		LogLevel:   parent.LogLevel,
 		explicit:   maps.Clone(parent.explicit),
@@ -207,6 +207,9 @@ var registeredCommands = []command{
 	{name: "check-config", summary: "Validate a config file (parse + resolve + validate)", exec: runCheckConfigCommand},
 	{name: "node", summary: "Manage cluster nodes (register, issue-token, issue-cert)", exec: runNodeCommand},
 	{name: "service", summary: "Manage the local engine process or service", exec: runServiceCommand},
+	{name: "cert", summary: "Manage TLS certificates (gen-portal)", exec: runCertCommand},
+	{name: "desktop", summary: "Desktop client release helpers (plugin publish)", exec: runDesktopCommand},
+	{name: "user", summary: "Manage application users (set-password)", exec: runUserCommand},
 }
 
 // Execute runs the named subcommand.
@@ -246,26 +249,26 @@ func runNodeCommand(flags *Flags, args []string) error {
 }
 
 func printNodeUsage() {
-	common.PrintStderr("Usage: %s node <register|issue-token|issue-cert> [options]\n\n", config.AppName)
-	common.PrintStderr("Subcommands:\n")
-	common.PrintStderr("  register                 Bootstrap node certificate materials via OTP token\n")
-	common.PrintStderr("  issue-token              Issue or rotate a bootstrap token for a cluster node\n")
-	common.PrintStderr("  issue-cert               Offline issue cluster certificate materials for a node\n")
+	console.PrintStderr("Usage: %s node <register|issue-token|issue-cert> [options]\n\n", config.AppName)
+	console.PrintStderr("Subcommands:\n")
+	console.PrintStderr("  register                 Bootstrap node certificate materials via OTP token\n")
+	console.PrintStderr("  issue-token              Issue or rotate a bootstrap token for a cluster node\n")
+	console.PrintStderr("  issue-cert               Offline issue cluster certificate materials for a node\n")
 }
 
 func printUsage(programName string, fs *flag.FlagSet) {
-	common.PrintStderr("+++ %s +++\n", config.AppName)
-	common.PrintStderr("Version: %s\n", config.VERSION)
-	common.PrintStderr("\nStart (mutually exclusive surfaces):\n")
-	common.PrintStderr("  %s [--config PATH] [--log-dir DIR] [--log-level LEVEL]\n", programName)
-	common.PrintStderr("      config-file mode — role from cluster.servers in the file\n")
-	common.PrintStderr("  %s --servers HOSTS [--port N] [--data-dir DIR] [--log-dir DIR] [--log-level LEVEL]\n", programName)
-	common.PrintStderr("      join mode — configless agent; always Agent; no config.toml\n")
-	common.PrintStderr("\nCommands:\n")
+	console.PrintStderr("+++ %s +++\n", config.AppName)
+	console.PrintStderr("Version: %s\n", config.VERSION)
+	console.PrintStderr("\nStart (mutually exclusive surfaces):\n")
+	console.PrintStderr("  %s [--config PATH] [--log-dir DIR] [--log-level LEVEL]\n", programName)
+	console.PrintStderr("      config-file mode — role from cluster.servers in the file\n")
+	console.PrintStderr("  %s --servers HOSTS [--port N] [--state-dir DIR] [--log-dir DIR] [--log-level LEVEL]\n", programName)
+	console.PrintStderr("      join mode — configless agent; always Agent; no config.toml\n")
+	console.PrintStderr("\nCommands:\n")
 	for _, cmd := range registeredCommands {
-		common.PrintStderr("  %-24s %s\n", cmd.name, cmd.summary)
+		console.PrintStderr("  %-24s %s\n", cmd.name, cmd.summary)
 	}
-	common.PrintlnStderr("\nOptions:")
+	console.PrintlnStderr("\nOptions:")
 	if fs != nil {
 		fs.PrintDefaults()
 	}

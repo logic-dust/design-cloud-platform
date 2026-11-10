@@ -18,7 +18,7 @@
       "trace": "verbose"
     },
     {
-      "name": "Remote Engine (Debug & Attach)",
+      "name": "Remote Push (Debug & Attach)",
       "type": "go",
       "request": "attach",
       "mode": "remote",
@@ -27,7 +27,7 @@
       "showLog": true,
       "trace": "verbose",
       "logOutput": "rpc",
-      "preLaunchTask": "remote-debug",
+      "preLaunchTask": "remote: push",
       "substitutePath": [
         {
           "from": "${workspaceFolder}",
@@ -36,7 +36,7 @@
       ]
     },
     {
-      "name": "Remote Build Engine (Debug & Attach)",
+      "name": "Remote Build (Debug & Attach)",
       "type": "go",
       "request": "attach",
       "mode": "remote",
@@ -45,25 +45,7 @@
       "showLog": true,
       "trace": "verbose",
       "logOutput": "rpc",
-      "preLaunchTask": "remote-build-debug",
-      "substitutePath": [
-        {
-          "from": "${workspaceFolder}",
-          "to": "design-cloud-engine"
-        }
-      ]
-    },
-    {
-      "name": "Connect Tunnel Engine",
-      "type": "go",
-      "request": "attach",
-      "mode": "remote",
-      "port": 2345,
-      "host": "127.0.0.1",
-      "showLog": true,
-      "trace": "verbose",
-      "logOutput": "rpc",
-      "preLaunchTask": "create-tunnel",
+      "preLaunchTask": "remote: build",
       "substitutePath": [
         {
           "from": "${workspaceFolder}",

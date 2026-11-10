@@ -3,147 +3,110 @@ package connection
 import (
 	"context"
 	"fmt"
-	"io/fs"
-	"strings"
-	"time"
-
-	"design-cloud-engine/internal/execution/payload"
 
 	"design-cloud-engine/internal/contract"
-	"design-cloud-engine/internal/execution"
 	"design-cloud-engine/internal/model"
 )
 
-// vncControlOperation is the payload operation for ActionVNCControl.
-type vncControlOperation string
-
-const (
-	vncOpStart vncControlOperation = "start"
-	vncOpStop  vncControlOperation = "stop"
-)
-
-// validateVNCControlEligibility checks that a connection can be started or
-// stopped via the launcher: only admin-assigned Fixed VNC connections with a
-// known target node and display are controllable.
-func validateVNCControlEligibility(conn model.Connection) error {
-	if conn.Source != model.ConnectionSourceFixed {
-		return fmt.Errorf("%w: only fixed connections support start/stop", fs.ErrInvalid)
-	}
-	if conn.Protocol != contract.VNCProtocol {
-		return fmt.Errorf("%w: only VNC connections support start/stop", fs.ErrInvalid)
-	}
-	if conn.TargetNodeID == "" {
-		return fmt.Errorf("%w: connection target node is required", fs.ErrInvalid)
-	}
-	if conn.Display == "" {
-		return fmt.Errorf("%w: connection display is required", fs.ErrInvalid)
-	}
-	return nil
-}
-
-// StartConnection starts the VNC server of a fixed connection on its assigned
-// node, then optimistically marks the connection running.
+// StartConnection 启动已停止的连接（同一 connection id 墓碑卡片，底层按 resource 重新选机）。
+// - VNC：stopped→pending→running，动态号重选节点；固定 display 规格仍用其唯一节点。
+// - RDP / XRDP：按 resource 重新 SelectNode，写回本行后 status=running（不原 node 符活）。
+// - SSH：无实例路径；若仍有历史 SSH 行则 422，提示改走 GET /api/connections/ssh?resourceId=。
 func (s *Service) StartConnection(ctx context.Context, id uint, requestUser string) error {
-	s.markControlled(id)
-	return s.controlConnection(ctx, id, requestUser, vncOpStart, model.ConnectionRunning)
+	conn, err := s.GetByIDForUser(ctx, id, requestUser)
+	if err != nil {
+		return err
+	}
+
+	if conn.Protocol == contract.SSHProtocol {
+		return contract.NewValidationError("SSH does not use connection start; use GET /api/connections/ssh?resourceId=")
+	}
+	if conn.Status == model.ConnectionPending {
+		return contract.NewConflictError(ErrConnectionStillStarting.Error(), ErrConnectionStillStarting)
+	}
+	if conn.Status == model.ConnectionTerminating {
+		return contract.NewConflictError("connection is being deleted")
+	}
+	if conn.Status == model.ConnectionUnknown {
+		return contract.NewConflictError(ErrConnectionStateUnknown.Error(), ErrConnectionStateUnknown)
+	}
+	if conn.Status == model.ConnectionRunning {
+		return nil
+	}
+
+	switch conn.Protocol {
+	case contract.VNCProtocol:
+		return s.startVNCViaResource(ctx, conn, requestUser)
+	case contract.RDPProtocol, contract.XRDPProtocol:
+		return s.startDialViaResource(ctx, conn, requestUser)
+	default:
+		return contract.NewValidationError("unsupported protocol for start")
+	}
 }
 
-// StopConnection stops the VNC server of a fixed connection on its assigned
-// node, then marks the connection stopped and terminates any active proxy session.
+func (s *Service) revertStartToStopped(ctx context.Context, conn model.Connection) {
+	if err := s.markStoppedTombstone(ctx, conn); err != nil && s.logger != nil {
+		s.logger.Warn("revert start to stopped failed", "connectionID", conn.ID, "error", err)
+	}
+}
+
+// StopConnection ends the remote user session/seat for a connection instance, then
+// leaves a stopped tombstone (resourceId kept, quota retained).
+// SSH product path has no instance Stop (close the WebSocket). A leftover SSH row
+// in DB may still hit SESSION_CONTROL here for admin cleanup only.
 func (s *Service) StopConnection(ctx context.Context, id uint, requestUser string) error {
-	s.markControlled(id)
-	if s.tunnelCloser != nil {
-		_ = s.tunnelCloser.CloseByConnectionID(id)
-	}
-	return s.controlConnection(ctx, id, requestUser, vncOpStop, model.ConnectionStopped)
-}
-
-// RestartConnection stops and then starts the VNC server of a fixed connection.
-func (s *Service) RestartConnection(ctx context.Context, id uint, requestUser string) error {
-	s.markControlled(id)
-	if s.tunnelCloser != nil {
-		_ = s.tunnelCloser.CloseByConnectionID(id)
-	}
 	conn, err := s.GetByIDForUser(ctx, id, requestUser)
 	if err != nil {
 		return err
 	}
-	if err := validateVNCControlEligibility(conn); err != nil {
-		return err
-	}
-	if err := s.dispatchVNCControl(ctx, conn, vncOpStop); err != nil {
-		return err
-	}
-	if err := s.dispatchVNCControl(ctx, conn, vncOpStart); err != nil {
-		return err
-	}
-	return s.updateStatus(ctx, &contract.ConnectionInfo{ConnectionID: conn.ID}, conn.TargetNodeID, model.ConnectionRunning)
-}
 
-// controlConnection validates the connection and dispatches a single
-// start/stop operation.
-func (s *Service) controlConnection(ctx context.Context, id uint, requestUser string, op vncControlOperation, status model.ConnectionStatus) error {
-	conn, err := s.GetByIDForUser(ctx, id, requestUser)
-	if err != nil {
-		return err
-	}
-	if err := validateVNCControlEligibility(conn); err != nil {
-		return err
-	}
-	if err := s.dispatchVNCControl(ctx, conn, op); err != nil {
-		return err
-	}
-	return s.updateStatus(ctx, &contract.ConnectionInfo{ConnectionID: conn.ID}, conn.TargetNodeID, status)
-}
-
-// dispatchVNCControl sends the start/stop action to the connection's node.
-func (s *Service) dispatchVNCControl(ctx context.Context, conn model.Connection, op vncControlOperation) error {
-	if s.execSvc == nil {
-		return fmt.Errorf("connection execution service is not configured")
-	}
-	if s.settingsSvc == nil {
-		return fmt.Errorf("settings service is uninitialized in connection service")
-	}
-	nodeSettings, err := s.settingsSvc.GetEffectiveAgentSettingsForNode(ctx, conn.TargetNodeID)
-	if err != nil {
-		return fmt.Errorf("resolve effective agent settings for node %q: %w", conn.TargetNodeID, err)
+	switch conn.Protocol {
+	case contract.VNCProtocol, contract.XRDPProtocol, contract.RDPProtocol, contract.SSHProtocol:
+	default:
+		return contract.NewValidationError("unsupported protocol for stop")
 	}
 
-	serverPath := nodeSettings.VNC.ResolvedServerPath()
-	if serverPath == "" {
-		return fmt.Errorf("%w: vnc server binary path is empty/unresolved for node %q", fs.ErrInvalid, conn.TargetNodeID)
+	if conn.Status == model.ConnectionStopped {
+		return nil
+	}
+	if conn.Status == model.ConnectionPending {
+		return contract.NewConflictError(ErrConnectionStillStarting.Error(), ErrConnectionStillStarting)
 	}
 
-	serverArgs := nodeSettings.VNC.ServerArgs
-	if startOpts := strings.TrimSpace(conn.GetStartOptions()); startOpts != "" {
-		serverArgs = strings.Fields(startOpts)
+	if s.proxyConnectionCloser != nil {
+		_ = s.proxyConnectionCloser.CloseAllByConnectionID(id)
 	}
 
-	actionName := execution.ActionVNCControl
-	if op == vncOpStart && conn.NeedsElevation() {
-		actionName = execution.ActionVNCCgroupControl
-	}
-
-	executionID := fmt.Sprintf("vnc-control-%d-%d", conn.ID, time.Now().UnixNano())
-	req := execution.NewExecuteRequest(actionName, executionID,
-		execution.WithTargetUser(conn.Username),
-		execution.WithTargetNode(conn.TargetNodeID),
-		execution.WithPayload(payload.VNCControl{
-			ConnectionID:  conn.ID,
-			Display:       conn.Display,
-			Operation:     string(op),
-			VNCServerPath: serverPath,
-			StartOptions:  conn.GetStartOptions(),
-			ServerArgs:    serverArgs,
-		}),
-		execution.WithTimeout(30*time.Second),
-	)
-
-	if _, err := execution.Run(ctx, s.execSvc, req); err != nil {
+	attempted, killErr := s.teardownRemoteSession(ctx, conn)
+	if killErr != nil {
 		if s.logger != nil {
-			return execution.HandleError(s.logger, err, "vnc.control")
+			s.logger.Warn("Failed to stop remote session",
+				"connectionID", conn.ID, "protocol", conn.Protocol.String(),
+				"nodeID", conn.NodeID, "error", killErr)
 		}
+		if attempted {
+			if markErr := s.connectionRepo.MarkTerminatingKeepResource(ctx, conn.ID); markErr != nil {
+				return fmt.Errorf("mark terminating after stop kill failure: %w", markErr)
+			}
+			s.notifyOwnerRefresh(ctx, requestUser, conn.Username, conn.ID)
+			// Surface failure so Restart does not chain into Start on a hidden tombstone.
+			return fmt.Errorf("stop remote session failed; marked terminating: %w", killErr)
+		}
+		return fmt.Errorf("stop remote session: %w", killErr)
+	}
+
+	if err := s.markStoppedTombstone(ctx, conn); err != nil {
+		return fmt.Errorf("update connection stopped: %w", err)
+	}
+
+	s.notifyOwnerRefresh(ctx, requestUser, conn.Username, conn.ID)
+	return nil
+}
+
+// RestartConnection = Stop then Start (same connection id).
+func (s *Service) RestartConnection(ctx context.Context, id uint, requestUser string) error {
+	if err := s.StopConnection(ctx, id, requestUser); err != nil {
 		return err
 	}
-	return nil
+	return s.StartConnection(ctx, id, requestUser)
 }

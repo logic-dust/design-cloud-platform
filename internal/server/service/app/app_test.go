@@ -3,14 +3,14 @@ package app
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
 )
@@ -69,7 +69,7 @@ func newAppServiceWithDepsForTest(
 
 func createTestApp(t *testing.T, repos *db.Repos, name string) model.App {
 	t.Helper()
-	app := model.App{Name: name, Type: model.BatchApp}
+	app := model.App{Slug: name, Type: model.BatchApp}
 	if err := repos.App.Create(context.Background(), &app); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestAppServiceSetUsersValidatesUserInService(t *testing.T) {
 	createTestUser(t, repos, "alice")
 
 	err := service.SetUsers(context.Background(), app.ID, []string{"alice", "missing"})
-	if !errors.Is(err, common.ErrNotFound) {
+	if !errors.Is(err, contract.ErrNotFound) {
 		t.Fatalf("set users error = %v, want ErrNotFound", err)
 	}
 
@@ -169,7 +169,7 @@ func TestAppServiceUserOperationsReturnAppNotFound(t *testing.T) {
 	createTestUser(t, repos, "alice")
 
 	err := service.AddUsers(context.Background(), 999, []string{"alice"})
-	if !errors.Is(err, common.ErrNotFound) {
+	if !errors.Is(err, contract.ErrNotFound) {
 		t.Fatalf("add users missing app error = %v, want ErrNotFound", err)
 	}
 }
@@ -181,8 +181,8 @@ func TestAppServiceCreateAndUpdate(t *testing.T) {
 
 	// Test Create
 	form := model.AppBase{
-		Name:  "test_app",
-		Alias: "Test App",
+		Slug:  "test_app",
+		Name:  "Test App",
 		Type:  model.GUIApp,
 		Queue: "gui-queue",
 	}
@@ -205,8 +205,8 @@ func TestAppServiceCreateAndUpdate(t *testing.T) {
 
 	// Test Update
 	updateForm := model.AppBase{
-		Name:  "test_app",
-		Alias: "Test App Updated",
+		Slug:  "test_app",
+		Name:  "Test App Updated",
 		Type:  model.GUIApp,
 		Queue: "new-queue",
 	}
@@ -234,72 +234,74 @@ func TestAppServiceFormValidationRejectsInvalidJSON(t *testing.T) {
 	service, _ := newAppServiceForTest(t)
 
 	_, err := service.Create(context.Background(), model.AppBase{
-		Name:  "bad_form",
-		Alias: "Bad Form App",
-		Type:  model.FormApp,
-		Form:  "invalid-json",
+		Slug: "bad_form",
+		Name: "Bad Form App",
+		Type: model.FormApp,
+		Form: "invalid-json",
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Fatalf("create with invalid form json err = %v, want fs.ErrInvalid", err)
+	var contractErr contract.DomainError
+	if !errors.As(err, &contractErr) || contractErr.HTTPStatus() != http.StatusUnprocessableEntity {
+		t.Fatalf("create with invalid form json err = %v, want 422 validation error", err)
 	}
 
 	_, err = service.Create(context.Background(), model.AppBase{
-		Name:  "empty_form",
-		Alias: "Empty Form App",
-		Type:  model.FormApp,
-		Form:  "",
+		Slug: "empty_form",
+		Name: "Empty Form App",
+		Type: model.FormApp,
+		Form: "",
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Fatalf("create with empty form err = %v, want fs.ErrInvalid", err)
+	if !errors.As(err, &contractErr) || contractErr.HTTPStatus() != http.StatusBadRequest {
+		t.Fatalf("create with empty form err = %v, want 400 invalid param error", err)
 	}
 }
 
-func TestAppServiceCreateValidatesNameAndAlias(t *testing.T) {
+func TestAppServiceCreateValidatesSlugAndName(t *testing.T) {
 	t.Parallel()
 
 	service, _ := newAppServiceForTest(t)
 
 	_, err := service.Create(context.Background(), model.AppBase{
-		Name:  "bad-name!",
-		Alias: "Alias",
-		Type:  model.BatchApp,
+		Slug: "bad-name!",
+		Name: "Display",
+		Type: model.BatchApp,
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Fatalf("create with bad name err = %v, want fs.ErrInvalid", err)
+	var contractErr contract.DomainError
+	if !errors.As(err, &contractErr) || contractErr.HTTPStatus() != http.StatusUnprocessableEntity {
+		t.Fatalf("create with bad name err = %v, want 422 validation error", err)
 	}
 
 	_, err = service.Create(context.Background(), model.AppBase{
-		Name:  "good_name_1",
-		Alias: strings.Repeat("测", 101),
-		Type:  model.BatchApp,
+		Slug: "good_name_1",
+		Name: strings.Repeat("测", 101),
+		Type: model.BatchApp,
 	})
-	if !errors.Is(err, fs.ErrInvalid) {
-		t.Fatalf("create with long alias err = %v, want fs.ErrInvalid", err)
+	if !errors.As(err, &contractErr) || contractErr.HTTPStatus() != http.StatusUnprocessableEntity {
+		t.Fatalf("create with long name err = %v, want 422 validation error", err)
 	}
 }
 
-func TestAppServiceCreateMapsNameConflict(t *testing.T) {
+func TestAppServiceCreateMapsSlugConflict(t *testing.T) {
 	t.Parallel()
 
 	service, _ := newAppServiceForTest(t)
 	ctx := context.Background()
 
 	_, err := service.Create(ctx, model.AppBase{
-		Name:  "duplicate_app",
-		Alias: "First",
-		Type:  model.BatchApp,
+		Slug: "duplicate_app",
+		Name: "First",
+		Type: model.BatchApp,
 	})
 	if err != nil {
 		t.Fatalf("create first app: %v", err)
 	}
 
 	_, err = service.Create(ctx, model.AppBase{
-		Name:  "duplicate_app",
-		Alias: "Second",
-		Type:  model.BatchApp,
+		Slug: "duplicate_app",
+		Name: "Second",
+		Type: model.BatchApp,
 	})
-	if !errors.Is(err, ErrAppNameConflict) {
-		t.Fatalf("create duplicate app err = %v, want ErrAppNameConflict", err)
+	if !errors.Is(err, ErrAppSlugConflict) {
+		t.Fatalf("create duplicate app err = %v, want ErrAppSlugConflict", err)
 	}
 }
 
@@ -311,8 +313,8 @@ func TestAppServiceLaunchDispatchesJobForAccessibleApp(t *testing.T) {
 	ctx := context.Background()
 
 	app, err := service.Create(ctx, model.AppBase{
-		Name:   "gui_launch_app",
-		Alias:  "GUI Launch",
+		Slug:   "gui_launch_app",
+		Name:   "GUI Launch",
 		Type:   model.GUIApp,
 		Public: true,
 	})
@@ -346,8 +348,8 @@ func TestAppServiceLaunchRejectsInaccessiblePrivateApp(t *testing.T) {
 	createTestUser(t, repos, "bob")
 
 	app, err := service.Create(ctx, model.AppBase{
-		Name:   "private_gui_launch",
-		Alias:  "Private GUI",
+		Slug:   "private_gui_launch",
+		Name:   "Private GUI",
 		Type:   model.GUIApp,
 		Public: false,
 	})
@@ -362,8 +364,8 @@ func TestAppServiceLaunchRejectsInaccessiblePrivateApp(t *testing.T) {
 	if err == nil {
 		t.Fatalf("launch private app should fail for unauthorized user")
 	}
-	var domErr common.DomainError
-	if !errors.As(err, &domErr) || domErr.HTTPStatus() != 403 {
+	domErr, ok := errors.AsType[contract.DomainError](err)
+	if !ok || domErr.HTTPStatus() != 403 {
 		t.Fatalf("launch private app error = %v, want 403 DomainError", err)
 	}
 	if scheduler.called {
@@ -382,7 +384,7 @@ func TestAppServiceListAccessible(t *testing.T) {
 
 	// 1. 公共应用
 	pubApp := createTestApp(t, repos, "pub_app")
-	if err := repos.App.Update(ctx, &model.App{ID: pubApp.ID, Name: "pub_app", Type: model.BatchApp, Public: true}); err != nil {
+	if err := repos.App.Update(ctx, &model.App{ID: pubApp.ID, Slug: "pub_app", Type: model.BatchApp, Public: true}); err != nil {
 		t.Fatalf("update pub app: %v", err)
 	}
 

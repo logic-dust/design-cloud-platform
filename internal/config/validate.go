@@ -3,11 +3,11 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
-	"path/filepath"
 	"strings"
 
-	"design-cloud-engine/internal/common/host"
+	"design-cloud-engine/internal/infra/host"
 )
 
 func (c *Config) Validate() error {
@@ -17,9 +17,6 @@ func (c *Config) Validate() error {
 	}
 
 	// Common validation (required for all roles)
-	if err := c.Log.Validate(); err != nil {
-		return fmt.Errorf("log: %w", err)
-	}
 	if err := c.Cluster.Validate(); err != nil {
 		return fmt.Errorf("cluster: %w", err)
 	}
@@ -35,11 +32,6 @@ func (c *Config) Validate() error {
 		if err := c.User.Validate(); err != nil {
 			return fmt.Errorf("user: %w", err)
 		}
-		// Scheduler 驱动由 server 装配消费（service/scheduler.NewService 经 dispatcher
-		// 在节点上执行作业），因此随 ServerEnabled 校验；纯 agent 节点不消费该配置。
-		if err := c.Scheduler.Validate(); err != nil {
-			return fmt.Errorf("scheduler: %w", err)
-		}
 	}
 
 	return nil
@@ -48,6 +40,15 @@ func (c *Config) Validate() error {
 func (a *Portal) Validate() error {
 	if a.Port == "" {
 		return fmt.Errorf("port is required")
+	}
+
+	if a.BehindReverseProxy {
+		if a.TrustedProxyCIDR == "" {
+			return fmt.Errorf("trusted_proxy_cidr is required when behind_reverse_proxy=true")
+		}
+		if _, _, err := net.ParseCIDR(a.TrustedProxyCIDR); err != nil {
+			return fmt.Errorf("trusted_proxy_cidr must be a valid CIDR (e.g. 10.0.0.0/8): %w", err)
+		}
 	}
 
 	if a.ReadHeaderTimeout < 5 || a.ReadHeaderTimeout > 15 {
@@ -66,7 +67,7 @@ func (a *Portal) Validate() error {
 		return fmt.Errorf("rate_limit must be in range 1-10000 req/s")
 	}
 
-	if a.RateBurst < int(a.RateLimit) || a.RateBurst > 20000 {
+	if a.RateBurst < a.RateLimit || a.RateBurst > 20000 {
 		return fmt.Errorf("rate_burst must be >= rate_limit and <= 20000")
 	}
 
@@ -74,7 +75,7 @@ func (a *Portal) Validate() error {
 		return fmt.Errorf("transfer_rate_limit must be in range 1-500 req/s")
 	}
 
-	if a.TransferRateBurst < int(a.TransferRateLimit) || a.TransferRateBurst > 1000 {
+	if a.TransferRateBurst < a.TransferRateLimit || a.TransferRateBurst > 1000 {
 		return fmt.Errorf("transfer_rate_burst must be >= transfer_rate_limit and <= 1000")
 	}
 
@@ -82,39 +83,47 @@ func (a *Portal) Validate() error {
 		return fmt.Errorf("ws_rate_limit must be in range 1-500 req/s")
 	}
 
-	if a.WSRateBurst < int(a.WSRateLimit) || a.WSRateBurst > 1000 {
+	if a.WSRateBurst < a.WSRateLimit || a.WSRateBurst > 1000 {
 		return fmt.Errorf("ws_rate_burst must be >= ws_rate_limit and <= 1000")
 	}
 
-	// Check cert/key consistency: both must be set or both empty (even when TLS
-	// is off, mismatched configuration is a configuration smell we should reject).
+	// Cert/key must be configured as a pair. resolve() only fills both defaults
+	// when both are empty, so a half-configured pair still reaches this check.
 	if (a.Cert == "") != (a.Key == "") {
 		return fmt.Errorf("cert and key must both be set or both be empty")
-	}
-
-	if !a.TLS {
-		return nil
 	}
 	return nil
 }
 
-func (c *Cluster) Validate() error {
-	for i, srv := range c.Servers {
+// expandClusterServers validates the topology patterns and returns the expanded,
+// validated host list. resolve() and Cluster.Validate() share it so an invalid
+// host fails before it can enter Runtime.Servers.
+func expandClusterServers(servers []string) ([]string, error) {
+	all := make([]string, 0, len(servers))
+	for i, srv := range servers {
 		if strings.TrimSpace(srv) == "" {
-			return fmt.Errorf("servers[%d] cannot be empty", i)
+			return nil, fmt.Errorf("servers[%d] cannot be empty", i)
 		}
 		expanded, err := host.ExpandHostPattern(srv)
 		if err != nil {
-			return fmt.Errorf("servers[%d] invalid pattern %q: %w", i, srv, err)
+			return nil, fmt.Errorf("servers[%d] invalid pattern %q: %w", i, srv, err)
 		}
 		if len(expanded) == 0 {
-			return fmt.Errorf("servers[%d] pattern %q expanded to no hosts", i, srv)
+			return nil, fmt.Errorf("servers[%d] pattern %q expanded to no hosts", i, srv)
 		}
 		for _, h := range expanded {
 			if err := host.ValidateHost(h); err != nil {
-				return fmt.Errorf("servers[%d] expanded host %q invalid: %w", i, h, err)
+				return nil, fmt.Errorf("servers[%d] expanded host %q invalid: %w", i, h, err)
 			}
 		}
+		all = append(all, expanded...)
+	}
+	return all, nil
+}
+
+func (c *Cluster) Validate() error {
+	if _, err := expandClusterServers(c.Servers); err != nil {
+		return err
 	}
 
 	// Port range
@@ -145,6 +154,21 @@ func (c *Cluster) Validate() error {
 		return fmt.Errorf("cluster.node_check_interval must be 10–300 (seconds); got %d", c.NodeCheckInterval)
 	}
 
+	// Leader lease（须在合法区间；省略键保留 getDefault，显式 0 在此失败）
+	if c.LeaseTTL < 5 || c.LeaseTTL > 300 {
+		return fmt.Errorf("cluster.lease_ttl must be 5–300 (seconds); got %d", c.LeaseTTL)
+	}
+	if c.RenewInterval < 1 || c.RenewInterval > 120 {
+		return fmt.Errorf("cluster.renew_interval must be 1–120 (seconds); got %d", c.RenewInterval)
+	}
+	if c.RenewInterval >= c.LeaseTTL {
+		return fmt.Errorf("cluster.renew_interval (%d) must be < lease_ttl (%d)", c.RenewInterval, c.LeaseTTL)
+	}
+
+	if c.ExecutionRetentionDays < 1 || c.ExecutionRetentionDays > 365 {
+		return fmt.Errorf("cluster.execution_retention_days must be 1–365 (days); got %d", c.ExecutionRetentionDays)
+	}
+
 	return nil
 }
 
@@ -152,14 +176,14 @@ func (d *Database) Validate() error {
 	if d.Type == "" {
 		return fmt.Errorf("type is required")
 	}
+	if d.Type != DatabaseTypeSQLite && d.Type != DatabaseTypePostgres {
+		return fmt.Errorf("type: invalid value %q, must be %q or %q", d.Type, DatabaseTypeSQLite, DatabaseTypePostgres)
+	}
 	if d.Type == DatabaseTypeSQLite && d.Path == "" {
 		return fmt.Errorf("path is required for sqlite")
 	}
-	if d.PasswordFile != "" {
-		if err := checkSecretFilePermissions("database.password_file", d.PasswordFile); err != nil {
-			return err
-		}
-	}
+	// Secret file permissions are enforced by loadSecrets() immediately before
+	// the file is read; Validate stays a pure, filesystem-free check.
 	if d.MaxOpenConns <= 0 {
 		return fmt.Errorf("database.max_open_conns must be > 0 to prevent unlimited connections")
 	}
@@ -191,8 +215,13 @@ func (d *Database) Validate() error {
 }
 
 func (u *User) Validate() error {
-	if u.AuthMode != UserAuthModeLDAP {
+	switch u.AuthMode {
+	case UserAuthModeLocal:
 		return nil
+	case UserAuthModeLDAP:
+		// LDAP-specific validation below.
+	default:
+		return fmt.Errorf("user.auth_mode: invalid value %q, must be %q or %q", u.AuthMode, UserAuthModeLocal, UserAuthModeLDAP)
 	}
 
 	ldapServer := u.Ldap.Server
@@ -218,12 +247,7 @@ func (u *User) Validate() error {
 		return fmt.Errorf("ldap.bind_dn is required when bind_password or bind_password_file is set")
 	}
 
-	// Validate password file permissions if set
-	if u.Ldap.BindPasswordFile != "" {
-		if err := checkSecretFilePermissions("ldap.bind_password_file", u.Ldap.BindPasswordFile); err != nil {
-			return err
-		}
-	}
+	// Bind password file permissions are enforced by loadSecrets() before reading.
 
 	// Validate TLS CA path if set
 	if u.Ldap.TLSCAPath != "" {
@@ -232,32 +256,5 @@ func (u *User) Validate() error {
 		}
 	}
 
-	return nil
-}
-
-func (l *Log) Validate() error {
-	if l.MaxAge <= 0 {
-		return fmt.Errorf("log.max_age must be > 0 to prevent infinite log retention")
-	}
-	if l.MaxSize <= 0 {
-		return fmt.Errorf("log.max_size must be > 0 to prevent unconstrained log file growth")
-	}
-	if l.MaxBackups <= 0 {
-		return fmt.Errorf("log.max_backups must be > 0 to prevent infinite log backups")
-	}
-	return nil
-}
-
-// Validate checks Scheduler configuration for agent nodes.
-func (j *Scheduler) Validate() error {
-	if j.Type != JobSchedulerLSF && j.Type != JobSchedulerSlurm && j.Type != JobSchedulerOpenLava {
-		return fmt.Errorf("scheduler.type must be one of: lsf, slurm, openlava; got %q", j.Type)
-	}
-	if j.EnvScript == "" {
-		return fmt.Errorf("scheduler.env_script is required")
-	}
-	if !filepath.IsAbs(j.EnvScript) {
-		return fmt.Errorf("scheduler.env_script must be an absolute path; got %q", j.EnvScript)
-	}
 	return nil
 }

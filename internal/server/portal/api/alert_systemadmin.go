@@ -1,8 +1,6 @@
 package api
 
 import (
-	"net/http"
-
 	"design-cloud-engine/internal/server/portal/httputil"
 	"design-cloud-engine/internal/server/service/alert"
 
@@ -29,12 +27,12 @@ func (h *alertHandler) getAlertHistory(c *echo.Context) error {
 	}
 
 	if h.evaluator == nil {
-		return c.JSON(http.StatusOK, httputil.Response{Data: []any{}})
+		return httputil.RespondOK(c, []any{})
 	}
 
 	items, err := h.evaluator.GetHistory(c.Request().Context(), limit)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: items})
+	return httputil.RespondOK(c, items)
 }

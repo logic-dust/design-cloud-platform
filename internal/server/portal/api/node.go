@@ -2,7 +2,6 @@ package api
 
 import (
 	"net"
-	"net/http"
 	"strconv"
 
 	"design-cloud-engine/internal/config"
@@ -35,8 +34,8 @@ func (h *nodeHandler) registerNode(c *echo.Context) error {
 	var body struct {
 		Token string `json:"token"`
 	}
-	if err := c.Bind(&body); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &body); err != nil {
+		return httputil.RespondError(c, err)
 	}
 
 	serverHost, _, err := net.SplitHostPort(c.Request().Host)
@@ -45,9 +44,9 @@ func (h *nodeHandler) registerNode(c *echo.Context) error {
 	}
 	serverAddr := serverHost + ":" + strconv.Itoa(h.clusterPort)
 
-	materials, err := h.node.BootstrapWithToken(c.Request().Context(), nodeID, body.Token, serverAddr)
+	enrollment, err := h.node.EnrollWithToken(c.Request().Context(), nodeID, body.Token, serverAddr)
 	if err != nil {
 		return handleNodeError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: materials})
+	return httputil.RespondOK(c, enrollment)
 }

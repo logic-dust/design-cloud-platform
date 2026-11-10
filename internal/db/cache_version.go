@@ -10,6 +10,26 @@ import (
 	"design-cloud-engine/internal/model"
 )
 
+// cache_versions.name 主题（与表名 cache_versions 区分）。
+const (
+	CacheVersionTopicSettings        = "settings"
+	CacheVersionTopicSessions        = "sessions"
+	CacheVersionTopicBans            = "bans"
+	CacheVersionTopicIdentity        = "identity"
+	CacheVersionTopicNodeOverrides   = "node_overrides"
+	CacheVersionTopicDesktopReleases = "desktop_releases"
+)
+
+// AllCacheVersionTopics 是当前进程使用的全部主题；init 时 FirstOrCreate。
+var AllCacheVersionTopics = []string{
+	CacheVersionTopicSettings,
+	CacheVersionTopicSessions,
+	CacheVersionTopicBans,
+	CacheVersionTopicIdentity,
+	CacheVersionTopicNodeOverrides,
+	CacheVersionTopicDesktopReleases,
+}
+
 // CacheVersionRepo 管理多节点缓存广播版本号
 type CacheVersionRepo struct {
 	store *Store

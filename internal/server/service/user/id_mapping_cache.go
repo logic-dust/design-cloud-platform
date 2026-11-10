@@ -9,16 +9,17 @@ import (
 	"sync"
 	"time"
 
-	"design-cloud-engine/internal/common"
+	"design-cloud-engine/internal/contract/schema"
+	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/server/cache"
-	"design-cloud-engine/internal/server/service/settings/schema"
 	userprovider "design-cloud-engine/internal/server/service/user/provider"
 
+	"design-cloud-engine/internal/contract"
 	"golang.org/x/sync/errgroup"
 )
 
 const (
-	idMappingCacheTopic = "id_mappings"
+	idMappingCacheTopic = db.CacheVersionTopicIdentity
 	// MaxIDMappingsPerRequest 是去重后 uids+gids 的合计上限。
 	// 身份源侧无压力：单次 LDAP Search 实测可携 10 万项 OR。
 	// 该值实际受两个量约束（均为线性，故只是成本而非硬墙）：
@@ -158,13 +159,13 @@ type IDMappingsMissing struct {
 // ResolveIDMappings maps numeric UIDs/GIDs to names via ID mapping cache + sources.
 func (s *Service) ResolveIDMappings(ctx context.Context, req IDMappingsRequest) (*IDMappingsResult, error) {
 	if len(req.UIDs) > MaxRawIDMappingsPerArray || len(req.GIDs) > MaxRawIDMappingsPerArray {
-		return nil, common.NewInvalidParamError(fmt.Sprintf(
+		return nil, contract.NewInvalidParamError(fmt.Sprintf(
 			"too many ids: uids and gids may each contain at most %d entries before deduplication", MaxRawIDMappingsPerArray))
 	}
 	uids := uniqueIDs(req.UIDs)
 	gids := uniqueIDs(req.GIDs)
 	if len(uids)+len(gids) > MaxIDMappingsPerRequest {
-		return nil, common.NewInvalidParamError(fmt.Sprintf(
+		return nil, contract.NewInvalidParamError(fmt.Sprintf(
 			"at most %d unique ids allowed per request", MaxIDMappingsPerRequest))
 	}
 	// 空输入短路：不需要解析，就无所谓平台是否具备身份源。放在平台检查之前，避免
@@ -181,7 +182,7 @@ func (s *Service) ResolveIDMappings(ctx context.Context, req IDMappingsRequest) 
 	}
 	// 平台静态不可用：既无本机身份源（无 passwd/group 动作）也未启用 LDAP。
 	if s.localProv == nil && s.ldapProv == nil {
-		return nil, common.NewUnavailableError("ID-mapping resolution is not available on this platform")
+		return nil, contract.NewUnavailableError("ID-mapping resolution is not available on this platform")
 	}
 
 	ttls := s.idMappingCacheTTLs(ctx)
@@ -437,7 +438,7 @@ func (s *Service) resolveNamespace(
 		}
 		s.logger.Warn("ID source unavailable",
 			"namespace", ns.String(), "unresolved", len(unresolved), "error", cause)
-		return nil, common.NewUnavailableError("ID source unavailable", cause)
+		return nil, contract.NewUnavailableError("ID source unavailable", cause)
 	}
 	return out, nil
 }
@@ -460,25 +461,19 @@ func (s *Service) logResolve(
 	)
 }
 
-// RefreshIDMappingCache is the SOLE cluster-wide invalidation trigger for the
-// ID mapping cache: it clears the local cache (generation++ first, so in-flight
-// fills are discarded) and bumps the cache_versions topic so every other node
-// clears its own cache within its poll interval.
+// RefreshIDMappingCache clears the local ID mapping cache and bumps identity
+// so every other node drops its copy within one poll interval.
+// SyncUsers does the same bump after a completed sync (local per-id invalidate
+// plus cluster clear). TTL setting changes do not bump; each node clears locally
+// when it observes the new TTL via the settings topic.
 //
-// 为什么只有这里广播：身份缓存是各节点自持的只读旁路缓存（各节点自行查询身份源，
-// 节点间从不交换名字）。TTL 配置变更/用户同步等路径都能各自收敛，唯有"运维明确
-// 知道身份源变了、要求立刻全平台生效"这件事，除了本入口没有其它手段。
-//
-// 本机 generation/Clear 不回滚；Bump 失败时返回 503 并记审计（其它节点靠各自 TTL 兜底）。
+// 本机 Clear 不回滚；Bump 失败时返回 503 并记审计（其它节点靠各自 TTL 兜底）。
 func (s *Service) RefreshIDMappingCache(ctx context.Context, operator string) error {
 	s.idMappingCache.Clear()
-	var bumpErr error
-	if s.cacheVersion != nil {
-		bumpErr = s.cacheVersion.Bump(ctx, idMappingCacheTopic)
-	}
+	bumpErr := s.bumpIDMappingCache(ctx)
 	s.auditIDMappingRefresh(ctx, operator, bumpErr)
 	if bumpErr != nil {
-		return common.NewUnavailableError("ID mapping cache refresh broadcast failed", bumpErr)
+		return contract.NewUnavailableError("ID mapping cache refresh broadcast failed", bumpErr)
 	}
 	return nil
 }
@@ -507,10 +502,7 @@ func (s *Service) auditIDMappingRefresh(ctx context.Context, operator string, bu
 // idMappingCacheTTLs reads the configured TTL pair and detects configuration
 // changes: on change the LOCAL cache is cleared (generation++).
 //
-// 不做集群广播：settings 自身的失效主题会把新值传播到每个节点（多节点 ≤ 一次
-// Invalidator 轮询节拍），各节点在下次解析时经 noteTTLs 自行发现变化并清空本机
-// 缓存——与走 id_mappings 广播相比既不慢一步（同受统一轮询节拍约束），也不多一次
-// 写放大。集群广播只保留给"管理员 refresh"这一显式运维入口。
+// 不做 identity 广播：settings 主题把新 TTL 传到各节点，各节点经 noteTTLs 清空本机缓存。
 //
 // 读取失败时不改变更检测基线、不清缓存，本次解析沿用**上次成功读取的 TTL 对**
 // （无历史才退到 schema 默认值）。若用代码默认值兜底会带来两重副作用：默认
@@ -523,8 +515,8 @@ func (s *Service) idMappingCacheTTLs(ctx context.Context) idMappingTTLs {
 	}
 
 	readOK := false
-	if s.settingsSvc != nil {
-		if auth, err := s.settingsSvc.GetAuthSettings(ctx); err == nil {
+	if s.authSettings != nil {
+		if auth, err := s.authSettings.GetAuthSettings(ctx); err == nil {
 			pos = auth.IDMappingFoundCacheTTL
 			neg = auth.IDMappingNotFoundCacheTTL
 			readOK = true
@@ -541,9 +533,7 @@ func (s *Service) idMappingCacheTTLs(ctx context.Context) idMappingTTLs {
 	if neg <= 0 {
 		neg = schema.IDMappingNotFoundCacheTTLDefault
 	}
-	if neg > pos {
-		neg = pos
-	}
+	neg = min(neg, pos)
 
 	// 变更检测只在本次成功读到配置时进行：失败不该被误判成"TTL 改了"。
 	if readOK && s.idMappingCache.noteTTLs(pos, neg) {
@@ -591,6 +581,16 @@ func parseUint32ID(raw string) (uint32, bool) {
 		return 0, false
 	}
 	return uint32(n), true
+}
+
+// bumpIDMappingCache increments cache_versions identity. Nil repo skips (tests / unwired).
+// Callers clear or invalidate locally first. Other nodes clear on the next poll and
+// refill from the identity source, not from this DB.
+func (s *Service) bumpIDMappingCache(ctx context.Context) error {
+	if s.cacheVersion == nil {
+		return nil
+	}
+	return s.cacheVersion.Bump(ctx, idMappingCacheTopic)
 }
 
 func (s *Service) invalidateIDMappingsFromSystemUsers(systemUsers []userprovider.SystemUser) {

@@ -106,10 +106,11 @@ func (p *localProvider) ListUsers(ctx context.Context) ([]SystemUser, error) {
 		return nil, err
 	}
 	usersMap := make(map[string]SystemUser)
-	userGroupsMap, err := p.ListUserGroups(ctx)
+	groups, err := p.ListGroups(ctx)
 	if err != nil {
 		return nil, err
 	}
+	userGroupsMap := memberIndex(groups)
 	minUid := 1000
 	for passwdLine := range strings.SplitSeq(strings.TrimRight(rawUsersInfoStr, "\n"), "\n") {
 		u := parseUserListLine(passwdLine)
@@ -119,12 +120,12 @@ func (p *localProvider) ListUsers(ctx context.Context) ([]SystemUser, error) {
 		if !isIDInRange(u.Uid, &minUid, nil) {
 			continue
 		}
-		if groups, ok := userGroupsMap[u.Username]; ok {
-			u.Groups = groups
+		if names, ok := userGroupsMap[u.Username]; ok {
+			u.Groups = names
 		}
 		usersMap[u.Username] = u
 	}
-	if dbUsers, _, err := p.db.List(ctx, 0, 0); err == nil {
+	if dbUsers, err := p.db.ListAll(ctx); err == nil {
 		for _, u := range dbUsers {
 			if info, ok := usersMap[u.Username]; ok {
 				info.ID = u.ID
@@ -198,13 +199,13 @@ func (p *localProvider) GroupsByIDs(ctx context.Context, gids []uint32) (map[uin
 	return out, nil
 }
 
-func (p *localProvider) ListGroups(ctx context.Context) (map[string][]string, error) {
+func (p *localProvider) ListGroups(ctx context.Context) ([]GroupInfo, error) {
 	groupsInfo, err := p.runAction(ctx, execution.ActionGroupList, payload.GroupList{})
 	if err != nil {
 		return nil, err
 	}
-	groupsMap := make(map[string][]string)
 	minGid := 1000
+	var groups []GroupInfo
 	for groupInfo := range strings.SplitSeq(strings.TrimRight(groupsInfo, "\n"), "\n") {
 		infoList := strings.Split(groupInfo, ":")
 		if len(infoList) < 3 {
@@ -213,48 +214,32 @@ func (p *localProvider) ListGroups(ctx context.Context) (map[string][]string, er
 		if !isIDInRange(infoList[2], &minGid, nil) {
 			continue
 		}
-		if len(infoList) < 4 || infoList[3] == "" {
-			groupsMap[infoList[0]] = nil
+		name := infoList[0]
+		if name == "" {
 			continue
 		}
-		groupsMap[infoList[0]] = splitGroups(infoList[3])
+		g := GroupInfo{Name: name, Gid: parseOptionalGid(infoList[2])}
+		if len(infoList) >= 4 {
+			g.Members = normalizeMembers(splitGroups(infoList[3]))
+		}
+		groups = append(groups, g)
 	}
-	return groupsMap, nil
+	sortGroupsByName(groups)
+	return groups, nil
 }
 
-func (p *localProvider) GetGroupMembers(ctx context.Context, groupName string) ([]string, error) {
-	groupsMap, err := p.ListGroups(ctx)
+func (p *localProvider) GetGroup(ctx context.Context, groupName string) (*GroupInfo, error) {
+	groups, err := p.ListGroups(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if members, ok := groupsMap[groupName]; ok {
-		return members, nil
+	for i := range groups {
+		if groups[i].Name == groupName {
+			g := groups[i]
+			return &g, nil
+		}
 	}
 	return nil, ErrGroupNotFound
-}
-
-func (p *localProvider) ListUserGroups(ctx context.Context) (map[string][]string, error) {
-	groupsInfo, err := p.runAction(ctx, execution.ActionGroupList, payload.GroupList{})
-	if err != nil {
-		return nil, err
-	}
-	userGroupsMap := make(map[string][]string)
-	for groupInfo := range strings.SplitSeq(strings.TrimRight(groupsInfo, "\n"), "\n") {
-		infoList := strings.Split(groupInfo, ":")
-		if len(infoList) < 4 {
-			continue
-		}
-		groupName := infoList[0]
-		users := infoList[3]
-		if users != "" {
-			for u := range strings.SplitSeq(users, ",") {
-				if u != "" {
-					userGroupsMap[u] = append(userGroupsMap[u], groupName)
-				}
-			}
-		}
-	}
-	return userGroupsMap, nil
 }
 
 func (p *localProvider) VerifyPassword(ctx context.Context, username, password string) error {

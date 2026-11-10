@@ -2,10 +2,10 @@ package api
 
 import (
 	"errors"
-	"io/fs"
 	"net/http"
 
 	"design-cloud-engine/internal/contract"
+	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/portal/httputil"
 	connsvc "design-cloud-engine/internal/server/service/connection"
 
@@ -14,11 +14,22 @@ import (
 
 // route: /api/admin/system/connections
 func (h *connectionHandler) adminConnectionsAPI(g *echo.Group) {
+	// 规格管理子路由 (/api/admin/system/connections/resources)
+	resGroup := g.Group("/resources")
+	resGroup.GET("", h.adminListResources)
+	resGroup.POST("", h.adminCreateResource)
+	resGroup.POST("/batch-upsert", h.adminBatchUpsertResources)
+	resGroup.GET("/:id", h.adminGetResource)
+	resGroup.PUT("/:id", h.adminUpdateResource)
+	resGroup.DELETE("/:id", h.adminDeleteResource)
+	resGroup.GET("/:id/users", h.adminListResourceUsers)
+	resGroup.PUT("/:id/users", h.adminReplaceResourceUsers)
+	resGroup.PATCH("/:id/users", h.adminPatchResourceUsers)
+
+	// 实例管理子路由
 	g.GET("", h.adminListConnections)
-	g.POST("", h.adminCreateFixedConnection)
 	g.GET("/:id", h.adminGetConnection)
 	g.POST("/batch-delete", h.adminBulkDeleteConnections)
-	g.PUT("/batch-upsert", h.adminBatchUpsertFixedConnections)
 	g.DELETE("/:id", h.adminDeleteConnection)
 	g.POST("/refresh", h.adminRefreshConnections)
 	g.POST("/cleanup", h.executeConnectionCleanup)
@@ -26,7 +37,163 @@ func (h *connectionHandler) adminConnectionsAPI(g *echo.Group) {
 	g.POST("/:id/:op", h.adminConnectionAction)
 }
 
-// adminCreateConnectionVNCOTP generates a TurboVNC OTP for any connection with admin bypass.
+// --- 规格管理 Handlers
+
+func (h *connectionHandler) adminListResources(c *echo.Context) error {
+	p := httputil.ParsePage(c)
+	protocol := c.QueryParam("protocol")
+	query := c.QueryParam("q")
+
+	list, total, err := h.connection.AdminListResources(c.Request().Context(), p.Limit, p.Offset, protocol, query)
+	if err != nil {
+		return httputil.RespondError(c, err)
+	}
+	return httputil.RespondPage(c, list, total)
+}
+
+func (h *connectionHandler) adminCreateResource(c *echo.Context) error {
+	var res model.ConnectionResource
+	if err := echo.BindBody(c, &res); err != nil {
+		return httputil.RespondError(c, err)
+	}
+
+	if err := h.connection.AdminCreateResource(c.Request().Context(), &res); err != nil {
+		return handleConnectionError(c, err)
+	}
+	return httputil.RespondCreated(c, res)
+}
+
+func (h *connectionHandler) adminBatchUpsertResources(c *echo.Context) error {
+	var req struct {
+		Items []model.ConnectionResource `json:"items"`
+	}
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
+	}
+	out, err := h.connection.AdminBatchUpsertResources(c.Request().Context(), req.Items)
+	if err != nil {
+		return handleConnectionError(c, err)
+	}
+	return httputil.RespondOK(c, out)
+}
+
+func (h *connectionHandler) adminGetResource(c *echo.Context) error {
+	id, err := httputil.ParseUintParam(c, "id")
+	if err != nil {
+		return err
+	}
+	res, err := h.connection.AdminGetResourceByID(c.Request().Context(), id)
+	if err != nil {
+		return handleConnectionError(c, err)
+	}
+	return httputil.RespondOK(c, res)
+}
+
+func (h *connectionHandler) adminUpdateResource(c *echo.Context) error {
+	id, err := httputil.ParseUintParam(c, "id")
+	if err != nil {
+		return err
+	}
+
+	var res model.ConnectionResource
+	if err := echo.BindBody(c, &res); err != nil {
+		return httputil.RespondError(c, err)
+	}
+	res.ID = id
+
+	if err := h.connection.AdminUpdateResource(c.Request().Context(), &res); err != nil {
+		return handleConnectionError(c, err)
+	}
+	return httputil.RespondOK(c, res)
+}
+
+func (h *connectionHandler) adminDeleteResource(c *echo.Context) error {
+	id, err := httputil.ParseUintParam(c, "id")
+	if err != nil {
+		return err
+	}
+	if err := h.connection.AdminDeleteResource(c.Request().Context(), id); err != nil {
+		return handleConnectionError(c, err)
+	}
+	return httputil.RespondNoContent(c)
+}
+
+func (h *connectionHandler) adminListResourceUsers(c *echo.Context) error {
+	id, err := httputil.ParseUintParam(c, "id")
+	if err != nil {
+		return err
+	}
+	res, err := h.connection.AdminGetResourceByID(c.Request().Context(), id)
+	if err != nil {
+		return handleConnectionError(c, err)
+	}
+	if res.Public {
+		return httputil.RespondPage(c, []model.User{}, 0)
+	}
+
+	p := httputil.ParsePage(c)
+	users, total, err := h.connection.AdminListResourceUsersPage(c.Request().Context(), id, p.Limit, p.Offset)
+	if err != nil {
+		return handleConnectionError(c, err)
+	}
+	return httputil.RespondPage(c, users, total)
+}
+
+func (h *connectionHandler) adminReplaceResourceUsers(c *echo.Context) error {
+	id, err := httputil.ParseUintParam(c, "id")
+	if err != nil {
+		return err
+	}
+	res, err := h.connection.AdminGetResourceByID(c.Request().Context(), id)
+	if err != nil {
+		return handleConnectionError(c, err)
+	}
+	if res.Public {
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, "public resource does not accept user mappings")
+	}
+
+	var body struct {
+		Usernames []string `json:"usernames"`
+	}
+	if err := echo.BindBody(c, &body); err != nil {
+		return httputil.RespondError(c, err)
+	}
+
+	if err := h.connection.AdminReplaceResourceUsers(c.Request().Context(), id, body.Usernames); err != nil {
+		return handleConnectionError(c, err)
+	}
+	return httputil.RespondNoContent(c)
+}
+
+func (h *connectionHandler) adminPatchResourceUsers(c *echo.Context) error {
+	id, err := httputil.ParseUintParam(c, "id")
+	if err != nil {
+		return err
+	}
+	res, err := h.connection.AdminGetResourceByID(c.Request().Context(), id)
+	if err != nil {
+		return handleConnectionError(c, err)
+	}
+	if res.Public {
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, "public resource does not accept user mappings")
+	}
+
+	var body struct {
+		AddUsernames    []string `json:"addUsernames"`
+		RemoveUsernames []string `json:"removeUsernames"`
+	}
+	if err := echo.BindBody(c, &body); err != nil {
+		return httputil.RespondError(c, err)
+	}
+
+	if err := h.connection.AdminPatchResourceUsers(c.Request().Context(), id, body.AddUsernames, body.RemoveUsernames); err != nil {
+		return handleConnectionError(c, err)
+	}
+	return httputil.RespondNoContent(c)
+}
+
+// --- 实例管理 Handlers
+
 func (h *connectionHandler) adminCreateConnectionVNCOTP(c *echo.Context) error {
 	id, err := httputil.ParseUintParam(c, "id")
 	if err != nil {
@@ -36,39 +203,16 @@ func (h *connectionHandler) adminCreateConnectionVNCOTP(c *echo.Context) error {
 	if err != nil {
 		return handleConnectionError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: map[string]string{"otp": otp}})
+	return httputil.RespondOK(c, map[string]string{"otp": otp})
 }
 
 func (h *connectionHandler) adminListConnections(c *echo.Context) error {
-	p := httputil.ParsePagination(c, 50, 200)
-	connections, total, err := h.connection.ListAll(c.Request().Context(), p.Limit, p.Offset)
+	p := httputil.ParsePage(c)
+	connections, total, err := h.connection.ListPage(c.Request().Context(), p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
 	return httputil.RespondPage(c, connections, total)
-}
-
-// POST /api/admin/system/connections — 管理员为指定用户创建固定分配连接
-func (h *connectionHandler) adminCreateFixedConnection(c *echo.Context) error {
-	var req connsvc.CreateFixedConnectionForm
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
-	}
-
-	conn, err := h.connection.CreateFixed(c.Request().Context(), req)
-	if err != nil {
-		if errors.Is(err, fs.ErrInvalid) {
-			return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
-		}
-		if errors.Is(err, fs.ErrNotExist) {
-			return c.JSON(http.StatusNotFound, httputil.Response{Message: err.Error()})
-		}
-		if errors.Is(err, connsvc.ErrConnectionAlreadyExists) {
-			return c.JSON(http.StatusConflict, httputil.Response{Message: err.Error()})
-		}
-		return httputil.RespondError(c, err)
-	}
-	return c.JSON(http.StatusCreated, httputil.Response{Data: conn})
 }
 
 func (h *connectionHandler) adminGetConnection(c *echo.Context) error {
@@ -76,11 +220,11 @@ func (h *connectionHandler) adminGetConnection(c *echo.Context) error {
 	if err != nil {
 		return err
 	}
-	conn, err := h.connection.GetByID(c.Request().Context(), id)
+	conn, err := h.connection.GetVisibleByIDForUser(c.Request().Context(), id, connsvc.AllUsers)
 	if err != nil {
 		return handleConnectionError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: conn})
+	return httputil.RespondOK(c, conn)
 }
 
 func (h *connectionHandler) adminDeleteConnection(c *echo.Context) error {
@@ -88,30 +232,37 @@ func (h *connectionHandler) adminDeleteConnection(c *echo.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := h.connection.Delete(c.Request().Context(), connsvc.AllUsers, id); err != nil {
+	res, err := h.connection.Delete(c.Request().Context(), connsvc.AllUsers, id)
+	if err != nil {
 		return handleConnectionError(c, err)
 	}
-	return c.NoContent(http.StatusNoContent)
+	if res.TerminatingCount > 0 {
+		return httputil.RespondAccepted(c, res)
+	}
+	return httputil.RespondNoContent(c)
 }
 
 func (h *connectionHandler) adminBulkDeleteConnections(c *echo.Context) error {
 	var req struct {
 		IDs httputil.IDList `json:"ids"`
 	}
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
 	}
 	if len(req.IDs) == 0 {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "ids are required"})
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, "ids are required")
 	}
 
-	if err := h.connection.Delete(c.Request().Context(), connsvc.AllUsers, req.IDs...); err != nil {
+	res, err := h.connection.Delete(c.Request().Context(), connsvc.AllUsers, req.IDs...)
+	if err != nil {
 		return handleConnectionError(c, err)
 	}
-	return c.NoContent(http.StatusNoContent)
+	if res.TerminatingCount > 0 {
+		return httputil.RespondAccepted(c, res)
+	}
+	return httputil.RespondNoContent(c)
 }
 
-// adminConnectionAction dispatches start/stop/restart with admin bypass.
 func (h *connectionHandler) adminConnectionAction(c *echo.Context) error {
 	id, err := httputil.ParseUintParam(c, "id")
 	if err != nil {
@@ -127,7 +278,7 @@ func (h *connectionHandler) adminConnectionAction(c *echo.Context) error {
 	case "restart":
 		actionErr = h.connection.RestartConnection(ctx, id, connsvc.AllUsers)
 	default:
-		return c.JSON(http.StatusNotFound, httputil.Response{Message: "unknown connection action"})
+		return httputil.RespondHTTPError(c, http.StatusNotFound, "unknown connection action")
 	}
 	if actionErr != nil {
 		return handleConnectionError(c, actionErr)
@@ -135,12 +286,11 @@ func (h *connectionHandler) adminConnectionAction(c *echo.Context) error {
 	return c.NoContent(http.StatusAccepted)
 }
 
-// --- 触发全局 VNC 连接刷新（重新搜集各个节点的vnc信息）
 func (h *connectionHandler) adminRefreshConnections(c *echo.Context) error {
 	if h.connection == nil {
-		return c.JSON(http.StatusServiceUnavailable, httputil.Response{Message: "connection service is disabled"})
+		return httputil.RespondHTTPError(c, http.StatusServiceUnavailable, "connection service is disabled")
 	}
-	if err := h.connection.TriggerCollect(c.Request().Context(), contract.CollectTargetVNC); err != nil {
+	if err := h.connection.TriggerCollect(c.Request().Context(), contract.CollectTargetConnection); err != nil {
 		return httputil.RespondError(c, err)
 	}
 	return c.NoContent(http.StatusAccepted)
@@ -148,40 +298,19 @@ func (h *connectionHandler) adminRefreshConnections(c *echo.Context) error {
 
 func (h *connectionHandler) executeConnectionCleanup(c *echo.Context) error {
 	if h.connection == nil {
-		return c.JSON(http.StatusServiceUnavailable, httputil.Response{Message: "connection service is disabled"})
+		return httputil.RespondHTTPError(c, http.StatusServiceUnavailable, "connection service is disabled")
 	}
 
 	result, err := h.connection.ExecuteCleanup(c.Request().Context())
 	if err != nil {
 		if errors.Is(err, connsvc.ErrCleanupLeaseHeld) {
-			return c.JSON(http.StatusConflict, httputil.Response{Message: err.Error()})
+			return httputil.RespondHTTPError(c, http.StatusConflict, err.Error())
 		}
 		if errors.Is(err, connsvc.ErrCleanupServiceUnavailable) {
-			return c.JSON(http.StatusServiceUnavailable, httputil.Response{Message: err.Error()})
+			return httputil.RespondHTTPError(c, http.StatusServiceUnavailable, err.Error())
 		}
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: result})
-}
 
-// PUT /api/admin/system/connections/batch-upsert
-// Accepts a list of fixed-connection records and upserts them:
-// existing records (matched by username+nodeId+port/display) are updated,
-// new records are created. Validation failures are skipped and reported.
-func (h *connectionHandler) adminBatchUpsertFixedConnections(c *echo.Context) error {
-	var req struct {
-		Records []connsvc.CreateFixedConnectionForm `json:"records"`
-	}
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
-	}
-	if len(req.Records) == 0 {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "records are required"})
-	}
-
-	result, err := h.connection.UpsertFixed(c.Request().Context(), req.Records)
-	if err != nil {
-		return httputil.RespondError(c, err)
-	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: result})
+	return httputil.RespondOK(c, result)
 }

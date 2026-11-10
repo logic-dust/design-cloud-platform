@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/model"
 
+	"design-cloud-engine/internal/contract"
 	"gorm.io/gorm"
 )
 
@@ -20,7 +20,7 @@ func (r *SessionRepo) Get(ctx context.Context, sessionID uint) (model.Session, e
 	var session model.Session
 	if err := r.store.db.WithContext(ctx).Select("id,token,user_id,expires_at").Where("id = ? AND expires_at > ?", sessionID, time.Now()).First(&session).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return model.Session{}, fmt.Errorf("session %d: %w", sessionID, common.ErrNotFound)
+			return model.Session{}, fmt.Errorf("session %d: %w", sessionID, contract.ErrNotFound)
 		}
 		return model.Session{}, err
 	}
@@ -37,6 +37,23 @@ func (r *SessionRepo) GetByUserID(ctx context.Context, userID uint) ([]model.Ses
 	return sessions, err
 }
 
+func (r *SessionRepo) ListByUserIDPage(ctx context.Context, userID uint, limit, offset int) ([]model.Session, int64, error) {
+	if err := validateLimit(limit); err != nil {
+		return nil, 0, err
+	}
+	base := r.store.db.WithContext(ctx).Model(&model.Session{}).
+		Where("user_id = ? AND expires_at > ?", userID, time.Now())
+	var total int64
+	if err := base.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var sessions []model.Session
+	if err := base.Omit("Token").Order("created_at ASC, id ASC").Limit(limit).Offset(offset).Find(&sessions).Error; err != nil {
+		return nil, 0, err
+	}
+	return sessions, total, nil
+}
+
 // CountByUser returns the number of active sessions a user currently holds.
 func (r *SessionRepo) CountByUser(ctx context.Context, userID uint) (int64, error) {
 	var count int64
@@ -44,19 +61,43 @@ func (r *SessionRepo) CountByUser(ctx context.Context, userID uint) (int64, erro
 	return count, err
 }
 
+// List returns a page of non-expired sessions. limit must be > 0.
 func (r *SessionRepo) List(ctx context.Context, limit, offset int) ([]model.Session, int64, error) {
-	var sessions []model.Session
-	var total int64
-	query := r.store.db.WithContext(ctx).Model(&model.Session{}).
-		Select("id,user_id,username,token,ip,role,user_type,admin_scopes,created_at,updated_at,expires_at").
-		Where("expires_at > ?", time.Now())
-	if err := query.Count(&total).Error; err != nil {
+	return r.list(ctx, limit, offset, "")
+}
+
+// ListByUsername returns a page of non-expired sessions for one username (exact match).
+func (r *SessionRepo) ListByUsername(ctx context.Context, username string, limit, offset int) ([]model.Session, int64, error) {
+	return r.list(ctx, limit, offset, username)
+}
+
+func (r *SessionRepo) list(ctx context.Context, limit, offset int, username string) ([]model.Session, int64, error) {
+	if err := validateLimit(limit); err != nil {
 		return nil, 0, err
 	}
-	if limit > 0 {
-		query = query.Limit(limit).Offset(offset)
+	now := time.Now()
+	base := r.store.db.WithContext(ctx).Model(&model.Session{}).
+		Where("expires_at > ?", now)
+	if username != "" {
+		base = base.Where("username = ?", username)
 	}
-	if err := query.Find(&sessions).Error; err != nil {
+
+	var total int64
+	// Clone so Count does not pollute the Find statement chain.
+	if err := base.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	// Username-scoped lists prefer recent activity; full admin list keeps stable id order.
+	order := "id ASC"
+	if username != "" {
+		order = "updated_at DESC, id DESC"
+	}
+
+	var sessions []model.Session
+	// Omit bearer tokens: list APIs never return them (json:"-"), and loading them
+	// into every admin/user list page would retain secrets in process memory.
+	if err := base.Omit("Token").Order(order).Limit(limit).Offset(offset).Find(&sessions).Error; err != nil {
 		return nil, 0, err
 	}
 	return sessions, total, nil
@@ -77,16 +118,16 @@ func (r *SessionRepo) Renew(ctx context.Context, sessionID uint, expiresAt time.
 		return result.Error
 	}
 	if result.RowsAffected == 0 {
-		return fmt.Errorf("session %d: %w", sessionID, common.ErrNotFound)
+		return fmt.Errorf("session %d: %w", sessionID, contract.ErrNotFound)
 	}
 	return nil
 }
 
 func (r *SessionRepo) GetByToken(ctx context.Context, token string) (*model.Session, error) {
 	var session model.Session
-	if err := r.store.db.WithContext(ctx).Where("token = ? AND expires_at > ?", token, time.Now()).First(&session).Error; err != nil {
+	if err := r.store.db.WithContext(ctx).Where("token = ? AND expires_at > ?", token, time.Now()).Take(&session).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("session by token: %w", common.ErrNotFound)
+			return nil, fmt.Errorf("session by token: %w", contract.ErrNotFound)
 		}
 		return nil, err
 	}

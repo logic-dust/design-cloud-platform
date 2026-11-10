@@ -76,7 +76,7 @@ func (s *Service) CheckUploadPermission(ctx context.Context, requestUser string)
 		s.logger.Warn("failed to load user for upload permission", "user", requestUser, "error", err)
 		return ErrNoUploadPermission
 	}
-	if !userRecord.UploadAccess {
+	if userRecord.UploadDisabled {
 		return ErrNoUploadPermission
 	}
 	return nil

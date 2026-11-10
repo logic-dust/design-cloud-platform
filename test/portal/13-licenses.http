@@ -1,0 +1,77 @@
+# ========================================
+# ===== LICENSES Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+# ----- 需要先执行 13-licenses-system-admin.http 中的"创建许可证服务"获取 testLicenseId -----
+
+
+### 获取许可证服务列表
+GET {{addr}}/api/licenses
+Authorization: Bearer {{accessToken}}
+
+# @expect 200,404
+### 获取许可证服务详情
+GET {{addr}}/api/licenses/{{testLicenseId}}
+Authorization: Bearer {{accessToken}}
+
+# @manual
+### 获取许可证功能列表
+GET {{addr}}/api/licenses/{{testLicenseId}}/features
+Authorization: Bearer {{accessToken}}
+
+# @manual
+### 获取许可证运行状态
+GET {{addr}}/api/licenses/{{testLicenseId}}/status
+Authorization: Bearer {{accessToken}}
+
+# ========================================
+# ===== 管理面收尾（下线 → 断言 → 删除） =====
+# ========================================
+
+# @probe
+### 下线许可证（PUT enabled=false）
+PUT {{addr}}/api/admin/system/licenses/{{testLicenseId}}
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "name": "updated-lic-service",
+  "type": "flexlm",
+  "address": "27001@127.0.0.1",
+  "comment": "updated test license service",
+  "enabled": false
+}
+
+> {%
+client.test("Disable license returns 200", function() {
+  client.assert(response.status === 200, "Response status is 200 OK");
+  client.assert(response.body?.data?.enabled === false, "enabled is false after PUT");
+});
+%}
+
+# @expect 404
+### 用户侧获取已下线许可证（断言 404）
+GET {{addr}}/api/licenses/{{testLicenseId}}
+Authorization: Bearer {{accessToken}}
+
+> {%
+client.test("Disabled license is hidden from user API", function() {
+  client.assert(response.status === 404, "Response status is 404 Not Found");
+});
+%}
+
+### 管理面仍可见已下线许可证
+GET {{addr}}/api/admin/system/licenses/{{testLicenseId}}
+Authorization: Bearer {{accessToken}}
+
+> {%
+client.test("Admin can still see disabled license", function() {
+  client.assert(response.status === 200, "Response status is 200 OK");
+  client.assert(response.body?.data?.enabled === false, "admin GET returns enabled=false");
+});
+%}
+
+# @probe
+### 删除许可证服务（套件末尾清理）
+DELETE {{addr}}/api/admin/system/licenses/{{testLicenseId}}
+Authorization: Bearer {{accessToken}}

@@ -1,0 +1,31 @@
+# ========================================
+# ===== OVERVIEW Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+
+
+### 获取集群概览状态（全集群 scheduler.jobs）
+GET {{addr}}/api/overview/cluster
+Authorization: Bearer {{accessToken}}
+
+### 个人概览（当前用户 scheduler.jobs）
+GET {{addr}}/api/overview/me
+Authorization: Bearer {{accessToken}}
+
+# @probe
+# @expect 401
+### 个人概览拒绝大屏访客 Token（仅登录会话）
+GET {{addr}}/api/overview/me
+Authorization: Bearer __dc_public_overview_guest_token__
+
+# @probe
+# @expect 401
+### 集群概览快照拒绝大屏访客 Token（仅登录会话）
+GET {{addr}}/api/overview/cluster
+Authorization: Bearer __dc_public_overview_guest_token__
+
+# @probe
+# @expect 404
+### 裸 /api/overview 不提供数据
+GET {{addr}}/api/overview
+Authorization: Bearer {{accessToken}}

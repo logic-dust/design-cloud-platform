@@ -1,0 +1,35 @@
+# ========================================
+# ===== STATUS & STORAGE Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+
+
+### 获取系统状态
+GET {{addr}}/api/admin/system/status
+Authorization: Bearer {{accessToken}}
+
+> {%
+client.test("system status returns platform/auth/database/portal/nodes/log", function() {
+  client.assert(response.status === 200, "status is 200");
+  const data = response.body.data;
+  client.assert(data && data.platform && data.platform.version, "platform.version present");
+  client.assert(Array.isArray(data.platform.servers), "platform.servers is array");
+  client.assert(data.auth && typeof data.auth.threeRoles === "boolean", "auth.threeRoles present");
+  client.assert(data.database && data.database.status, "database.status present");
+  client.assert(data.portal && data.portal.address, "portal.address present");
+  client.assert(data.nodes && typeof data.nodes.total === "number", "nodes.total is number");
+  client.assert(data.log && data.log.dir, "log.dir present");
+});
+%}
+
+### 获取存储最新快照（auto-scale 格式，含 name/type）
+GET {{addr}}/api/admin/system/storage
+Authorization: Bearer {{accessToken}}
+
+### 刷新存储状态 (Admin only)
+POST {{addr}}/api/admin/system/storage/refresh
+Authorization: Bearer {{accessToken}}
+
+### 获取存储历史（auto-scale 格式）
+GET {{addr}}/api/admin/system/storage/share/history?days=1
+Authorization: Bearer {{accessToken}}

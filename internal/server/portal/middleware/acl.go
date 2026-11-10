@@ -25,7 +25,7 @@ func RequireRoleOrSuperAdmin(expected model.Role) echo.MiddlewareFunc {
 			if info.Role == expected {
 				return next(c)
 			}
-			return httputil.RespondError(c, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions"))
+			return httputil.RespondHTTPError(c, http.StatusForbidden, "insufficient permissions")
 		}
 	}
 }
@@ -42,7 +42,7 @@ func RequireRole(expected model.Role) echo.MiddlewareFunc {
 				return httputil.RespondError(c, err)
 			}
 			if info.Role != expected {
-				return httputil.RespondError(c, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions"))
+				return httputil.RespondHTTPError(c, http.StatusForbidden, "insufficient permissions")
 			}
 			return next(c)
 		}
@@ -56,7 +56,7 @@ func requireReadOnly() echo.MiddlewareFunc {
 		return func(c *echo.Context) error {
 			method := c.Request().Method
 			if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
-				return httputil.RespondError(c, echo.NewHTTPError(http.StatusForbidden, "audit role is read-only"))
+				return httputil.RespondHTTPError(c, http.StatusForbidden, "audit role is read-only")
 			}
 			return next(c)
 		}
@@ -89,12 +89,12 @@ func requireRoleOrAdminScope(expected model.Role, scopes ...model.AdminScope) ec
 				if expected == model.RoleAuditAdmin {
 					method := c.Request().Method
 					if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
-						return httputil.RespondError(c, echo.NewHTTPError(http.StatusForbidden, "audit role is read-only"))
+						return httputil.RespondHTTPError(c, http.StatusForbidden, "audit role is read-only")
 					}
 				}
 				return next(c)
 			}
-			return httputil.RespondError(c, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions"))
+			return httputil.RespondHTTPError(c, http.StatusForbidden, "insufficient permissions")
 		}
 	}
 }
@@ -131,7 +131,7 @@ func RequireScope(scopes ...model.AdminScope) echo.MiddlewareFunc {
 				return next(c)
 			}
 			if !info.AdminScopes.HasAny(scopes...) {
-				return httputil.RespondError(c, echo.NewHTTPError(http.StatusForbidden, "insufficient AdminScope"))
+				return httputil.RespondHTTPError(c, http.StatusForbidden, "insufficient AdminScope")
 			}
 			return next(c)
 		}
@@ -148,10 +148,10 @@ func requireSingleAdminGate() echo.MiddlewareFunc {
 				return httputil.RespondError(c, err)
 			}
 			if info.Role == model.RoleAuditAdmin || info.Role == model.RoleSystemAdmin || info.Role == model.RoleSecurityAdmin {
-				return httputil.RespondError(c, echo.NewHTTPError(http.StatusForbidden, "role not allowed in current admin mode"))
+				return httputil.RespondHTTPError(c, http.StatusForbidden, "role not allowed in current admin mode")
 			}
 			if !model.ValidRole(info.Role) {
-				return httputil.RespondError(c, echo.NewHTTPError(http.StatusForbidden, "role not allowed in current admin mode"))
+				return httputil.RespondHTTPError(c, http.StatusForbidden, "role not allowed in current admin mode")
 			}
 			return next(c)
 		}
@@ -167,7 +167,7 @@ func requireThreeRoleGate() echo.MiddlewareFunc {
 				return httputil.RespondError(c, err)
 			}
 			if info.Role == model.RoleSuperAdmin || !model.ValidRole(info.Role) {
-				return httputil.RespondError(c, echo.NewHTTPError(http.StatusForbidden, "role not allowed in current admin mode"))
+				return httputil.RespondHTTPError(c, http.StatusForbidden, "role not allowed in current admin mode")
 			}
 			return next(c)
 		}

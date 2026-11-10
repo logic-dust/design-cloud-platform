@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"slices"
 )
 
 // AdminScope is a single bit representing one delegatable admin capability.
@@ -17,11 +18,12 @@ const (
 	ScopeFiles       AdminScope = 1 << 5  // /admin/security/files
 	ScopeSettings    AdminScope = 1 << 6  // /admin/system/settings
 	ScopeTickets     AdminScope = 1 << 7  // /admin/system/tickets
-	ScopeUsers       AdminScope = 1 << 8  // /admin/system/users
+	ScopeUsers       AdminScope = 1 << 8  // /admin/system/users, /groups, /id-mappings
 	ScopeSessions    AdminScope = 1 << 9  // /admin/security/sessions
 	ScopeBans        AdminScope = 1 << 10 // /admin/security/bans
 	ScopeStorages    AdminScope = 1 << 11 // /admin/system/storage
 	ScopeStatuses    AdminScope = 1 << 12 // /admin/system/status
+	ScopeDesktop     AdminScope = 1 << 13 // /admin/system/desktop
 
 	// ScopeAll grants every admin capability.
 	ScopeAll = ^AdminScope(0)
@@ -41,12 +43,9 @@ func (s *AdminScopes) HasAny(scopes ...AdminScope) bool {
 	if *s == AdminScopes(ScopeAll) {
 		return true
 	}
-	for _, scope := range scopes {
-		if int64(*s)&int64(scope) != 0 {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(scopes, func(scope AdminScope) bool {
+		return int64(*s)&int64(scope) != 0
+	})
 }
 
 func (s *AdminScopes) Set(scope AdminScope) {

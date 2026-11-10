@@ -25,15 +25,16 @@ html[data-theme="dark"] {
   /* 边框与光泽 */
   --border-subtle: rgba(56, 189, 248, 0.25);
   --border-glow: rgba(56, 189, 248, 0.55);
-  --border-strong: rgba(99, 102, 241, 0.65);
   --glass-border: 1px solid rgba(56, 189, 248, 0.18);
   --corner-color: rgba(56, 189, 248, 1);
+  --track-bg: rgba(148, 163, 184, 0.18);
 
   /* 品牌与状态色彩 */
   --primary-cyan: #38bdf8;
   --primary-blue: #6366f1;
   --primary-violet: #a855f7;
   --accent-emerald: #34d399;
+  --accent-teal: #2dd4bf;
   --accent-amber: #fbbf24;
   --accent-rose: #f43f5e;
 
@@ -41,7 +42,6 @@ html[data-theme="dark"] {
   --text-main: #f8fafc;
   --text-secondary: #cbd5e1;
   --text-muted: #64748b;
-  --text-dim: #94a3b8;
 
   /* 渐变定义 */
   --grad-brand: linear-gradient(135deg, #38bdf8 0%, #6366f1 50%, #a855f7 100%);
@@ -60,12 +60,9 @@ html[data-theme="dark"] {
   /* 圆角 */
   --radius-sm: 6px;
   --radius-md: 12px;
-  --radius-lg: 18px;
   --radius-pill: 9999px;
 
   /* 弹性间距 Token */
-  --space-2xs: 0.25rem;
-  --space-xs: 0.375rem;
   --space-sm: 0.5rem;
   --space-md: 0.625rem;
   --space-lg: 0.75rem;
@@ -82,21 +79,21 @@ html[data-theme="light"] {
 
   --border-subtle: rgba(99, 102, 241, 0.18);
   --border-glow: rgba(99, 102, 241, 0.45);
-  --border-strong: rgba(99, 102, 241, 0.65);
   --glass-border: 1px solid rgba(255, 255, 255, 0.8);
   --corner-color: transparent;
+  --track-bg: rgba(148, 163, 184, 0.24);
 
   --primary-cyan: #0284c7;
   --primary-blue: #4f46e5;
   --primary-violet: #7c3aed;
   --accent-emerald: #059669;
+  --accent-teal: #14b8a6;
   --accent-amber: #d97706;
   --accent-rose: #e11d48;
 
   --text-main: #0f172a;
   --text-secondary: #334155;
   --text-muted: #64748b;
-  --text-dim: #94a3b8;
 
   --grad-brand: linear-gradient(135deg, #0284c7 0%, #4f46e5 50%, #7c3aed 100%);
   --grad-title: linear-gradient(180deg, #0f172a 20%, #1e293b 60%, #4f46e5 100%);
@@ -297,23 +294,4 @@ table,
   height: 36px;
   filter: var(--logo-glow);
   transition: filter 0.3s ease;
-}
-
-/* ---------- 全局滚动条样式 ---------- */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.25);
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.45);
 }

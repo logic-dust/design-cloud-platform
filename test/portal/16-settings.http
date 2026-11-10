@@ -1,0 +1,9 @@
+# ========================================
+# ===== SETTINGS Http =====
+# ========================================
+# ----- 用户侧仅暴露 platform 摘要；完整域管理见 16-settings-system-admin.http -----
+# ----- 无 GET /api/settings 根路径 -----
+
+### 获取平台配置（需要登录 Token）
+GET {{addr}}/api/settings/platform
+Authorization: Bearer {{accessToken}}

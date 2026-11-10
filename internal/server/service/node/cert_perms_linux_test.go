@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	fsutil "design-cloud-engine/internal/common/fs"
+	fsutil "design-cloud-engine/internal/infra/fs"
 )
 
 func assertPerm(t *testing.T, path string, want os.FileMode) {
@@ -46,7 +46,8 @@ func TestClusterPathPermissions(t *testing.T) {
 		t.Fatalf("IssueNodeCert: %v", err)
 	}
 
-	assertPerm(t, clusterDir, 0o755)
+	assertPerm(t, filepath.Dir(clusterDir), 0o750)
+	assertPerm(t, clusterDir, 0o750)
 	assertPerm(t, caCert, 0o644)
 	assertPerm(t, caDir, 0o700)
 	assertPerm(t, caKey, 0o600)
@@ -61,5 +62,5 @@ func TestClusterPathPermissions(t *testing.T) {
 	if err := fsutil.MkdirShared(clusterDir); err != nil {
 		t.Fatalf("MkdirShared repair: %v", err)
 	}
-	assertPerm(t, clusterDir, 0o755)
+	assertPerm(t, clusterDir, 0o750)
 }

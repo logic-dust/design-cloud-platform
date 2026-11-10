@@ -16,17 +16,11 @@ import (
 // Windows 由 validate_perms_windows.go 走 ACL 校验（VerifyPathACL/HardenPath），
 // 所以这里只在非 Windows 平台断言 Unix 权限位。
 
-func TestDatabase_Validate_PasswordFileTooPermissive(t *testing.T) {
+func TestLoadSecrets_PasswordFileTooPermissive(t *testing.T) {
 	permFile := filepath.Join(t.TempDir(), "loose-dbpwd")
 	require.NoError(t, os.WriteFile(permFile, []byte("secret"), 0644))
-	db := Database{
-		Type:            DatabaseTypePostgres,
-		PasswordFile:    permFile,
-		MaxOpenConns:    10,
-		ConnMaxLifetime: 0,
-		MaxIdleConns:    5,
-	}
-	err := db.Validate()
+	cfg := Config{Database: Database{PasswordFile: permFile}}
+	err := cfg.loadSecrets()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must not grant any permissions to group or others")
 }

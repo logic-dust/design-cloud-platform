@@ -110,8 +110,8 @@ func TestSetUserRole_SystemAdminValidPrefix(t *testing.T) {
 	}
 	svc := newTestService(t, repo)
 
-	// "systemadmin" alone is valid
-	_, err := svc.SetUserRole(context.Background(), "systemadmin", model.RoleSystemAdmin)
+	// Exact built-in username (no prefix) is valid
+	_, err := svc.SetUserRole(context.Background(), model.UsernameBuiltinSystemAdmin, model.RoleSystemAdmin)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestSetUserRole_UserNotFound(t *testing.T) {
 	}
 	svc := newTestService(t, repo)
 
-	_, err := svc.SetUserRole(context.Background(), "systemadmin", model.RoleSystemAdmin)
+	_, err := svc.SetUserRole(context.Background(), model.UsernameBuiltinSystemAdmin, model.RoleSystemAdmin)
 	if err == nil {
 		t.Fatal("expected error when user not found")
 	}
@@ -243,7 +243,7 @@ func TestSetUserRole_ClearsAdminScopes(t *testing.T) {
 	}
 	svc := newTestService(t, repo)
 
-	_, err := svc.SetUserRole(context.Background(), "systemadmin", model.RoleSystemAdmin)
+	_, err := svc.SetUserRole(context.Background(), model.UsernameBuiltinSystemAdmin, model.RoleSystemAdmin)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -286,5 +286,21 @@ func TestListRoleMembers_InvalidRole(t *testing.T) {
 	_, _, err := svc.ListRoleMembers(context.Background(), model.Role(99), 50, 0)
 	if !errors.Is(err, ErrInvalidRole) {
 		t.Fatalf("got %v, want ErrInvalidRole", err)
+	}
+}
+
+func TestSetUserRole_RejectsSuperAdminTarget(t *testing.T) {
+	t.Parallel()
+
+	repo := &mockUserRepo{
+		getByNameFn: func(context.Context, string) (model.User, error) {
+			return model.User{Username: model.UsernameBuiltinSuperAdmin, Role: model.RoleSuperAdmin}, nil
+		},
+	}
+	svc := newTestService(t, repo)
+
+	_, err := svc.SetUserRole(context.Background(), model.UsernameBuiltinSuperAdmin, model.RoleNormal)
+	if !errors.Is(err, ErrSuperAdminImmutable) {
+		t.Fatalf("err = %v, want ErrSuperAdminImmutable", err)
 	}
 }

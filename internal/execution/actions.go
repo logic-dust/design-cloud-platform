@@ -1,8 +1,10 @@
 package execution
 
+import "fmt"
+
 type ActionName string
 
-// PrivilegeMode 定义通过 Launcher 执行时的权限策略
+// PrivilegeMode 定义通过 PrivilegedExec 执行时的权限策略
 type PrivilegeMode string
 
 const (
@@ -18,14 +20,28 @@ const (
 	IOModelStreaming IOModel = "streaming" // 大文件流式传输 (Framed Header + Raw Bytes)
 )
 
-// LauncherSpec 描述 Action 委托给 Launcher 时的行为要求
-type LauncherSpec struct {
+// PrivilegedExecSpec 描述 Action 委托给 PrivilegedExec 时的行为要求
+type PrivilegedExecSpec struct {
 	// Privilege 指定权限切换策略（目标用户还是 root）
 	Privilege PrivilegeMode
 	// IOModel 指定交互模型（JSON 或 Streaming），默认 IOModelJSON
 	IOModel IOModel
-	// EnableSeccomp 指定是否启用 seccomp 系统调用沙箱，默认 true
-	EnableSeccomp bool
+	// DisableSeccomp 关闭 seccomp 系统调用白名单；零值表示加载白名单。
+	DisableSeccomp bool
+	// DisableNoNewPrivs 关闭 PR_SET_NO_NEW_PRIVS；零值表示设置 NNP。
+	// seccomp 依赖 NNP 才能在无 CAP_SYS_ADMIN 时加载，因此关闭 NNP 必须同时关闭 seccomp。
+	DisableNoNewPrivs bool
+}
+
+// Validate 检查 PrivilegedExecSpec 的保护开关组合是否自洽。
+func (s *PrivilegedExecSpec) Validate() error {
+	if s == nil {
+		return nil
+	}
+	if s.DisableNoNewPrivs && !s.DisableSeccomp {
+		return fmt.Errorf("PrivilegedExec spec: DisableNoNewPrivs requires DisableSeccomp")
+	}
+	return nil
 }
 
 // ActionSpec 定义单个受控 Action 的完整规格
@@ -34,18 +50,18 @@ type ActionSpec struct {
 	// NewPayload returns a zero-value pointer to the expected payload type for this action.
 	// Used by GetPayload to validate ActionName ↔ Payload type consistency at runtime.
 	NewPayload func() any
-	// Launcher 为 nil 时表示 Agent 内部直接执行 (Direct)；非 nil 表示委托给 Launcher 执行
-	Launcher *LauncherSpec
+	// PrivilegedExec 为 nil 时表示 Agent 内部直接执行 (Direct)；非 nil 表示委托给 PrivilegedExec 执行
+	PrivilegedExec *PrivilegedExecSpec
 }
 
-// IsDirect 返回该 Action 是否由 Agent 内部直接执行（不经过 Launcher）
+// IsDirect 返回该 Action 是否由 Agent 内部直接执行（不经过 DcExec）
 func (s ActionSpec) IsDirect() bool {
-	return s.Launcher == nil
+	return s.PrivilegedExec == nil
 }
 
 // IsStream 返回该 Action 是否使用流式 I/O 协议
 func (s ActionSpec) IsStream() bool {
-	return s.Launcher != nil && s.Launcher.IOModel == IOModelStreaming
+	return s.PrivilegedExec != nil && s.PrivilegedExec.IOModel == IOModelStreaming
 }
 
 // --- Action Definitions (Constants) ---
@@ -71,20 +87,21 @@ const (
 
 	// --- File Operations
 
-	ActionFileList        ActionName = "FILE_LIST"
-	ActionFileRead        ActionName = "FILE_READ"
-	ActionFileDelete      ActionName = "FILE_DELETE"
-	ActionFileMove        ActionName = "FILE_MOVE"
-	ActionFileRename      ActionName = "FILE_RENAME"
-	ActionFileMkdir       ActionName = "FILE_MKDIR"
-	ActionFileMkdirAll    ActionName = "FILE_MKDIR_ALL"
-	ActionFileCheck       ActionName = "FILE_CHECK"
-	ActionFileWriteCheck  ActionName = "FILE_WRITE_CHECK"
-	ActionTrashMove       ActionName = "TRASH_MOVE"
-	ActionTrashDelete     ActionName = "TRASH_DELETE"
-	ActionTrashDeleteMany ActionName = "TRASH_DELETE_MANY"
-	ActionTrashEmpty      ActionName = "TRASH_EMPTY"
-	ActionTrashList       ActionName = "TRASH_LIST"
+	ActionFileList         ActionName = "FILE_LIST"
+	ActionFileRead         ActionName = "FILE_READ"
+	ActionFileDelete       ActionName = "FILE_DELETE"
+	ActionFileMove         ActionName = "FILE_MOVE"
+	ActionFileRename       ActionName = "FILE_RENAME"
+	ActionFileMkdir        ActionName = "FILE_MKDIR"
+	ActionFileMkdirAll     ActionName = "FILE_MKDIR_ALL"
+	ActionFileCheck        ActionName = "FILE_CHECK"
+	ActionFileWriteCheck   ActionName = "FILE_WRITE_CHECK"
+	ActionTrashMove        ActionName = "TRASH_MOVE"
+	ActionTrashDelete      ActionName = "TRASH_DELETE"
+	ActionTrashDeleteMany  ActionName = "TRASH_DELETE_MANY"
+	ActionTrashRestoreMany ActionName = "TRASH_RESTORE_MANY"
+	ActionTrashEmpty       ActionName = "TRASH_EMPTY"
+	ActionTrashList        ActionName = "TRASH_LIST"
 
 	// ActionFileUpload Large file I/O — bypass the 1 MB JSON-envelope limit via a newline-delimited
 	// stdin protocol: [compact JSON ExecuteInput]\n followed by raw file bytes.
@@ -99,15 +116,27 @@ const (
 
 	// --- Connection Operations
 
-	// ActionConnectionCheck 检查连接在目标节点上的存活状态。
-	// 注意：当前底层实现仅针对 VNC 进程（Xvnc/Xtigervnc）通过 /proc 进行进程与 UID 校验；
-	// TODO: 后续协议演进时，需扩展支持 RDP/SSH 等其他协议的探活机制。
+	// ActionConnectionCheck 检查受管 VNC/XRDP 座位在目标节点上的存活状态。
+	// 底层通过 /proc 校验 Xvnc/Xtigervnc/Xorg(xrdp) 进程与 UID；
+	// RDP/SSH 拨号实例不经由本 Action 探活（会话收尾走 SESSION_CONTROL / Stop）。
 	ActionConnectionCheck  ActionName = "CONNECTION_CHECK"
 	ActionVNCGenerateOTP   ActionName = "VNC_GENERATE_OTP"   // Generate a TurboVNC one-time password for a running VNC session
 	ActionVNCControl       ActionName = "VNC_CONTROL"        // Start or stop a VNC server via vncserver commands
 	ActionVNCCgroupControl ActionName = "VNC_CGROUP_CONTROL" // Start or stop a VNC server with systemd-run Cgroup slice isolation
+	ActionXRDPControl      ActionName = "XRDP_CONTROL"       // Stop an XRDP user X seat (loginctl / Xorg kill); never touches xrdp daemon
+	ActionSessionControl   ActionName = "SESSION_CONTROL"    // Stop a user login session (SSH on Linux / RDP on Windows); never stops system daemons
 )
 
 // Actions holds all registered action specifications for the current platform.
 // Platform-specific actions are registered in init() within actions_<platform>.go.
 var Actions = make(map[ActionName]ActionSpec)
+
+// registerActions 校验并登记平台 action；PrivilegedExecSpec 不自洽时 panic，使配置错误在启动时暴露。
+func registerActions(specs map[ActionName]ActionSpec) {
+	for name, spec := range specs {
+		if err := spec.PrivilegedExec.Validate(); err != nil {
+			panic(fmt.Sprintf("execution: action %s: %v", name, err))
+		}
+		Actions[name] = spec
+	}
+}

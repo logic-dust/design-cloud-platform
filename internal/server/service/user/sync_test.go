@@ -2,14 +2,15 @@ package user
 
 import (
 	"context"
-	"encoding/json"
+	json "design-cloud-engine/internal/infra/jsoncodec"
 	"log/slog"
 	"testing"
 	"time"
 
 	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract/schema"
+	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/settings/schema"
 	userprovider "design-cloud-engine/internal/server/service/user/provider"
 
 	"github.com/stretchr/testify/assert"
@@ -24,7 +25,7 @@ func TestSyncUsers_FreezeAndRestore(t *testing.T) {
 	core.provider = mockProv
 	core.leaseRepo = repos.TaskLease
 	core.cfg = Config{AuthMode: config.UserAuthModeLDAP}
-	core.settingsSvc = settingsSvc
+	core.authSettings = settingsSvc
 
 	ctx := context.Background()
 
@@ -83,7 +84,7 @@ func TestSyncUsers_AbortOnEmptySystemUsers(t *testing.T) {
 	core.provider = mockProv
 	core.leaseRepo = repos.TaskLease
 	core.cfg = Config{AuthMode: config.UserAuthModeLDAP}
-	core.settingsSvc = settingsSvc
+	core.authSettings = settingsSvc
 
 	ctx := context.Background()
 
@@ -106,6 +107,51 @@ func TestSyncUsers_AbortOnEmptySystemUsers(t *testing.T) {
 	assert.Equal(t, model.UserActive, dbUser1.Status)
 }
 
+func TestSyncUsers_BumpsIdentity(t *testing.T) {
+	t.Parallel()
+	core, _, _, _ := setupTestCore(t)
+	ctx := context.Background()
+
+	core.provider = &mockProvider{
+		listUsersFunc: func(context.Context) ([]userprovider.SystemUser, error) {
+			return []userprovider.SystemUser{{Username: "u", Uid: "1000", Gid: "2000"}}, nil
+		},
+	}
+	core.idMappingCache.userCache.SetWithTTL(1000, IDMapping{Name: "old", Found: true}, time.Hour)
+
+	before, err := core.cacheVersion.GetAll(ctx)
+	require.NoError(t, err)
+
+	core.SyncUsers(ctx, slog.Default())
+
+	after, err := core.cacheVersion.GetAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before[db.CacheVersionTopicIdentity]+1, after[db.CacheVersionTopicIdentity])
+	_, ok := core.idMappingCache.userCache.GetIfPresent(1000)
+	require.False(t, ok, "completed sync invalidates listed uid locally")
+}
+
+func TestSyncUsers_AbortDoesNotBumpIdentity(t *testing.T) {
+	t.Parallel()
+	core, _, _, _ := setupTestCore(t)
+	ctx := context.Background()
+
+	core.provider = &mockProvider{
+		listUsersFunc: func(context.Context) ([]userprovider.SystemUser, error) {
+			return nil, nil
+		},
+	}
+
+	before, err := core.cacheVersion.GetAll(ctx)
+	require.NoError(t, err)
+
+	core.SyncUsers(ctx, slog.Default())
+
+	after, err := core.cacheVersion.GetAll(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before[db.CacheVersionTopicIdentity], after[db.CacheVersionTopicIdentity])
+}
+
 func TestSyncInterval(t *testing.T) {
 	t.Parallel()
 	core, _, settingsSvc, _ := setupTestCore(t)
@@ -115,10 +161,10 @@ func TestSyncInterval(t *testing.T) {
 	// 1. Set interval to 300 seconds
 	authSettings := schema.AuthSettings{
 		SessionTTL:                86400,
-		MaxLoginSessionsPerUser:   3,
+		MaxSessionsPerUser:        3,
 		SessionCleanupInterval:    600,
-		MaxUserLoginAttempts:      5,
-		MaxIPLoginAttempts:        20,
+		MaxUserLoginAttempts:      7,
+		MaxIPLoginAttempts:        15,
 		UserBanDuration:           300,
 		IPBanDuration:             86400,
 		UserSyncInterval:          300,
@@ -148,4 +194,117 @@ func TestSyncInterval(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, enabled)
 	assert.Equal(t, 0*time.Second, interval)
+}
+
+func TestSyncUsers_PasswordExpiredSyncAndRestore(t *testing.T) {
+	t.Parallel()
+	core, repos, settingsSvc, _ := setupTestCore(t)
+	ctx := context.Background()
+
+	future := time.Now().Add(24 * time.Hour)
+	past := time.Now().Add(-24 * time.Hour)
+
+	createWithStatus := func(name string, st model.UserStatusCode) {
+		u := model.User{Username: name, Status: st, Type: model.UserTypeSystem}
+		require.NoError(t, repos.User.Create(ctx, &u))
+		require.NoError(t, repos.User.ChangeStatus(ctx, name, st))
+	}
+
+	createWithStatus("ipa-renewed", model.UserPasswordExpired)
+	createWithStatus("local-reset", model.UserPasswordExpired)
+	createWithStatus("newly-expired", model.UserActive)
+	createWithStatus("portal-disabled", model.UserDisabled)
+
+	core.provider = &mockProvider{
+		listUsersFunc: func(context.Context) ([]userprovider.SystemUser, error) {
+			return []userprovider.SystemUser{
+				{Username: "ipa-renewed", Status: "active", PasswordExpiresAt: &future},
+				{Username: "local-reset", Status: "active", PasswordExpiresAt: nil},
+				{Username: "newly-expired", Status: "passwordExpired", PasswordExpiresAt: &past},
+				{Username: "portal-disabled", Status: "active", PasswordExpiresAt: &future},
+			}, nil
+		},
+	}
+	core.leaseRepo = repos.TaskLease
+	core.cfg = Config{AuthMode: config.UserAuthModeLDAP}
+	core.authSettings = settingsSvc
+
+	core.SyncUsers(ctx, slog.Default())
+
+	u1, err := repos.User.GetByName(ctx, "ipa-renewed")
+	require.NoError(t, err)
+	assert.Equal(t, model.UserActive, u1.Status)
+
+	u2, err := repos.User.GetByName(ctx, "local-reset")
+	require.NoError(t, err)
+	assert.Equal(t, model.UserPasswordExpired, u2.Status)
+
+	u3, err := repos.User.GetByName(ctx, "newly-expired")
+	require.NoError(t, err)
+	assert.Equal(t, model.UserPasswordExpired, u3.Status)
+
+	u4, err := repos.User.GetByName(ctx, "portal-disabled")
+	require.NoError(t, err)
+	assert.Equal(t, model.UserDisabled, u4.Status)
+}
+
+func TestGet_ReconcilesSystemUserStatusWithDB(t *testing.T) {
+	t.Parallel()
+	core, repos, _, _ := setupTestCore(t)
+	ctx := context.Background()
+
+	future := time.Now().Add(24 * time.Hour)
+	past := time.Now().Add(-24 * time.Hour)
+
+	createWithStatus := func(name string, st model.UserStatusCode) {
+		u := model.User{Username: name, Status: st, Type: model.UserTypeSystem}
+		require.NoError(t, repos.User.Create(ctx, &u))
+		require.NoError(t, repos.User.ChangeStatus(ctx, name, st))
+	}
+
+	createWithStatus("ipa-renewed", model.UserPasswordExpired)
+	createWithStatus("local-reset", model.UserPasswordExpired)
+	createWithStatus("newly-expired", model.UserActive)
+	createWithStatus("portal-disabled", model.UserDisabled)
+
+	core.provider = &mockProvider{
+		getUserFunc: func(_ context.Context, username string) (*userprovider.SystemUser, error) {
+			switch username {
+			case "ipa-renewed":
+				return &userprovider.SystemUser{Username: username, Status: "active", PasswordExpiresAt: &future}, nil
+			case "local-reset":
+				return &userprovider.SystemUser{Username: username, Status: "active", PasswordExpiresAt: nil}, nil
+			case "newly-expired":
+				return &userprovider.SystemUser{Username: username, Status: "passwordExpired", PasswordExpiresAt: &past}, nil
+			case "portal-disabled":
+				return &userprovider.SystemUser{Username: username, Status: "active", PasswordExpiresAt: &future}, nil
+			default:
+				return nil, userprovider.ErrUserNotFound
+			}
+		},
+	}
+
+	su1, err := core.Get(ctx, "ipa-renewed")
+	require.NoError(t, err)
+	assert.Equal(t, "active", su1.Status)
+	db1, _ := repos.User.GetByName(ctx, "ipa-renewed")
+	assert.Equal(t, model.UserActive, db1.Status)
+
+	su2, err := core.Get(ctx, "local-reset")
+	require.NoError(t, err)
+	assert.Equal(t, "passwordExpired", su2.Status)
+	db2, _ := repos.User.GetByName(ctx, "local-reset")
+	assert.Equal(t, model.UserPasswordExpired, db2.Status)
+
+	su3, err := core.Get(ctx, "newly-expired")
+	require.NoError(t, err)
+	assert.Equal(t, "passwordExpired", su3.Status)
+	db3, _ := repos.User.GetByName(ctx, "newly-expired")
+	assert.Equal(t, model.UserPasswordExpired, db3.Status)
+
+	su4, err := core.Get(ctx, "portal-disabled")
+	require.NoError(t, err)
+	assert.Equal(t, "disabled", su4.Status)
+	db4, _ := repos.User.GetByName(ctx, "portal-disabled")
+	assert.Equal(t, model.UserDisabled, db4.Status)
 }

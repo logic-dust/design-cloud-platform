@@ -3,14 +3,13 @@ package api
 import (
 	"context"
 	"net/http"
-	"strconv"
 	"time"
 
-	"design-cloud-engine/internal/common/format"
 	"design-cloud-engine/internal/contract"
+	"design-cloud-engine/internal/infra/format"
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/portal/httputil"
-	"design-cloud-engine/internal/server/service"
+	storagesvc "design-cloud-engine/internal/server/service/storage"
 
 	"github.com/labstack/echo/v5"
 )
@@ -26,8 +25,8 @@ type storageHandler struct {
 	settings settingsService
 }
 
-func newStorageHandler(svc *service.Container) *storageHandler {
-	return &storageHandler{storage: svc.Storage, settings: svc.Settings}
+func newStorageHandler(storageSvc storageService, settingsSvc settingsService) *storageHandler {
+	return &storageHandler{storage: storageSvc, settings: settingsSvc}
 }
 
 // route: /api/admin/system/storage
@@ -55,7 +54,7 @@ func (h *storageHandler) getSharedStorageSnapshots(c *echo.Context) error {
 	}
 
 	windowSeconds := 7 * 24 * 60 * 60
-	if dashSettings, err := h.settings.GetDashboardSettings(c.Request().Context()); err == nil && dashSettings.StorageQueryWindow > 0 {
+	if dashSettings, err := h.settings.GetOverviewSettings(c.Request().Context()); err == nil && dashSettings.StorageQueryWindow > 0 {
 		windowSeconds = dashSettings.StorageQueryWindow
 	}
 
@@ -86,22 +85,18 @@ func (h *storageHandler) getSharedStorageSnapshots(c *echo.Context) error {
 		result = append(result, snap)
 	}
 
-	return c.JSON(http.StatusOK, httputil.Response{Data: result})
+	return httputil.RespondOK(c, result)
 }
 
 func (h *storageHandler) getSharedStorageHistory(c *echo.Context) error {
 	storageID := c.Param("id")
 	if storageID == "" {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "id is required"})
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, "id is required")
 	}
 
-	daysStr := c.QueryParam("days")
-	days := 7
-	if daysStr != "" {
-		var err error
-		if days, err = strconv.Atoi(daysStr); err != nil || days <= 0 {
-			return c.JSON(http.StatusBadRequest, httputil.Response{Message: "invalid days parameter"})
-		}
+	days, err := httputil.ParseQueryIntInRange(c, "days", storagesvc.DefaultStorageHistoryDays, 1, storagesvc.MaxStorageHistoryDays)
+	if err != nil {
+		return httputil.RespondError(c, err)
 	}
 	to := time.Now()
 	from := to.AddDate(0, 0, -days)
@@ -131,7 +126,7 @@ func (h *storageHandler) getSharedStorageHistory(c *echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, httputil.Response{Data: result})
+	return httputil.RespondOK(c, result)
 }
 
 func (h *storageHandler) refreshStorage(c *echo.Context) error {

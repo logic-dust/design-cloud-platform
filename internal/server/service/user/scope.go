@@ -2,7 +2,7 @@ package user
 
 import (
 	"fmt"
-	"strings"
+	"slices"
 
 	"design-cloud-engine/internal/model"
 )
@@ -24,77 +24,77 @@ type ScopeMeta struct {
 // validation/parse functions is user.Service.SetScopes/SetScopesByNames, and
 // the schema/name functions are surfaced to the API via the user service.
 
-const (
-	scNameSysAdmin    = "systemadmin"
-	scNameNode        = "node"
-	scNameConnections = "connections"
-	scNameScheduler   = "scheduler"
-	scNameApps        = "apps"
-	scNameLicenses    = "licenses"
-	scNameFiles       = "files"
-	scNameSetting     = "setting"
-	scNameTickets     = "tickets"
-	scNameUsers       = "users"
-	scNameSessions    = "sessions"
-	scNameBans        = "bans"
-	scNameStorage     = "storage"
-	scNameStatus      = "status"
-)
+// scopeNameSysAdmin is the catalog name that maps to the ScopeAll sentinel.
+const scopeNameSysAdmin = "systemadmin"
 
-var scopeName = map[model.AdminScope]string{
-	model.ScopeAll:         scNameSysAdmin,
-	model.ScopeNodes:       scNameNode,
-	model.ScopeConnections: scNameConnections,
-	model.ScopeSchedulers:  scNameScheduler,
-	model.ScopeApps:        scNameApps,
-	model.ScopeLicenses:    scNameLicenses,
-	model.ScopeFiles:       scNameFiles,
-	model.ScopeSettings:    scNameSetting,
-	model.ScopeTickets:     scNameTickets,
-	model.ScopeUsers:       scNameUsers,
-	model.ScopeSessions:    scNameSessions,
-	model.ScopeBans:        scNameBans,
-	model.ScopeStorages:    scNameStorage,
-	model.ScopeStatuses:    scNameStatus,
+// scopeDef is one row of the canonical scope catalog.
+type scopeDef struct {
+	name  string
+	scope model.AdminScope
+	label string
+	desc  string
 }
 
-var scFromName = map[string]model.AdminScope{
-	scNameSysAdmin:    model.ScopeAll,
-	scNameNode:        model.ScopeNodes,
-	scNameConnections: model.ScopeConnections,
-	scNameScheduler:   model.ScopeSchedulers,
-	scNameApps:        model.ScopeApps,
-	scNameLicenses:    model.ScopeLicenses,
-	scNameFiles:       model.ScopeFiles,
-	scNameSetting:     model.ScopeSettings,
-	scNameTickets:     model.ScopeTickets,
-	scNameUsers:       model.ScopeUsers,
-	scNameSessions:    model.ScopeSessions,
-	scNameBans:        model.ScopeBans,
-	scNameStorage:     model.ScopeStorages,
-	scNameStatus:      model.ScopeStatuses,
+// scopeCatalog is the single source of truth for delegatable admin scopes:
+// AllowedScopes, name parsing and the API schema are all derived from it.
+// Scope keys use singular nouns so they align with settings domain ids
+// (schema.Domain) and admin console module ids.
+// Adding a scope = add one row here, then wire the route middleware, the
+// parent-chain scope list, BuildAdminConsoleModules and the docs.
+var scopeCatalog = []scopeDef{
+	{"node", model.ScopeNodes, "节点管理", "节点注册/证书/token"},
+	{"connection", model.ScopeConnections, "连接管理", "桌面/VNC 会话管理"},
+	{"scheduler", model.ScopeSchedulers, "作业调度", "作业提交/控制/修改"},
+	{"app", model.ScopeApps, "应用管理", "应用目录管理"},
+	{"license", model.ScopeLicenses, "许可证管理", "许可证的创建与维护"},
+	{"file", model.ScopeFiles, "文件审核", "文件下载申请审核"},
+	{"settings", model.ScopeSettings, "系统配置", "系统配置管理"},
+	{"ticket", model.ScopeTickets, "工单管理", "工单/项目管理"},
+	{"user", model.ScopeUsers, "用户管理", "门户账号、目录组与 ID 映射缓存（不含角色与 Scope 授权）"},
+	{"session", model.ScopeSessions, "会话管理", "强制登出/会话清理"},
+	{"ban", model.ScopeBans, "封禁管理", "封禁记录查看/解除"},
+	{"storage", model.ScopeStorages, "存储管理", "共享存储状态/快照查看"},
+	{"status", model.ScopeStatuses, "系统状态", "系统运行状态查看"},
+	{"desktop", model.ScopeDesktop, "桌面发布", "桌面客户端与插件发布管理"},
 }
 
-const AllowedScopes = model.AdminScopes(
-	model.ScopeNodes |
-		model.ScopeConnections |
-		model.ScopeSchedulers |
-		model.ScopeApps |
-		model.ScopeLicenses |
-		model.ScopeFiles |
-		model.ScopeSettings |
-		model.ScopeTickets |
-		model.ScopeUsers |
-		model.ScopeSessions |
-		model.ScopeBans |
-		model.ScopeStorages |
-		model.ScopeStatuses,
+var (
+	// AllowedScopes is the whitelist of granular bits, derived from scopeCatalog.
+	AllowedScopes = buildAllowedScopes()
+	scopeName     = buildScopeName()
+	scFromName    = buildScopeFromName()
 )
+
+func buildAllowedScopes() model.AdminScopes {
+	var allowed model.AdminScopes
+	for _, def := range scopeCatalog {
+		allowed.Set(def.scope)
+	}
+	return allowed
+}
+
+func buildScopeName() map[model.AdminScope]string {
+	m := make(map[model.AdminScope]string, len(scopeCatalog)+1)
+	m[model.ScopeAll] = scopeNameSysAdmin
+	for _, def := range scopeCatalog {
+		m[def.scope] = def.name
+	}
+	return m
+}
+
+func buildScopeFromName() map[string]model.AdminScope {
+	m := make(map[string]model.AdminScope, len(scopeCatalog)+1)
+	m[scopeNameSysAdmin] = model.ScopeAll
+	for _, def := range scopeCatalog {
+		m[def.name] = def.scope
+	}
+	return m
+}
 
 func ParseScopes(names []string) (model.AdminScopes, error) {
 	var scopes model.AdminScopes
 	for _, name := range names {
-		scope, ok := scFromName[strings.ToLower(name)]
+		scope, ok := scFromName[name]
 		if !ok {
 			return 0, fmt.Errorf("%w: %s", model.ErrInvalidScope, name)
 		}
@@ -109,9 +109,9 @@ func ScopeNames(scopes model.AdminScopes) []string {
 	}
 	// 全量子管理员：直接返回 "systemadmin"，避免因 Has 短接而展开所有粒化 scope
 	if scopes == model.AdminScopes(model.ScopeAll) {
-		return []string{scNameSysAdmin}
+		return []string{scopeNameSysAdmin}
 	}
-	var names []string
+	names := make([]string, 0, len(scopeName)-1)
 	for scope, name := range scopeName {
 		if scope == model.ScopeAll {
 			continue
@@ -120,6 +120,8 @@ func ScopeNames(scopes model.AdminScopes) []string {
 			names = append(names, name)
 		}
 	}
+	// Deterministic output: map iteration order would otherwise reshuffle API responses.
+	slices.Sort(names)
 	return names
 }
 
@@ -134,84 +136,21 @@ func validateScopes(scopes model.AdminScopes) error {
 }
 
 func GetScopeSchema() []ScopeMeta {
-	return []ScopeMeta{
-		{
-			Key:   scNameNode,
-			Value: uint64(model.ScopeNodes),
-			Name:  "节点管理",
-			Desc:  "节点注册/证书/token",
-		},
-		{
-			Key:   scNameConnections,
-			Value: uint64(model.ScopeConnections),
-			Name:  "连接管理",
-			Desc:  "桌面/VNC 会话管理",
-		},
-		{
-			Key:   scNameScheduler,
-			Value: uint64(model.ScopeSchedulers),
-			Name:  "作业调度",
-			Desc:  "作业提交/控制/修改",
-		},
-		{
-			Key:   scNameApps,
-			Value: uint64(model.ScopeApps),
-			Name:  "应用管理",
-			Desc:  "应用目录管理",
-		},
-		{
-			Key:   scNameLicenses,
-			Value: uint64(model.ScopeLicenses),
-			Name:  "许可证管理",
-			Desc:  "许可证的创建与维护",
-		},
-		{
-			Key:   scNameFiles,
-			Value: uint64(model.ScopeFiles),
-			Name:  "文件审核",
-			Desc:  "文件下载申请审核",
-		},
-		{
-			Key:   scNameSetting,
-			Value: uint64(model.ScopeSettings),
-			Name:  "系统配置",
-			Desc:  "系统配置管理",
-		},
-		{
-			Key:   scNameTickets,
-			Value: uint64(model.ScopeTickets),
-			Name:  "工单管理",
-			Desc:  "工单/项目管理",
-		},
-		{
-			Key:   scNameUsers,
-			Value: uint64(model.ScopeUsers),
-			Name:  "用户管理",
-			Desc:  "用户/角色/同步管理",
-		},
-		{
-			Key:   scNameSessions,
-			Value: uint64(model.ScopeSessions),
-			Name:  "会话管理",
-			Desc:  "强制登出/会话清理",
-		},
-		{
-			Key:   scNameBans,
-			Value: uint64(model.ScopeBans),
-			Name:  "封禁管理",
-			Desc:  "封禁记录查看/解除",
-		},
-		{
-			Key:   scNameStorage,
-			Value: uint64(model.ScopeStorages),
-			Name:  "存储管理",
-			Desc:  "共享存储状态/快照查看",
-		},
-		{
-			Key:   scNameStatus,
-			Value: uint64(model.ScopeStatuses),
-			Name:  "系统状态",
-			Desc:  "系统运行状态查看",
-		},
+	schema := make([]ScopeMeta, 0, len(scopeCatalog)+1)
+	// The full-delegation sentinel is grantable by name, so it must be discoverable here too.
+	schema = append(schema, ScopeMeta{
+		Key:   scopeNameSysAdmin,
+		Value: ^uint64(0),
+		Name:  "全量管理",
+		Desc:  "一次性授予全部管理域（不展开为粒化 scope）",
+	})
+	for _, def := range scopeCatalog {
+		schema = append(schema, ScopeMeta{
+			Key:   def.name,
+			Value: uint64(def.scope),
+			Name:  def.label,
+			Desc:  def.desc,
+		})
 	}
+	return schema
 }

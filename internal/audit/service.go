@@ -35,12 +35,12 @@ type Service struct {
 }
 
 func NewService(cfg Config) (*Service, error) {
-	primaryLogger, err := newLogger(cfg.PrimaryLogPath, 100, 10, cfg.NodeID)
+	primaryLogger, err := newLogger(cfg.PrimaryLogPath, cfg.NodeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create primary audit logger: %w", err)
 	}
 
-	securityLogger, err := newLogger(cfg.SecurityLogPath, 50, 20, cfg.NodeID)
+	securityLogger, err := newLogger(cfg.SecurityLogPath, cfg.NodeID)
 	if err != nil {
 		_ = primaryLogger.Close()
 		return nil, fmt.Errorf("failed to create security audit logger: %w", err)
@@ -164,7 +164,6 @@ type ExecutionRecordView struct {
 	ServerNode  string                `json:"serverNode"`
 	TargetNode  string                `json:"targetNode,omitempty"`
 	Status      model.ExecutionStatus `json:"status"`
-	Success     bool                  `json:"success"`
 	ExitCode    int                   `json:"exitCode"`
 	SystemError string                `json:"systemError,omitempty"`
 	FinishedAt  *time.Time            `json:"finishedAt,omitempty"`
@@ -185,7 +184,7 @@ var ErrExecutionRepoNotAttached = fmt.Errorf("execution repository is not attach
 // ListExecutions returns execution records for audit purposes. It returns
 // ErrExecutionRepoNotAttached when the service was constructed without an
 // attached execution repository (e.g. on the agent side).
-func (s *Service) ListExecutions(ctx context.Context, filter db.ExecutionListFilter) (*ExecutionListResult, error) {
+func (s *Service) ListExecutions(ctx context.Context, filter model.ExecutionListFilter) (*ExecutionListResult, error) {
 	s.mu.RLock()
 	repo := s.executions
 	s.mu.RUnlock()
@@ -193,11 +192,7 @@ func (s *Service) ListExecutions(ctx context.Context, filter db.ExecutionListFil
 		return nil, ErrExecutionRepoNotAttached
 	}
 
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 50
-	}
-	limit = min(limit, 500)
+	limit := db.ResolveListLimit(filter.Limit)
 	filter.Limit = limit
 
 	records, total, err := repo.List(ctx, filter)
@@ -219,7 +214,7 @@ func (s *Service) ListExecutions(ctx context.Context, filter db.ExecutionListFil
 
 // GetExecutionByExecutionID returns a single execution record by its
 // execution_id. Returns ErrExecutionRepoNotAttached when no repository is
-// attached. Returns the same wrapped common.ErrNotFound as the underlying repo.
+// attached. Returns the same wrapped contract.ErrNotFound as the underlying repo.
 func (s *Service) GetExecutionByExecutionID(ctx context.Context, executionID string) (*ExecutionRecordView, error) {
 	s.mu.RLock()
 	repo := s.executions
@@ -243,7 +238,6 @@ func toExecutionRecordView(record *model.ExecutionRecord) ExecutionRecordView {
 		ServerNode:  record.ServerNode,
 		TargetNode:  record.TargetNode,
 		Status:      record.Status,
-		Success:     record.Success,
 		ExitCode:    record.ExitCode,
 		SystemError: record.SystemError,
 		FinishedAt:  record.FinishedAt,

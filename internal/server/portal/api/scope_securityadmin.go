@@ -4,11 +4,11 @@ import (
 	"errors"
 	"net/http"
 
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/portal/httputil"
 	usersvc "design-cloud-engine/internal/server/service/user"
 
+	"design-cloud-engine/internal/contract"
 	"github.com/labstack/echo/v5"
 )
 
@@ -21,7 +21,7 @@ func (h *userHandler) adminScopesAPI(g *echo.Group) {
 
 func (h *userHandler) getScopeSchemas(c *echo.Context) error {
 	schemas := usersvc.GetScopeSchema()
-	return c.JSON(http.StatusOK, httputil.Response{Data: schemas})
+	return httputil.RespondOK(c, schemas)
 }
 
 type updateScopesRequest struct {
@@ -31,22 +31,22 @@ type updateScopesRequest struct {
 func (h *userHandler) updateScope(c *echo.Context) error {
 	username := c.Param("username")
 	if username == "" {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "username is required"})
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, "username is required")
 	}
 
 	var req updateScopesRequest
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
 	}
 	if req.Scopes == nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "scopes is required"})
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, "scopes is required")
 	}
 
 	if err := h.user.SetScopesByNames(c.Request().Context(), username, *req.Scopes); err != nil {
 		return scopeErrorResponse(c, err)
 	}
 
-	return c.JSON(http.StatusOK, httputil.Response{Message: "admin scope updated"})
+	return httputil.RespondNoContent(c)
 }
 
 func (h *userHandler) listAdminScopes(c *echo.Context) error {
@@ -67,16 +67,16 @@ func (h *userHandler) listAdminScopes(c *echo.Context) error {
 		result = []entry{}
 	}
 
-	return c.JSON(http.StatusOK, httputil.Response{Data: result})
+	return httputil.RespondOK(c, result)
 }
 
 func scopeErrorResponse(c *echo.Context, err error) error {
-	if errors.Is(err, common.ErrNotFound) {
-		return c.JSON(http.StatusNotFound, httputil.Response{Message: "user not found"})
+	if errors.Is(err, contract.ErrNotFound) {
+		return httputil.RespondHTTPError(c, http.StatusNotFound, "user not found")
 	}
 	if errors.Is(err, usersvc.ErrScopeRequiresNormalRole) ||
 		errors.Is(err, model.ErrInvalidScope) {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, err.Error())
 	}
 	return httputil.RespondError(c, err)
 }

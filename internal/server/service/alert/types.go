@@ -26,5 +26,6 @@ type Rule struct {
 	Below            bool          // true = metric < Threshold 时触发（用于 minFree 等下限指标）
 	Exceeding        *bool         // 显式超标标识（nil = 由 Eval 计算，非 nil = 调用方显式指定）
 	HysteresisMargin float64       // 迟滞裕度比率（0 = 使用 DefaultHysteresisMargin）
-	IsFreeSpace      bool          // true = 指标量纲为容量空间 (KB)，用于持续告警与恢复时对齐量纲
+	IsFreeSpace      bool          // true = 指标量纲为容量空间 (KiB)，用于持续告警与恢复时对齐量纲
+	Unit             string        // 指标单位符号（如 "%"、"KiB"），用于格式化告警消息
 }

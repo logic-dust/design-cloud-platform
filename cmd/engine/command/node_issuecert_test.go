@@ -44,7 +44,7 @@ func setupTestEnvironment(t *testing.T) (*Flags, string) {
 	}
 
 	configContent := fmt.Sprintf(`
-data_dir = %q
+state_dir = %q
 
 [database]
 type = "sqlite"
@@ -73,16 +73,16 @@ dir = %q
 func TestIssueCertCommand_Validation(t *testing.T) {
 	flags, _ := setupTestEnvironment(t)
 
-	t.Run("missing hostname fails", func(t *testing.T) {
+	t.Run("missing nodes fails", func(t *testing.T) {
 		err := runIssueCertCommand(flags, []string{})
-		if err == nil || !strings.Contains(err.Error(), "--hostname is required") {
-			t.Fatalf("expected --hostname error, got: %v", err)
+		if err == nil || !strings.Contains(err.Error(), "--nodes") {
+			t.Fatalf("expected --nodes error, got: %v", err)
 		}
 	})
 
 	t.Run("mutually exclusive out-dir and archive fails", func(t *testing.T) {
 		err := runIssueCertCommand(flags, []string{
-			"--hostname", "agent-x",
+			"--nodes", "agent-x",
 			"--out-dir", "/tmp/out",
 			"--archive", "/tmp/out.tar.gz",
 		})
@@ -92,12 +92,77 @@ func TestIssueCertCommand_Validation(t *testing.T) {
 	})
 }
 
+func TestResolveTargetNodeIDs(t *testing.T) {
+	t.Parallel()
+	if _, err := resolveTargetNodeIDs(""); err == nil {
+		t.Fatal("expected error for empty --nodes")
+	}
+	ids, err := resolveTargetNodeIDs("cn01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != "cn01" {
+		t.Fatalf("single got %v", ids)
+	}
+	ids, err = resolveTargetNodeIDs("cn01,cn02")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != "cn01" || ids[1] != "cn02" {
+		t.Fatalf("got %v", ids)
+	}
+	ids, err = resolveTargetNodeIDs("cn[01-02]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != "cn01" || ids[1] != "cn02" {
+		t.Fatalf("pattern got %v", ids)
+	}
+}
+
+func TestIssueTokenCommand_SingleAndBatch(t *testing.T) {
+	flags, _ := setupTestEnvironment(t)
+
+	if err := runIssueTokenCommand(flags, []string{}); err == nil || !strings.Contains(err.Error(), "--nodes") {
+		t.Fatalf("expected --nodes error, got: %v", err)
+	}
+	if err := runIssueTokenCommand(flags, []string{"--nodes", "tok-single"}); err != nil {
+		t.Fatalf("single token: %v", err)
+	}
+	if err := runIssueTokenCommand(flags, []string{"--nodes", "tok-single,tok-batch-01,tok-batch-02"}); err != nil {
+		t.Fatalf("batch token (mix existing + new): %v", err)
+	}
+}
+
+func TestIssueCertCommand_NodesBatch(t *testing.T) {
+	flags, dir := setupTestEnvironment(t)
+	outDir := filepath.Join(dir, "batch_out")
+	err := runIssueCertCommand(flags, []string{
+		"--nodes", "batch-a,batch-b",
+		"--out-dir", outDir,
+	})
+	if err != nil {
+		t.Fatalf("batch issue: %v", err)
+	}
+	for _, n := range []string{"batch-a", "batch-b"} {
+		if _, err := os.Stat(filepath.Join(outDir, n, n+".crt")); err != nil {
+			t.Errorf("%s cert: %v", n, err)
+		}
+		if _, err := os.Stat(filepath.Join(outDir, n, n+".key")); err != nil {
+			t.Errorf("%s key: %v", n, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "ca.crt")); err != nil {
+		t.Errorf("ca: %v", err)
+	}
+}
+
 func TestIssueCertCommand_OutDir(t *testing.T) {
 	flags, dir := setupTestEnvironment(t)
 	outDir := filepath.Join(dir, "export_agent01")
 
 	err := runIssueCertCommand(flags, []string{
-		"--hostname", "cli-agent-01",
+		"--nodes", "cli-agent-01",
 		"--out-dir", outDir,
 	})
 	if err != nil {
@@ -124,7 +189,7 @@ func TestIssueCertCommand_Archive(t *testing.T) {
 	archivePath := filepath.Join(dir, "agent02.tar.gz")
 
 	err := runIssueCertCommand(flags, []string{
-		"--hostname", "cli-agent-02",
+		"--nodes", "cli-agent-02",
 		"--archive", archivePath,
 	})
 	if err != nil {

@@ -1,13 +1,11 @@
 package api
 
 import (
-	"cmp"
 	"errors"
 	"net/http"
-	"slices"
 
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/server/portal/httputil"
-	"design-cloud-engine/internal/server/service"
 	"design-cloud-engine/internal/server/service/scheduler"
 
 	"github.com/labstack/echo/v5"
@@ -17,47 +15,38 @@ type schedulerHandler struct {
 	scheduler *scheduler.Service
 }
 
-func newSchedulerHandler(svc *service.Container) *schedulerHandler {
-	return &schedulerHandler{scheduler: svc.Scheduler}
+func newSchedulerHandler(schedulerSvc *scheduler.Service) *schedulerHandler {
+	return &schedulerHandler{scheduler: schedulerSvc}
 }
 
 // schedulerJobsBasePath 是 portal 调度作业路由前缀。
 // appHandler 在启动应用时用它构造作业状态回跳 URL（Location header）。
 const schedulerJobsBasePath = "/api/scheduler/jobs/"
 
-// parseJobOp 将 URL 尾部的动作动词映射为调度器操作码（白名单）。
-// 无效动词返回 ("", false)，由 handler 拒绝为 400。
-func parseJobOp(s string) (scheduler.JobOp, bool) {
-	switch s {
-	case "kill":
-		return scheduler.JobOpKill, true
-	case "suspend":
-		return scheduler.JobOpSuspend, true
-	case "resume":
-		return scheduler.JobOpResume, true
-	case "top":
-		return scheduler.JobOpToTop, true
-	case "bottom":
-		return scheduler.JobOpToBottom, true
-	case "switch":
-		return scheduler.JobOpSwitch, true
-	default:
-		return "", false
-	}
-}
-
 // route: /api/scheduler
 func (h *schedulerHandler) schedulerAPI(g *echo.Group) {
-	// --- hosts
+	// --- hosts & queues (read-only scheduler metadata)
 	g.GET("/hosts", h.listHosts)
+	g.GET("/queues", h.listQueues)
+	g.GET("/meta", h.getMeta)
 
 	// --- jobs
 	jobsGroup := g.Group("/jobs")
 	jobsGroup.GET("", h.listJobs)
+	jobsGroup.GET("/me", h.listJobsMe)
 	jobsGroup.GET("/:id", h.getJob)
 	jobsGroup.POST("/:id/:op", h.updateJobStatus)
 	jobsGroup.PATCH("/:id", h.modifyJob)
 	jobsGroup.POST("/batch-control", h.batchUpdateJobStatus)
+}
+
+// --- 获取当前 HPC 调度器元数据（推荐列、核心字段映射、状态动作集合）；随 settings.scheduler.type 变化
+func (h *schedulerHandler) getMeta(c *echo.Context) error {
+	meta, err := h.scheduler.Meta(c.Request().Context())
+	if err != nil {
+		return httputil.RespondError(c, err)
+	}
+	return httputil.RespondOK(c, meta)
 }
 
 // --- 获取 HPC 调度集群计算主机列表与状态汇总
@@ -66,53 +55,69 @@ func (h *schedulerHandler) listHosts(c *echo.Context) error {
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: hostsInfo})
+	return httputil.RespondOK(c, hostsInfo)
 }
 
-// --- 获取作业列表，?user=xxx 可查指定用户，不传则默认当前用户。
-// 跨用户查询是有意开放的（与集群侧 bjobs -u <user> 的能力一致，Portal 不额外
-// 收窄），因此此处不做"仅限自身"的限制，勿按越权修改。
-// 注意：该 user 会直接参与 jobCache 的 key，键空间由请求决定，故缓存设有条目硬顶。
-func (h *schedulerHandler) listJobs(c *echo.Context) error {
-	var query scheduler.JobListQuery
-	if err := c.Bind(&query); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
-	}
-	query.User = cmp.Or(query.User, httputil.CurrentUsername(c))
-	jobsInfo, err := h.scheduler.ListJobs(c.Request().Context(), query)
+// --- 获取 HPC 调度队列（分区）作业数汇总
+func (h *schedulerHandler) listQueues(c *echo.Context) error {
+	queuesInfo, err := h.scheduler.ListQueues(c.Request().Context())
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: jobsInfo})
+	return httputil.RespondOK(c, queuesInfo)
+}
+
+// --- GET /jobs：全集群、所有用户的作业列表（任何已登录用户可见；与调度器原生可见性一致）。
+func (h *schedulerHandler) listJobs(c *echo.Context) error {
+	jobsInfo, err := h.scheduler.ListJobs(c.Request().Context(), scheduler.JobListQuery{})
+	if err != nil {
+		return httputil.RespondError(c, err)
+	}
+	return httputil.RespondOK(c, jobsInfo)
+}
+
+// --- GET /jobs/me：当前登录用户的作业（全集群列表见 GET /jobs；管理员接口可按 user/queue/node 过滤）。
+func (h *schedulerHandler) listJobsMe(c *echo.Context) error {
+	username := httputil.CurrentUsername(c)
+	if username == "" {
+		return httputil.RespondError(c, contract.NewUnauthorizedError("session required"))
+	}
+	jobsInfo, err := h.scheduler.ListJobs(c.Request().Context(), scheduler.JobListQuery{User: username})
+	if err != nil {
+		return httputil.RespondError(c, err)
+	}
+	return httputil.RespondOK(c, jobsInfo)
 }
 
 // --- 根据任务ID获取任务详情
 func (h *schedulerHandler) getJob(c *echo.Context) error {
-	// Note: scheduler jobs use string IDs (e.g. UUIDs or numeric strings),
-	// but currently the service uses string for jobID.
-	// If it was uint, we would use parseUintParam.
+	// jobID：调度器作业号（正整数），由 scheduler.ValidateJobID 统一校验。
 	jobInfo, err := h.scheduler.GetJob(c.Request().Context(), c.Param("id"))
 	if err != nil {
-		return c.JSON(http.StatusNotFound, httputil.Response{Message: "job not found"})
+		return respondJobQueryError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: jobInfo})
+	return httputil.RespondOK(c, jobInfo)
 }
 
-// --- 更新单个任务状态（POST /jobs/:id/:op，op 为 kill/suspend/resume/top/bottom/switch）
+func respondJobQueryError(c *echo.Context, err error) error {
+	if errors.Is(err, scheduler.ErrJobNotFound) {
+		return httputil.RespondHTTPError(c, http.StatusNotFound, scheduler.ErrJobNotFound.Error())
+	}
+	return httputil.RespondError(c, err)
+}
+
+// --- 更新单个任务状态（POST /jobs/:id/:op，op 为 kill/suspend/resume/toTop/toBottom/switch）
 func (h *schedulerHandler) updateJobStatus(c *echo.Context) error {
 	jobID := c.Param("id")
-	if jobID == "0" {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "operation on job ID 0 is not allowed"})
-	}
-	op, ok := parseJobOp(c.Param("op"))
+	op, ok := scheduler.ParseJobOp(c.Param("op"))
 	if !ok {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "unsupported job operation: " + c.Param("op")})
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, "unsupported job operation: "+c.Param("op"))
 	}
 	var req struct {
 		TargetQueue string `json:"targetQueue,omitempty"`
 	}
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
 	}
 
 	failures, err := h.scheduler.ControlJob(c.Request().Context(), scheduler.JobControlRequest{
@@ -123,12 +128,12 @@ func (h *schedulerHandler) updateJobStatus(c *echo.Context) error {
 	})
 	if err != nil {
 		if errors.Is(err, scheduler.ErrUnsupportedJobControlOperation) {
-			return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+			return httputil.RespondHTTPError(c, http.StatusBadRequest, err.Error())
 		}
 		return httputil.RespondError(c, err)
 	}
 	if len(failures) > 0 {
-		return c.JSON(http.StatusConflict, httputil.Response{Message: failures[jobID]})
+		return httputil.RespondHTTPError(c, http.StatusConflict, failures[jobID])
 	}
 	return c.NoContent(http.StatusAccepted)
 }
@@ -136,14 +141,11 @@ func (h *schedulerHandler) updateJobStatus(c *echo.Context) error {
 // --- 修改单个作业属性（PATCH /jobs/:id，仅 name；队列切换走 :op=switch）
 func (h *schedulerHandler) modifyJob(c *echo.Context) error {
 	jobID := c.Param("id")
-	if jobID == "0" {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "operation on job ID 0 is not allowed"})
-	}
 	var req struct {
 		Name *string `json:"name,omitempty"`
 	}
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
 	}
 	if err := h.scheduler.ModifyJob(c.Request().Context(), jobID, scheduler.JobModifyArgs{Name: req.Name}, httputil.CurrentUsername(c)); err != nil {
 		return httputil.RespondError(c, err)
@@ -165,14 +167,11 @@ type batchJobControlFailure struct {
 // --- 批量更新任务状态
 func (h *schedulerHandler) batchUpdateJobStatus(c *echo.Context) error {
 	var req batchJobControlRequest
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
 	}
 	if len(req.JobIDs) == 0 {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "jobIds is required"})
-	}
-	if slices.Contains(req.JobIDs, "0") {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "operation on job ID 0 is not allowed"})
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, "jobIds is required")
 	}
 	failures, err := h.scheduler.ControlJob(c.Request().Context(), scheduler.JobControlRequest{
 		JobIDs:      req.JobIDs,
@@ -182,19 +181,25 @@ func (h *schedulerHandler) batchUpdateJobStatus(c *echo.Context) error {
 	})
 	if err != nil {
 		if errors.Is(err, scheduler.ErrUnsupportedJobControlOperation) {
-			return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+			return httputil.RespondHTTPError(c, http.StatusBadRequest, err.Error())
 		}
 		return httputil.RespondError(c, err)
 	}
 	if len(failures) > 0 {
-		var batchFailures []batchJobControlFailure
-		for id, msg := range failures {
-			batchFailures = append(batchFailures, batchJobControlFailure{JobID: id, Message: msg})
-		}
-		return c.JSON(http.StatusConflict, httputil.Response{
-			Data:    map[string]any{"failures": batchFailures},
-			Message: "one or more jobs could not be updated",
-		})
+		return respondBatchJobFailures(c, failures)
 	}
 	return c.NoContent(http.StatusAccepted)
+}
+
+func respondBatchJobFailures(c *echo.Context, failures map[string]string) error {
+	batchFailures := make([]batchJobControlFailure, 0, len(failures))
+	for id, msg := range failures {
+		batchFailures = append(batchFailures, batchJobControlFailure{JobID: id, Message: msg})
+	}
+	return httputil.RespondErrorDetails(
+		c,
+		http.StatusConflict,
+		"one or more jobs could not be updated",
+		map[string]any{"failures": batchFailures},
+	)
 }

@@ -1,13 +1,12 @@
 package scheduler
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"slices"
 	"strings"
 
-	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/execution"
 )
 
@@ -27,37 +26,41 @@ const (
 	JobStatusUnknown   NormalizedJobStatus = "unknown"
 )
 
-// QueueStats captures job count stats for a queue/partition.
-type QueueStats struct {
-	Name      string `json:"name"`
-	Allocated int    `json:"allocated"` // 队列中分配/活跃的作业数
-	Running   int    `json:"running"`   // 运行中的作业数
-	Pending   int    `json:"pending"`   // 等待中的作业数
-	Suspended int    `json:"suspended"` // 暂停中的作业数
-	Completed int    `json:"completed"` // 完成的作业数
-	Failed    int    `json:"failed"`    // 失败的作业数
-}
-
-// HostStats captures statistics for an HPC compute host.
-type HostStats struct {
-	Name      string `json:"name"`
-	Status    string `json:"status"`    // 原始状态（如 LSF "ok"/"closed"/"unavail"，Slurm "idle"/"allocated"/"down"）
-	IsOnline  bool   `json:"isOnline"`  // 是否在线可用
-	MaxSlots  int    `json:"maxSlots"`  // 最大可用槽数/核心数
-	UsedSlots int    `json:"usedSlots"` // 已使用槽数/核心数
-	RunJobs   int    `json:"runJobs"`   // 运行中的作业数
-}
-
-// HostListResult contains the list of scheduler host statistics.
+// HostListResult contains native scheduler host records (same key style as jobs).
+// Total/Online are convenience counters derived from status; hosts themselves are not collapsed.
 type HostListResult struct {
-	Total  int         `json:"total"`
-	Online int         `json:"online"`
-	Hosts  []HostStats `json:"hosts"`
+	Total  int              `json:"total"`
+	Online int              `json:"online"`
+	Hosts  []map[string]any `json:"hosts"`
 }
 
-// QueueListResult contains the list of queue statistics.
+// QueueListResult contains native scheduler queue/partition records.
 type QueueListResult struct {
-	Queues []QueueStats `json:"queues"`
+	Queues []map[string]any `json:"queues"`
+}
+
+// SchedulerKeyMap 声明客户端从原生作业记录中提取核心字段时使用的键名。
+// 客户端应用 keys.user / keys.status 定位用户与状态列，不要假设固定列序或固定原生名。
+type SchedulerKeyMap struct {
+	ID         string `json:"id"`
+	User       string `json:"user"`
+	Status     string `json:"status"`
+	SubmitTime string `json:"submitTime"`
+}
+
+// SchedulerDisplayFields 按资源列出建议默认展示的原生列（有序）。
+type SchedulerDisplayFields struct {
+	Job   []string `json:"job"`
+	Host  []string `json:"host"`
+	Queue []string `json:"queue"`
+}
+
+// SchedulerMeta 描述当前调度器的推荐展示列、核心字段映射与各动作允许的原生状态集合。
+type SchedulerMeta struct {
+	Scheduler schema.JobScheduler    `json:"scheduler"`
+	Fields    SchedulerDisplayFields `json:"fields"`
+	Keys      SchedulerKeyMap        `json:"keys"` // 作业核心语义 → 原生键
+	Actions   map[JobOp][]string     `json:"actions"`
 }
 
 // Scheduler defines the scheduler-specific operations implemented by
@@ -65,11 +68,9 @@ type QueueListResult struct {
 type Scheduler interface {
 	// --- Metadata ---
 
-	// StatusKey returns the field name in a job map record that holds the raw status string.
-	// e.g. "STAT" for LSF, "job_state" for Slurm.
-	StatusKey() string
-	// JobFields returns the recommended display columns for UI.
-	JobFields() []string
+	// Meta returns the driver-declared metadata (Fields, Keys, Actions).
+	// Keys.Status is the native status field (LSF "STAT", Slurm "job_state").
+	Meta() SchedulerMeta
 
 	// --- Status normalization ---
 
@@ -78,8 +79,9 @@ type Scheduler interface {
 
 	// --- Job, Host & Queue lifecycle ---
 
+	// ExecuteListJobs lists jobs. An empty query.User means every user.
 	ExecuteListJobs(ctx context.Context, exec execution.Executor, query JobListQuery) (JobListResult, error)
-	ExecuteListQueues(ctx context.Context, exec execution.Executor, jobs []map[string]any) (QueueListResult, error)
+	ExecuteListQueues(ctx context.Context, exec execution.Executor) (QueueListResult, error)
 	ExecuteListHosts(ctx context.Context, exec execution.Executor) (HostListResult, error)
 	ExecuteGetJob(ctx context.Context, exec execution.Executor, jobID string) (map[string]any, error)
 	ExecuteSubmit(ctx context.Context, exec execution.Executor, req JobSubmitRequest, targetNode string, nodeAffinity execution.NodeAffinity) (JobSubmitResult, error)
@@ -107,11 +109,11 @@ type JobSubmitResult struct {
 
 // JobListResult contains the structured results of a job query.
 type JobListResult struct {
-	Fields []string
-	Jobs   []map[string]any
+	Scheduler schema.JobScheduler `json:"scheduler"`
+	Jobs      []map[string]any    `json:"jobs"`
 }
 
-// JobListQuery 作业查询的过滤参数
+// JobListQuery filters a job list. Empty User means all users (cluster-wide).
 type JobListQuery struct {
 	User  string `query:"user"`
 	Queue string `query:"queue"`
@@ -129,6 +131,16 @@ const (
 	JobOpToBottom JobOp = "toBottom"
 	JobOpSwitch   JobOp = "switch"
 )
+
+// ParseJobOp accepts the single whitelist shared by path :op, batch operation, and meta.actions keys.
+func ParseJobOp(s string) (JobOp, bool) {
+	switch JobOp(s) {
+	case JobOpKill, JobOpSuspend, JobOpResume, JobOpToTop, JobOpToBottom, JobOpSwitch:
+		return JobOp(s), true
+	default:
+		return "", false
+	}
+}
 
 // JobControlRequest defines the internal request for changing job state.
 // JobIDs supports batch operations; User is injected server-side from the session.
@@ -152,13 +164,10 @@ type JobModifyArgs struct {
 
 // baseDriver provides common fields and methods for all scheduler drivers.
 type baseDriver struct {
-	envScript string
-	sysEnvs   map[string]string // scheduler CLI 所需系统环境变量（与用户业务 Env 严格区分）
-	jobFields []string          // 推荐前端显示的 job 信息字段
-}
-
-func (b *baseDriver) JobFields() []string {
-	return b.jobFields
+	sysEnvs     map[string]string // scheduler CLI 所需系统环境变量（与用户业务 Env 严格区分）
+	jobFields   []string          // 推荐前端显示的 job 信息字段
+	hostFields  []string          // 推荐前端显示的 host 原生字段
+	queueFields []string          // 推荐前端显示的 queue/partition 原生字段
 }
 
 // SysEnvs returns the scheduler-required system environment variables.
@@ -167,67 +176,68 @@ func (b *baseDriver) SysEnvs() map[string]string {
 	return b.sysEnvs
 }
 
-// aggregateQueuesFromJobs aggregates job statistics per queue/partition from a slice of raw job records.
-func (b *baseDriver) aggregateQueuesFromJobs(jobs []map[string]any, queueKeyCandidates []string, statusKey string, normalizeStatus func(string) NormalizedJobStatus) QueueListResult {
-	queueMap := make(map[string]*QueueStats)
-	for _, job := range jobs {
-		var qName string
-		for _, k := range queueKeyCandidates {
-			if v, ok := job[k].(string); ok && strings.TrimSpace(v) != "" {
-				qName = strings.TrimSpace(v)
-				break
-			}
-		}
-		qName = cmp.Or(qName, "default")
+// cloneActionStatuses copies an action allow-list so callers cannot mutate the
+// package-level tables or the Service cache through a returned SchedulerMeta.
+func cloneActionStatuses(src map[JobOp][]string) map[JobOp][]string {
+	if src == nil {
+		return nil
+	}
+	out := make(map[JobOp][]string, len(src))
+	for action, statuses := range src {
+		out[action] = slices.Clone(statuses)
+	}
+	return out
+}
 
-		statusRaw, _ := job[statusKey].(string)
-		status := normalizeStatus(statusRaw)
+// detachedMeta copies the slices a caller could mutate. Keys and Scheduler are values.
+func detachedMeta(meta SchedulerMeta) SchedulerMeta {
+	meta.Fields.Job = slices.Clone(meta.Fields.Job)
+	meta.Fields.Host = slices.Clone(meta.Fields.Host)
+	meta.Fields.Queue = slices.Clone(meta.Fields.Queue)
+	meta.Actions = cloneActionStatuses(meta.Actions)
+	return meta
+}
 
-		// 支持逗号分隔的多个队列/分区（如 Slurm 的 "p1,p2"）
-		parts := strings.SplitSeq(qName, ",")
-		for p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" {
-				continue
-			}
-			qs, ok := queueMap[p]
-			if !ok {
-				qs = &QueueStats{Name: p}
-				queueMap[p] = qs
-			}
-			qs.Allocated++
-			switch status {
-			case JobStatusRunning:
-				qs.Running++
-			case JobStatusPending:
-				qs.Pending++
-			case JobStatusSuspended:
-				qs.Suspended++
-			case JobStatusCompleted:
-				qs.Completed++
-			case JobStatusFailed:
-				qs.Failed++
+// rawStatusString extracts the raw status value from a job record field.
+// LSF "STAT" is a plain string. Slurm "job_state" is a list whose first
+// non-empty element is the base state and any later elements are flags
+// (e.g. ["CONFIGURING", "POWER_UP_NODE"]). Action allow-lists compare that
+// first element, not the whole list.
+func rawStatusString(v any) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case []any:
+		for _, item := range val {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				return s
 			}
 		}
 	}
+	return ""
+}
 
-	queues := make([]QueueStats, 0, len(queueMap))
-	for _, q := range queueMap {
-		queues = append(queues, *q)
+// projectJob returns a shallow copy of job containing only the given keys.
+// Values are shared, not deep-copied. Missing keys are skipped silently so the
+// projection tolerates scheduler-version field drift (e.g. an older Slurm
+// without state_reason).
+func projectJob(job map[string]any, keep []string) map[string]any {
+	out := make(map[string]any, len(keep))
+	for _, k := range keep {
+		if v, ok := job[k]; ok {
+			out[k] = v
+		}
 	}
-	slices.SortFunc(queues, func(a, b QueueStats) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	return QueueListResult{Queues: queues}
+	return out
 }
 
 // newDriver instantiates the correct scheduler driver based on the configuration.
-func newDriver(name config.JobScheduler, envScript string) Scheduler {
+func newDriver(name schema.JobScheduler) Scheduler {
 	switch name {
-	case config.JobSchedulerLSF, config.JobSchedulerOpenLava:
-		return newLSFDriver(envScript)
-	case config.JobSchedulerSlurm:
-		return newSlurmDriver(envScript)
+	case schema.JobSchedulerLSF, schema.JobSchedulerOpenLava:
+		return newLSFDriver()
+	case schema.JobSchedulerSlurm:
+		return newSlurmDriver()
 	}
 	return nil
 }

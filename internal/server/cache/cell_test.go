@@ -185,3 +185,23 @@ func TestCell_SetAndSampledAt(t *testing.T) {
 		t.Error("cell with negative TTL should be stale")
 	}
 }
+
+func TestCellBackgroundRefreshHasDeadline(t *testing.T) {
+	var c Cell[int]
+	c.Set(1, time.Now().Add(-time.Hour))
+	done := make(chan bool, 1)
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	c.GetOrRefresh(reqCtx, time.Minute, func(ctx context.Context) {
+		_, hasDeadline := ctx.Deadline()
+		done <- hasDeadline && ctx.Err() == nil
+	})
+	cancelReq() // 请求结束不应影响后台刷新
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("background refresh ctx must have a deadline and not inherit request cancellation")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("background refresh did not run")
+	}
+}

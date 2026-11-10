@@ -2,10 +2,12 @@
 package model
 
 import (
-	"encoding/json"
+	json "design-cloud-engine/internal/infra/jsoncodec"
 	"fmt"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 type UserStatusCode int
@@ -125,21 +127,39 @@ type UserPreference struct {
 }
 
 type User struct {
-	ID             uint           `json:"id" gorm:"primarykey"`
-	Username       string         `json:"username" gorm:"unique;not null;type:varchar(32)"`
-	Password       string         `json:"-" gorm:"type:varchar(128)"`
-	Status         UserStatusCode `json:"status" gorm:"default:1;index"`
-	Type           UserType       `json:"type" gorm:"default:1;index"`
-	LastOnlineIP   string         `json:"lastOnlineIP" gorm:"type:varchar(45)"`
-	LastOnlineTime time.Time      `json:"lastOnlineTime"`
-	DownloadAccess bool           `json:"downloadAccess" gorm:"default:true"`
-	UploadAccess   bool           `json:"uploadAccess" gorm:"default:true"`
-	TerminalAccess bool           `json:"terminalAccess" gorm:"default:true"`
-	Role           Role           `json:"role" gorm:"default:0;index"`
-	AdminScopes    AdminScopes    `json:"-" gorm:"default:0"`
-	Preference     UserPreference `json:"preference" gorm:"type:text;serializer:json"`
-	MaxConnections uint           `json:"maxConnections"`
-	Apps           []App          `json:"-" gorm:"many2many:user_apps;"`
-	CreatedAt      time.Time      `json:"createdAt"`
-	UpdatedAt      time.Time      `json:"updatedAt"`
+	ID               uint           `json:"id" gorm:"primarykey"`
+	Username         string         `json:"username" gorm:"unique;not null;type:varchar(32)"`
+	Uid              string         `json:"uid,omitempty" gorm:"type:varchar(32);index"` // POSIX uidNumber（System 用户）；App 用户为空
+	Password         string         `json:"-" gorm:"type:varchar(128)"`
+	Status           UserStatusCode `json:"status" gorm:"default:1;index"`
+	Type             UserType       `json:"type" gorm:"default:1;index"`
+	LastLoginAt      time.Time      `json:"lastLoginAt"`
+	DownloadDisabled bool           `json:"downloadDisabled" gorm:"not null;default:false"`
+	UploadDisabled   bool           `json:"uploadDisabled" gorm:"not null;default:false"`
+	Role             Role           `json:"role" gorm:"default:0;index"`
+	AdminScopes      AdminScopes    `json:"-" gorm:"default:0"`
+	Preference       UserPreference `json:"preference" gorm:"type:text;serializer:json"`
+	MaxConnections   uint           `json:"maxConnections"`
+	CreatedAt        time.Time      `json:"createdAt"`
+	UpdatedAt        time.Time      `json:"updatedAt"`
+}
+
+// BeforeDelete removes connection rows for this portal username.
+// Authorization mappings are cleaned in UserRepo.Delete by username.
+func (u *User) BeforeDelete(tx *gorm.DB) error {
+	if tx == nil {
+		return nil
+	}
+	username := u.Username
+	if username == "" && u.ID != 0 {
+		var row User
+		if err := tx.Select("username").First(&row, u.ID).Error; err != nil {
+			return err
+		}
+		username = row.Username
+	}
+	if username == "" {
+		return nil
+	}
+	return tx.Where("username = ?", username).Delete(&Connection{}).Error
 }

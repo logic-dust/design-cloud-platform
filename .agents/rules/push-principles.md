@@ -20,7 +20,6 @@
 
 ### 实施要点
 
-- **手动创建（CreateManual）不推送**：response 返回完整 conn，操作者前端直接更新
 - **作业操作（submit/control）不推送**：sbatch/scancel 同步秒回，response 含 jobID/失败信息
 - **作业状态演进**（排队→运行→完成）若需实时通知，属异步链路，另行推送（不在操作请求内）
 - **VNC 异步发现**（sync_vnc 链路）：agent 上报创建连接，无请求方，必须推给归属用户

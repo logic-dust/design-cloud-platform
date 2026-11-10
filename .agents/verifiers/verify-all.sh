@@ -4,11 +4,13 @@
 #
 # 用法:
 #   ./.agents/verifiers/verify-all.sh                 # 变更感知（默认）：
-#                                                     #   - 无变更 → 直接退出
-#                                                     #   - 仅非 Go 变更 → 跳过重型验证
+#                                                     #   - 无变更 → 直接退出（全量请用 --full）
+#                                                     #   - test/portal 变更 → verify_http_tests.py --strict
 #                                                     #   - 有 Go 变更 → verify-changed.sh 核心门禁 + 条件检查
 #   ./.agents/verifiers/verify-all.sh --full          # 强制全量回归（大版本/大重构前）：
-#                                                     #   build + vet + 全量测试 + arch + security + deadrefs
+#                                                     #   harness 自检 + build/vet + 全量测试 + arch
+#                                                     #   + security + deadrefs + http + proto
+#                                                     #   + Windows 交叉编译 + lint/vuln + deps
 #   ./.agents/verifiers/verify-all.sh --skip-tests    # 跳过测试阶段（快速构建验证）
 #   ./.agents/verifiers/verify-all.sh --race          # 增量模式启用 race 检测
 
@@ -53,49 +55,62 @@ echo "========================================================================="
 # =============================================================================
 if [ "${FULL}" -eq 1 ]; then
   echo ""
-  echo "--- [1/8] Build & Vet (all packages) ---"
+  echo "--- [1/11] Harness Self-Check ---"
+  bash "${SCRIPT_DIR}/verify-harness.sh"
+
+  echo ""
+  echo "--- [2/11] Build & Vet (all packages) ---"
   "${SCRIPT_DIR}/verify-build.sh"
 
   echo ""
-  echo "--- [2/8] Architecture Boundaries ---"
+  echo "--- [3/11] Architecture Boundaries ---"
   python3 "${SCRIPT_DIR}/verify-arch.py"
 
   echo ""
   if [ "${SKIP_TESTS}" -eq 1 ]; then
-    echo "--- [3/8] Skipping All Unit Tests (--skip-tests) ---"
+    echo "--- [4/11] Skipping All Unit Tests (--skip-tests) ---"
   else
-    echo "--- [3/8] All Unit Tests ---"
+    echo "--- [4/11] All Unit Tests ---"
     TEST_ARGS="--all"
     [ "${RACE}" -eq 1 ] && TEST_ARGS="${TEST_ARGS} --race"
     "${SCRIPT_DIR}/verify-tests.sh" ${TEST_ARGS}
   fi
 
   echo ""
-  echo "--- [4/8] Security Red-Line Scan ---"
+  echo "--- [5/11] Security Red-Line Scan ---"
   python3 "${SCRIPT_DIR}/verify-security.py"
 
   echo ""
-  echo "--- [5/8] Dead Code & Cleanup Scan ---"
+  echo "--- [6/11] Dead Code & Cleanup Scan ---"
   "${ROOT_DIR}/.agents/scripts/scan_dead_refs.sh"
 
   echo ""
-  echo "--- [6/8] HTTP Test Coverage (strict) ---"
+  echo "--- [7/11] HTTP Test Coverage (strict) ---"
   python3 "${ROOT_DIR}/.agents/scripts/verify_http_tests.py" --strict
 
   echo ""
-  echo "--- [7/8] Protobuf Baggage & Structural Health Scan ---"
+  echo "--- [8/11] Protobuf Baggage & Structural Health Scan ---"
   python3 "${ROOT_DIR}/.agents/scripts/scan_proto_issues.py"
 
   echo ""
-  echo "--- [8/8] Dependency Updates Advisory Check ---"
-  UPDATES=$(go list -u -m -f '{{if and (not .Indirect) .Update}}{{.Path}}: {{.Version}} -> {{.Update.Version}}{{end}}' all 2>/dev/null || true)
-  if [ -n "${UPDATES}" ]; then
+  echo "--- [9/11] Windows Cross-Compile (all packages) ---"
+  "${SCRIPT_DIR}/verify-cross-build.sh"
+
+  echo ""
+  echo "--- [10/11] Format Gate, Static Analysis & Vulnerability Scan (make lint vuln) ---"
+  make -C "${ROOT_DIR}" lint vuln
+
+  echo ""
+  echo "--- [11/11] Dependency Updates Advisory Check ---"
+  if ! UPDATES=$(go list -u -m -f '{{if and (not .Indirect) .Update}}{{.Path}}: {{.Version}} -> {{.Update.Version}}{{end}}' all 2>/dev/null); then
+    echo "⚠️ Dependency update advisory unavailable (go list failed)."
+  elif [ -n "${UPDATES}" ]; then
     echo "💡 Outdated direct dependencies detected:"
     echo "${UPDATES}"
     echo "   (Advisory: Patch/minor updates can be updated cleanly via 'go get <pkg>@latest'."
     echo "    Major/breaking updates require cautious evaluation and dedicated validation.)"
   else
-    echo "✅ All direct dependencies are up to date."
+    echo "✅ No direct dependency updates reported."
   fi
 
   echo ""
@@ -121,17 +136,40 @@ if [ -z "${CHANGED_FILES}" ]; then
 fi
 
 GO_CHANGED=$(echo "${CHANGED_FILES}" | grep -cE '(\.go$|go\.mod$|go\.sum$|\.proto$)' || true)
-HARNESS_CHANGED=$(echo "${CHANGED_FILES}" | grep -c '^\.agents/' || true)
+HARNESS_CHANGED=$(echo "${CHANGED_FILES}" | grep -cE '^(AGENTS\.md|\.agents/)' || true)
+HTTP_SUITE_CHANGED=$(echo "${CHANGED_FILES}" | grep -cE '^test/portal/' || true)
+WEB_CHANGED=$(echo "${CHANGED_FILES}" | grep -cE '^internal/server/portal/web/' || true)
 
-echo "Changed files: $(echo "${CHANGED_FILES}" | wc -l | tr -d ' ') (Go: ${GO_CHANGED})"
+echo "Changed files: $(echo "${CHANGED_FILES}" | wc -l | tr -d ' ') (Go: ${GO_CHANGED}, test/portal: ${HTTP_SUITE_CHANGED}, web: ${WEB_CHANGED})"
 
 if [ "${HARNESS_CHANGED}" -gt 0 ]; then
-  echo "--- Harness self-check (.agents changed) ---"
+  echo "--- Harness self-check (agent entry or .agents changed) ---"
   bash "${SCRIPT_DIR}/verify-harness.sh"
 fi
 
+if [ "${HTTP_SUITE_CHANGED}" -gt 0 ]; then
+  echo "--- Portal HTTP static coverage (test/portal changed) ---"
+  python3 "${ROOT_DIR}/.agents/scripts/verify_http_tests.py" --strict
+fi
+
+# 嵌入式 Web 资产（go:embed 编入二进制）变更时，运行 Portal 页面单测覆盖版本占位与路由。
+if [ "${WEB_CHANGED}" -gt 0 ]; then
+  echo "--- Embedded web asset tests (internal/server/portal/web changed) ---"
+  if ! go test ./internal/server/portal/; then
+    echo "❌ Portal web asset tests failed."
+    exit 1
+  fi
+fi
+
 if [ "${GO_CHANGED}" -eq 0 ]; then
-  echo "ℹ️  Only non-Go files changed (docs/config/scripts). Skipping Go verification."
+  if [ "${HTTP_SUITE_CHANGED}" -gt 0 ] || [ "${HARNESS_CHANGED}" -gt 0 ] || [ "${WEB_CHANGED}" -gt 0 ]; then
+    echo ""
+    echo "========================================================================"
+    echo "✅ Change-Aware Verification Passed! Ready to Commit."
+    echo "========================================================================="
+    exit 0
+  fi
+  echo "ℹ️  Only non-Go files changed (no test/portal, .agents or web assets). Skipping verification."
   exit 0
 fi
 

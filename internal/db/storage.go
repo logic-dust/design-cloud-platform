@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"design-cloud-engine/internal/model"
@@ -10,7 +11,14 @@ import (
 // storageProbeDedupSeconds prevents duplicate storage reports from different
 // agents probing the same shared storage near-simultaneously. 5 minutes is
 // more than enough — multi-agent clock skew rarely exceeds seconds.
-const storageProbeDedupSeconds = 300
+const (
+	storageProbeDedupSeconds   = 300
+	StorageReportRetentionDays = 90
+	StorageReportPruneBatch    = 500
+)
+
+// maxStorageHistoryQueryRows caps history responses; var so tests can lower it.
+var maxStorageHistoryQueryRows = 10000
 
 type StorageRepo struct {
 	store *Store
@@ -48,14 +56,40 @@ func (s *StorageRepo) InsertStorageReport(ctx context.Context, report *model.Sto
 }
 
 // QueryStorageHistory retrieves historical capacity samples for a specific storage array
-// within the given time range.
+// within the given time range. When the window exceeds maxStorageHistoryQueryRows,
+// the newest rows are kept (DESC then reverse to chronological ASC for callers).
 func (s *StorageRepo) QueryStorageHistory(ctx context.Context, storageID string, from, to time.Time) ([]model.StorageReport, error) {
 	var reports []model.StorageReport
 	err := s.store.db.WithContext(ctx).
 		Where("storage_id = ? AND reported_at BETWEEN ? AND ?", storageID, from, to).
-		Order("reported_at ASC").
+		Order("reported_at DESC").
+		Limit(maxStorageHistoryQueryRows).
 		Find(&reports).Error
-	return reports, err
+	if err != nil {
+		return nil, err
+	}
+	slices.Reverse(reports)
+	return reports, nil
+}
+
+// PruneReportsBefore deletes storage samples older than cutoff in batches.
+// GORM ignores Limit on Delete, so ids are plucked first (same pattern as ExecutionRepo.PruneTerminal).
+func (s *StorageRepo) PruneReportsBefore(ctx context.Context, before time.Time, limit int) (int64, error) {
+	if err := validateLimit(limit); err != nil {
+		return 0, err
+	}
+	var ids []uint
+	if err := s.store.db.WithContext(ctx).Model(&model.StorageReport{}).
+		Where("reported_at < ?", before).
+		Limit(limit).
+		Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	result := s.store.db.WithContext(ctx).Delete(&model.StorageReport{}, ids)
+	return result.RowsAffected, result.Error
 }
 
 // QueryLatestStorageReports retrieves the most recent sample for each shared storage array

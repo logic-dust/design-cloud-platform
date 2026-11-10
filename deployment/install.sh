@@ -8,19 +8,21 @@
 # 本脚本只服务开发机 / 无包环境；有 RPM 的机器以包为准。
 #
 # 制品源与执行位分离：二进制从共享制品目录（可为 NFS）物化到本地盘，
-# ExecStart 只指向本地——systemd 不能从 NFS 执行；launcher capability 也不能落在 NFS。
+# ExecStart 只指向本地——systemd 不能从 NFS 执行；dc-exec capability 也不能落在 NFS。
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=packaging/lib/install-common.sh
+. "${SCRIPT_DIR}/packaging/lib/install-common.sh"
 
 # ============================================================
 # 配置（按需修改）
 # ============================================================
-SERVER_NAME="design-cloud-engine"
-LAUNCHER_NAME="dc-launcher"
-UNIT_TEMPLATE="${SCRIPT_DIR}/design-cloud-engine.service"
+SERVER_NAME="dc-engine"
+EXEC_BIN_NAME="dc-exec"
+UNIT_TEMPLATE="${SCRIPT_DIR}/packaging/systemd/design-cloud-engine.service"
 # 制品源与执行位分离（systemd 不得从 NFS 执行：挂载晚于启动、运行中缺页 SIGBUS、
 # hard mount 不可达时进程进入 D 状态连 SIGKILL 都杀不掉）：
 #   ARTIFACT_DIR 共享制品目录，一次上传、多节点取用（可为 NFS）
@@ -41,12 +43,14 @@ CONFIG_NAME="config.toml"
 # 注意：RPM 安装不分角色；这里的 server/agent 只影响无包引导流程
 # （config 生成 vs OTP 领证 + configless drop-in）。
 MODE="server"
-AGENT_DATA_DIR="${DCE_DATA_DIR:-/var/lib/design-cloud}"
+AGENT_STATE_DIR="${DCE_STATE_DIR:-/var/lib/design-cloud}"
 PORTAL_URL="${DCE_PORTAL_URL:-}"
 TOKEN="${DCE_TOKEN:-}"
+PORTAL_CA="${DCE_PORTAL_CA:-}"
 SERVERS="${DCE_SERVERS:-}"
 PORT="${DCE_PORT:-52255}"
-LOG_LEVEL="${DCE_LOG_LEVEL:-INFO}"
+# 空 = 跟随 Portal agent.logLevel；显式设置则写入 unit 钉死本机级别
+LOG_LEVEL="${DCE_LOG_LEVEL:-}"
 SKIP_REGISTER=0
 INSECURE_HTTP="${DCE_INSECURE_HTTP:-0}"
 
@@ -72,8 +76,8 @@ usage() {
 用法: install.sh <server|agent> [选项]
 
 角色（位置参数，必填；仅影响无包引导流程，RPM 安装不分角色）:
-  server   读 config.toml。流程：物化 engine+launcher → 生成配置 → 安装 unit。
-  agent    configless。流程：物化 engine+launcher → node register →
+  server   读 config.toml。流程：物化 engine+dc-exec → 生成配置 → 安装 unit。
+  agent    configless。流程：物化 engine+dc-exec → node register →
            安装 canonical unit + configless drop-in 并启动。
            NodeID 取 os.Hostname()；--servers 缺省取 --portal-url 的主机名。
 
@@ -82,10 +86,11 @@ agent 选项:
   --token <OTP>        一次性注册令牌（--skip-register 时可省）
   --servers <a,b>      集群 Server 主机名列表（不含端口）
   --port <n>           集群 gRPC 端口（缺省 52255）
-  --data-dir <dir>     证书基准目录（须与 node register 一致）
+  --state-dir <dir>    状态根（须与 node register 一致）
   --log-dir <dir>      日志目录（缺省 /var/log/design-cloud）
-  --log-level <lvl>    DEBUG|INFO|WARN|ERROR
-  --skip-register      证书材料已就位，仅做原地升级
+  --log-level <lvl>    可选；钉死本机级别（DEBUG|INFO|WARN|ERROR），省略则跟随 Settings agent.logLevel
+  --skip-register      证书材料已就位，跳过 OTP 注册（仅覆盖二进制并重启）
+  --ca <portal.ca.crt> Portal 私有/自签 HTTPS CA（TLS 校验失败时必传）
   --insecure-http      允许明文 HTTP Portal URL 注册（高危：明文传输 Token 与密钥）
 
 通用选项:
@@ -95,8 +100,8 @@ agent 选项:
 
 环境变量: DCE_ARTIFACT_DIR DCE_INSTALL_DIR DCE_CONFIG_DIR DCE_LOG_DIR DCE_SERVICE_DIR
           DCE_SERVICE_NAME DCE_BUILD_DIR DCE_SERVICE_USER DCE_SERVICE_GROUP
-          DCE_DATA_DIR DCE_PORTAL_URL DCE_TOKEN DCE_SERVERS DCE_PORT DCE_LOG_LEVEL
-          DCE_INSECURE_HTTP
+          DCE_STATE_DIR DCE_PORTAL_URL DCE_TOKEN DCE_SERVERS DCE_PORT DCE_LOG_LEVEL
+          DCE_PORTAL_CA DCE_INSECURE_HTTP
 EOF
 }
 
@@ -115,10 +120,11 @@ parse_args() {
       --token) TOKEN="${2:-}"; shift 2 ;;
       --servers) SERVERS="${2:-}"; shift 2 ;;
       --port) PORT="${2:-}"; shift 2 ;;
-      --data-dir) AGENT_DATA_DIR="${2:-}"; shift 2 ;;
+      --state-dir) AGENT_STATE_DIR="${2:-}"; shift 2 ;;
       --log-dir) LOG_DIR="${2:-}"; shift 2 ;;
       --log-level) LOG_LEVEL="${2:-}"; shift 2 ;;
       --skip-register) SKIP_REGISTER=1; shift ;;
+      --ca) PORTAL_CA="${2:-}"; shift 2 ;;
       --insecure-http) INSECURE_HTTP=1; shift ;;
       --service-user) SERVICE_USER="${2:-}"; shift 2 ;;
       --service-group) SERVICE_GROUP="${2:-}"; shift 2 ;;
@@ -161,10 +167,12 @@ parse_args() {
       log_error "agent 首次安装需要 --token <OTP>（在控制节点用 node issue-token 签发）；已有证书时可用 --skip-register"
       exit 1
     fi
-    case "${LOG_LEVEL}" in
-      DEBUG|INFO|WARN|ERROR) ;;
-      *) log_error "--log-level 只能是 DEBUG/INFO/WARN/ERROR；当前为 '${LOG_LEVEL}'"; exit 1 ;;
-    esac
+    if [[ -n "${LOG_LEVEL}" ]]; then
+      case "${LOG_LEVEL}" in
+        DEBUG|INFO|WARN|ERROR) ;;
+        *) log_error "--log-level 只能是 DEBUG/INFO/WARN/ERROR；当前为 '${LOG_LEVEL}'"; exit 1 ;;
+      esac
+    fi
   fi
 }
 
@@ -199,9 +207,9 @@ check_binaries() {
     exit 1
   fi
 
-  if [[ ! -f "${src}/${LAUNCHER_NAME}" ]]; then
-    log_error "未找到 Launcher 二进制: ${src}/${LAUNCHER_NAME}"
-    log_info "请先执行: make launcher"
+  if [[ ! -f "${src}/${EXEC_BIN_NAME}" ]]; then
+    log_error "未找到 dc-exec 二进制: ${src}/${EXEC_BIN_NAME}"
+    log_info "请先执行: make dcexec"
     exit 1
   fi
 
@@ -213,22 +221,8 @@ check_binaries() {
 # ============================================================
 ensure_service_user() {
   log_info "确保服务用户存在..."
-
-  if ! getent group "${SERVICE_GROUP}" >/dev/null; then
-    groupadd --system "${SERVICE_GROUP}"
-    log_success "创建组: ${SERVICE_GROUP}"
-  fi
-
-  if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
-    useradd --system \
-      --gid "${SERVICE_GROUP}" \
-      --home-dir "${INSTALL_DIR}" \
-      --shell /usr/sbin/nologin \
-      "${SERVICE_USER}"
-    log_success "创建用户: ${SERVICE_USER}"
-  else
-    log_success "用户已存在: ${SERVICE_USER}"
-  fi
+  dce_ensure_service_user "${SERVICE_USER}" "${SERVICE_GROUP}"
+  log_success "服务用户: ${SERVICE_USER}:${SERVICE_GROUP}"
 }
 
 # ============================================================
@@ -238,25 +232,28 @@ create_directories() {
   log_info "创建目录结构..."
 
   mkdir -p "${INSTALL_DIR}"
+  mkdir -p "${LOG_DIR}"
+
+  # 集群 mTLS 约定树提前建好（勿等到 node register / issue-cert）：
+  #   <state_dir>/certs/cluster     0755
+  #   <state_dir>/certs/cluster/ca  0700
+  # 节点子目录 <hostname>/ 仍在落盘材料时创建（0700）。
+  mkdir -p "${AGENT_STATE_DIR}/certs/cluster/ca"
+  chmod 0700 "${AGENT_STATE_DIR}"
+  chmod 0755 "${AGENT_STATE_DIR}/certs" "${AGENT_STATE_DIR}/certs/cluster"
+  chmod 0700 "${AGENT_STATE_DIR}/certs/cluster/ca"
 
   if [[ "${MODE}" == "agent" ]]; then
-    # 无配置文件形态：材料与日志都在数据目录下，引擎按 <data-dir>/certs/cluster 解析
-    mkdir -p "${AGENT_DATA_DIR}" "${LOG_DIR}"
-    log_success "数据目录已创建: ${AGENT_DATA_DIR}"
+    log_success "数据目录已创建: ${AGENT_STATE_DIR}（含 certs/cluster）"
     return 0
   fi
 
-  mkdir -p "${CONFIG_DIR}"
-  mkdir -p "${LOG_DIR}"
-  # engine 以「配置文件所在目录」为基准解析 certs/ 等相对路径，
-  # 因此证书目录必须落在 $CONFIG_DIR 下（而不是 $INSTALL_DIR/conf）。
-  mkdir -p "${CONFIG_DIR}/certs/cluster/ca" "${CONFIG_DIR}/certs/portal"
-
-  log_success "目录结构已创建"
+  mkdir -p "${CONFIG_DIR}/certs/portal"
+  log_success "目录结构已创建（state=${AGENT_STATE_DIR}/certs/cluster，portal=${CONFIG_DIR}/certs/portal）"
 }
 
 # ============================================================
-# 停止已有服务（原地升级的前置条件）
+# 停止已有服务（覆盖二进制的前置条件）
 # ============================================================
 # 覆盖正在运行的二进制不会立刻报错：GNU install 先 unlink 再创建，旧进程继续持有已被删除的
 # inode。于是脚本「安装成功」而服务仍在跑旧版本 —— `systemctl enable --now` 对运行中的 unit
@@ -266,7 +263,7 @@ WAS_ACTIVE=0
 stop_existing_service() {
   command -v systemctl >/dev/null 2>&1 || return 0
   if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
-    log_info "停止已有服务 ${SERVICE_NAME}（原地升级需先释放二进制）..."
+    log_info "停止已有服务 ${SERVICE_NAME}（覆盖二进制前须先停服）..."
     systemctl stop "${SERVICE_NAME}"
     WAS_ACTIVE=1
   fi
@@ -275,16 +272,13 @@ stop_existing_service() {
 # ============================================================
 # 物化到本地执行位
 # ============================================================
-# 从制品源拷贝到本地：先写临时名再 rename（同目录内原子），旧版本保留为 .prev 以便回滚。
+# 从制品源拷贝到本地：先写临时名再 rename（同目录内原子）。
 # 拷贝而非直接执行共享路径：NFS 上的可执行文件被 mmap 按需分页，服务端抖动会导致缺页
 # 失败→进程 SIGBUS，且 hard mount 不可达时进程会卡在 D 状态无法被杀死。
 materialize_binary() {
   local name="$1" mode="$2" src="$3"
   [[ -f "${src}/${name}" ]] || return 0
   install -m "${mode}" "${src}/${name}" "${INSTALL_DIR}/.${name}.new"
-  if [[ -f "${INSTALL_DIR}/${name}" ]]; then
-    cp -p "${INSTALL_DIR}/${name}" "${INSTALL_DIR}/${name}.prev" 2>/dev/null || true
-  fi
   mv -f "${INSTALL_DIR}/.${name}.new" "${INSTALL_DIR}/${name}"
 }
 
@@ -298,21 +292,16 @@ install_engine() {
 }
 
 # ============================================================
-# 安装 Launcher（含 setcap；RPM 路径由 %post 负责）
+# 安装 DcExec（含 setcap；RPM 路径由 %post 负责）
 # ============================================================
-install_launcher() {
-  log_info "物化 Launcher 到本地执行位..."
-  materialize_binary "${LAUNCHER_NAME}" 0700 "$(artifact_src)"
-  if command -v setcap >/dev/null 2>&1; then
-    setcap cap_setuid,cap_setgid+ep "${INSTALL_DIR}/${LAUNCHER_NAME}"
-  elif [[ -x /sbin/setcap ]]; then
-    /sbin/setcap cap_setuid,cap_setgid+ep "${INSTALL_DIR}/${LAUNCHER_NAME}"
-  elif [[ -x /usr/sbin/setcap ]]; then
-    /usr/sbin/setcap cap_setuid,cap_setgid+ep "${INSTALL_DIR}/${LAUNCHER_NAME}"
-  else
-    log_warning "setcap 不可用；launcher 启动时 L0 能力位自检会失败"
+install_dcexec() {
+  log_info "物化 dc-exec 到本地执行位..."
+  materialize_binary "${EXEC_BIN_NAME}" 0700 "$(artifact_src)"
+  if ! dce_apply_exec_setcap "${INSTALL_DIR}/${EXEC_BIN_NAME}"; then
+    log_error "setcap 失败：${INSTALL_DIR}/${EXEC_BIN_NAME}（需 libcap，且安装路径须支持 file xattr，勿用 NFS）"
+    exit 1
   fi
-  log_success "Launcher 已安装: ${INSTALL_DIR}/${LAUNCHER_NAME}"
+  log_success "dc-exec 已安装: ${INSTALL_DIR}/${EXEC_BIN_NAME}"
 }
 
 # ============================================================
@@ -332,18 +321,23 @@ create_systemd_service() {
     -e "s|/opt/design-cloud|${INSTALL_DIR}|g" \
     -e "s|/etc/design-cloud|${CONFIG_DIR}|g" \
     -e "s|/var/log/design-cloud|${LOG_DIR}|g" \
-    -e "s|^User=design-cloud|User=${SERVICE_USER}|" \
-    -e "s|^Group=design-cloud|Group=${SERVICE_GROUP}|" \
+    -e "s|^User=design-cloud$|User=${SERVICE_USER}|" \
+    -e "s|^Group=design-cloud$|Group=${SERVICE_GROUP}|" \
     "${UNIT_TEMPLATE}" >"${unit_dst}"
 
   if [[ "${MODE}" == "agent" ]]; then
     local dropin_dir="${SERVICE_DIR}/${SERVICE_NAME}.service.d"
+    local exec_start="${INSTALL_DIR}/${SERVER_NAME} --servers ${SERVERS} --port ${PORT} --state-dir ${AGENT_STATE_DIR} --log-dir ${LOG_DIR}"
+    # 仅显式 --log-level / DCE_LOG_LEVEL 时写入，否则跟随 Portal agent.logLevel
+    if [[ -n "${LOG_LEVEL}" ]]; then
+      exec_start+=" --log-level ${LOG_LEVEL}"
+    fi
     mkdir -p "${dropin_dir}"
     cat >"${dropin_dir}/configless.conf" <<EOF
 [Service]
 ExecStartPre=
 ExecStart=
-ExecStart=${INSTALL_DIR}/${SERVER_NAME} --servers ${SERVERS} --port ${PORT} --data-dir ${AGENT_DATA_DIR} --log-dir ${LOG_DIR} --log-level ${LOG_LEVEL}
+ExecStart=${exec_start}
 EOF
     log_success "configless drop-in: ${dropin_dir}/configless.conf"
   fi
@@ -351,6 +345,7 @@ EOF
   if [[ "${EUID}" -eq 0 ]] && command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
   fi
+  dce_systemd_tmpfiles_create
   log_success "systemd 服务已安装: ${unit_dst}"
 }
 
@@ -409,22 +404,25 @@ run_as_service_user() {
 # 登记（仅无配置文件形态）
 # ============================================================
 # 用一次性 OTP 换取证书材料：node register 会生成节点密钥（本地生成、不外发）并落盘
-# <data-dir>/certs/cluster/<host>/ 与 <data-dir>/certs/cluster/ca.crt。
+# <state-dir>/certs/cluster/<host>/ 与 <state-dir>/certs/cluster/ca.crt。
 register_agent() {
   if [[ "${MODE}" != "agent" || "${SKIP_REGISTER}" -eq 1 ]]; then
     return 0
   fi
 
   log_info "登记节点（node register）..."
-  local reg_args="--portal-url '${PORTAL_URL}' --token '${TOKEN}' --data-dir '${AGENT_DATA_DIR}'"
+  local reg_args="--portal-url '${PORTAL_URL}' --token '${TOKEN}' --state-dir '${AGENT_STATE_DIR}'"
+  if [[ -n "${PORTAL_CA}" ]]; then
+    reg_args="${reg_args} --ca '${PORTAL_CA}'"
+  fi
   if [[ "${INSECURE_HTTP}" == "1" ]]; then
     reg_args="${reg_args} --insecure-http"
   fi
-  if ! run_as_service_user "cd '${AGENT_DATA_DIR}' && '${INSTALL_DIR}/${SERVER_NAME}' node register ${reg_args}"; then
-    log_error "登记失败：请确认 ${PORTAL_URL} 可达、OTP 未过期（控制节点 node issue-token 签发）"
+  if ! run_as_service_user "cd '${AGENT_STATE_DIR}' && '${INSTALL_DIR}/${SERVER_NAME}' node register ${reg_args}"; then
+    log_error "登记失败：请确认 ${PORTAL_URL} 可达、OTP 未过期；私有 Portal CA 时传 --ca portal.ca.crt"
     exit 1
   fi
-  log_success "节点已登记，证书材料位于 ${AGENT_DATA_DIR}/certs/cluster/"
+  log_success "节点已登记，证书材料位于 ${AGENT_STATE_DIR}/certs/cluster/"
 }
 
 # ============================================================
@@ -440,23 +438,28 @@ apply_permissions() {
   # 对它整体 chown 会波及无关文件。
   chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/${SERVER_NAME}"
   chmod 0755 "${INSTALL_DIR}/${SERVER_NAME}"
-  if [[ -f "${INSTALL_DIR}/${LAUNCHER_NAME}" ]]; then
-    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/${LAUNCHER_NAME}"
-    chmod 0700 "${INSTALL_DIR}/${LAUNCHER_NAME}"
+  if [[ -f "${INSTALL_DIR}/${EXEC_BIN_NAME}" ]]; then
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/${EXEC_BIN_NAME}"
+    chmod 0700 "${INSTALL_DIR}/${EXEC_BIN_NAME}"
+    # Linux kernel clears security.capability on chown; always re-apply after ownership change.
+    if ! dce_apply_exec_setcap "${INSTALL_DIR}/${EXEC_BIN_NAME}"; then
+      log_error "setcap 失败（chown 后重打）：${INSTALL_DIR}/${EXEC_BIN_NAME}"
+      exit 1
+    fi
   fi
   mkdir -p "${LOG_DIR}"
   chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${LOG_DIR}"
   chmod 0750 "${LOG_DIR}"
 
   if [[ "${MODE}" == "agent" ]]; then
-    chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${AGENT_DATA_DIR}"
-    chmod 0700 "${AGENT_DATA_DIR}"
-    if [[ -d "${AGENT_DATA_DIR}/certs/cluster" ]]; then
-      chmod 0755 "${AGENT_DATA_DIR}/certs/cluster"
-      [[ -d "${AGENT_DATA_DIR}/certs/cluster/ca" ]] && chmod 0700 "${AGENT_DATA_DIR}/certs/cluster/ca"
-      find "${AGENT_DATA_DIR}/certs/cluster" -mindepth 1 -maxdepth 1 -type d -exec chmod 0700 {} +
-      find "${AGENT_DATA_DIR}/certs/cluster" -type f \( -name '*.key' -o -name '*.key.prev*' \) -exec chmod 0600 {} +
-      find "${AGENT_DATA_DIR}/certs/cluster" -type f \( -name '*.crt' -o -name '*.crt.prev*' \) -exec chmod 0644 {} +
+    chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${AGENT_STATE_DIR}"
+    chmod 0700 "${AGENT_STATE_DIR}"
+    if [[ -d "${AGENT_STATE_DIR}/certs/cluster" ]]; then
+      chmod 0755 "${AGENT_STATE_DIR}/certs/cluster"
+      [[ -d "${AGENT_STATE_DIR}/certs/cluster/ca" ]] && chmod 0700 "${AGENT_STATE_DIR}/certs/cluster/ca"
+      find "${AGENT_STATE_DIR}/certs/cluster" -mindepth 1 -maxdepth 1 -type d -exec chmod 0700 {} +
+      find "${AGENT_STATE_DIR}/certs/cluster" -type f \( -name '*.key' -o -name '*.key.prev*' \) -exec chmod 0600 {} +
+      find "${AGENT_STATE_DIR}/certs/cluster" -type f \( -name '*.crt' -o -name '*.crt.prev*' \) -exec chmod 0644 {} +
     fi
     log_success "权限设置完成"
     return 0
@@ -507,14 +510,14 @@ show_summary() {
   echo "  • Engine:  ${INSTALL_DIR}/${SERVER_NAME}"
   if [[ "${MODE}" == "agent" ]]; then
     echo "  • 形态:    Agent（无配置文件）"
-    echo "  • 数据目录: ${AGENT_DATA_DIR}"
+    echo "  • 数据目录: ${AGENT_STATE_DIR}"
     echo "  • 集群服务端: ${SERVERS}:${PORT}"
     echo ""
     log_info "服务已 enable 并 restart 启动；确认上线:"
     echo "  journalctl -u ${SERVICE_NAME} | grep -E 'Starting AGENT|Successfully registered'"
     echo "  控制节点侧应出现: Certificate fingerprint verified → Node marked online in DB"
   else
-    echo "  • Launcher: ${INSTALL_DIR}/${LAUNCHER_NAME}"
+    echo "  • dc-exec: ${INSTALL_DIR}/${EXEC_BIN_NAME}"
     echo "  • 配置:    ${CONFIG_DIR}/${CONFIG_NAME}"
     echo ""
     log_info "下一步:"
@@ -548,7 +551,7 @@ main() {
   create_directories
   stop_existing_service
   install_engine
-  install_launcher
+  install_dcexec
   create_systemd_service
   if [[ "${MODE}" == "server" ]]; then
     create_config

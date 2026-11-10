@@ -2,9 +2,9 @@ package execution
 
 import "syscall"
 
-// LauncherKilledBySeccomp always returns false on Windows: dc-launcher is Linux-only, and
+// DcExecKilledBySeccomp always returns false on Windows: PrivilegedExec is Linux-only, and
 // Windows has no POSIX signal termination semantics.
-func LauncherKilledBySeccomp(_ error) bool {
+func DcExecKilledBySeccomp(_ error) bool {
 	return false
 }
 

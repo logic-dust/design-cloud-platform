@@ -36,13 +36,13 @@ description: 审查与优化 internal/server/portal/web 中的嵌入式前端资
 
 - **职责边界清晰 (Separation of Concerns)**：
   - **`theme.css`（全局共享）**：仅包含全局设计 Token（色彩、渐变、字体栈、间距、圆角、阴影）、Reset 重置、全局滚动条、毛玻璃面板 (`.glass-panel`)、面板头部 (`.panel-head`) 以及通用组件（`.brand`、`.theme-toggle-btn`、`.btn-action` 等）。
-  - **页面专属 CSS（如 `dashboard.css` 或 `index.html` 内联样式）**：收归专属布局网格（如 `.screen`、`.top-cards-section`）、专属图表（`.card-ring`、`.donut-svg-wrap`）、专属表格与状态指示灯。
+  - **页面专属 CSS（如 `overview.css` 或 `index.html` 内联样式）**：收归专属布局网格（如 `.screen`、`.top-cards-section`）、专属图表（`.card-ring`、`.donut-svg-wrap`）、专属表格与状态指示灯。
   - ❌ **严禁**将仅某单页面使用的表格、容量条、图表类塞入全局 `theme.css`。
 - **杜绝选择器权重冲突与重复覆盖**：
   - 检查是否存在同一类名在 `theme.css` 和页面 CSS 中被重复定义且字号、间距互相覆盖（例如 `.metric-card .val-num`）。
 - **死样式类 (Dead Classes) 扫描**：
   - 检查 CSS 中声明的所有 Class 是否在 HTML 模板或 JS 模板字符串中实际被使用；
-  - 剔除历史遗留、改版后未消费的废弃颜色变体（如未使用的 `.val-num.green`、重复的 `.text-muted-custom`）。
+  - 剔除历史遗留、改版后不再被消费的废弃颜色变体与重复定义。
 
 ### 2. JavaScript 逻辑精简与现代重构 (JS Layer)
 
@@ -50,10 +50,10 @@ description: 审查与优化 internal/server/portal/web 中的嵌入式前端资
   - ❌ 严禁在 HTML `<head>` 中通过 `<script>window.FOO = 'bar'</script>` 向全局注入配置常量；
   - ✅ JS 文件内直接定义 `const VERSION_KEY = 'dashVersion';` 等模块私有常量。
 - **消除历史冗余状态**：
-  - 检查 `localStorage` 缓存读取与兜底逻辑，避免定义如 `queueSeed` 这样仅使用一次的多余顶层变量；
-  - 统一采用现代 ES6+ 链式解构与空值合并：`queuesData || state.scheduler?.queues || []`。
+  - 检查 `localStorage` 缓存读取与兜底逻辑，删除仅使用一次的顶层变量；
+  - 统一采用现代 ES6+ 链式解构与空值合并。
 - **杜绝硬编码假数据**：
-  - 检查数值渲染与基准计算，杜绝无理由的硬编码默认值（如硬编码默认 `4` 核）；使用优雅的动态回退：`d.cpu?.online || 1`。
+  - 检查数值渲染与基准计算，杜绝无理由的硬编码默认值；优先使用运行时数据与动态回退。
 - **DOM 操作与事件去重**：
   - 避免在全局脚本执行时和 `DOMContentLoaded` 回调内重复查询相同 DOM 元素并设置相同属性。
 - **长连接健壮性 (SSE / WebSocket)**：
@@ -73,7 +73,7 @@ description: 审查与优化 internal/server/portal/web 中的嵌入式前端资
   - 平台部署于专网/HPC 离线集群，**严禁引入任何外部 CDN**（如 Google Fonts、cdnjs、unpkg、FontAwesome 等）；
   - 字体统一使用系统字体栈（macOS/Windows/Linux/Noto Sans CJK/WenQuanYi Micro Hei）。
 - **版本化缓存控制 (Cache Invalidation)**：
-  - 内嵌资源引用必须带有服务端替换的版本占位符：`src="static/js/dashboard.js?v=__WEB_VERSION__"`；
+  - 内嵌资源引用必须带有服务端替换的版本占位符：`src="static/js/overview.js?v=__WEB_VERSION__"`；
   - 大屏 HTML 服务端响应头必须保持 `Cache-Control: no-cache`，确保大屏长期驻留时通过版本轮询与 SSE 事件感知自动 reload。
 
 ---
@@ -93,7 +93,7 @@ grep -rnIE "http(s)?://" internal/server/portal/web/ | grep -v "api/" | grep -v 
 ### 步骤 2：CSS 与 JS 依赖拓扑核查
 
 1. 提取 `theme.css` 中的全部类选择器；
-2. 交叉比对 `index.html`、`dashboard.html`、`dashboard.js`；
+2. 交叉比对 `index.html`、`overview.html`、`overview.js`；
 3. 将专属组件从 `theme.css` 迁移至对应页面 CSS；
 4. 消除所有重叠类定义。
 
@@ -109,6 +109,6 @@ grep -rnIE "http(s)?://" internal/server/portal/web/ | grep -v "api/" | grep -v 
 # 1. 运行 Portal 页面与版本替换专项单测
 go test -v ./internal/server/portal -run '^TestLoadVersionedHTML_(PlaceholderReplaced|CommitNotAppended)$|^TestRegisterWebRoutes_DynamicPageSwitches$'
 
-# 2. 运行全量代码验证门禁
+# 2. 运行代码验证门禁（按 .agents/README.md 三层门禁；日常用 verify-changed.sh）
 ./.agents/verifiers/verify-changed.sh
 ```

@@ -35,7 +35,7 @@ type trackedSecMgr struct {
 func (f *trackedSecMgr) IsBanned(_ context.Context, _, _ string) (bool, security.BannedRecord) {
 	return f.banned, f.bannedRec
 }
-func (f *trackedSecMgr) AddFailedCount(_ context.Context, keyName string, _ model.BanType, _, _ string) {
+func (f *trackedSecMgr) RecordFailure(_ context.Context, keyName string, _ model.BanSubject, _ model.BanSource, _, _ string) {
 	f.addedCounts = append(f.addedCounts, keyName)
 }
 func (f *trackedSecMgr) DeleteByKey(_ context.Context, keyName string) {
@@ -103,9 +103,12 @@ func (noopProvider) GetUser(_ context.Context, _ string) (*userprovider.SystemUs
 	return nil, userprovider.ErrUserNotFound
 }
 func (noopProvider) ListUsers(_ context.Context) ([]userprovider.SystemUser, error) { return nil, nil }
-func (noopProvider) ListGroups(_ context.Context) (map[string][]string, error)      { return nil, nil }
-func (noopProvider) GetGroupMembers(_ context.Context, _ string) ([]string, error)  { return nil, nil }
-func (noopProvider) ListUserGroups(_ context.Context) (map[string][]string, error)  { return nil, nil }
+func (noopProvider) ListGroups(_ context.Context) ([]userprovider.GroupInfo, error) {
+	return nil, nil
+}
+func (noopProvider) GetGroup(_ context.Context, _ string) (*userprovider.GroupInfo, error) {
+	return nil, userprovider.ErrGroupNotFound
+}
 func (noopProvider) UsersByIDs(_ context.Context, _ []uint32) (map[uint32]string, error) {
 	return map[uint32]string{}, nil
 }
@@ -151,7 +154,7 @@ func newAuthManagerForTest(t *testing.T) (*AuthManager, *db.SessionRepo, *db.Use
 	t.Cleanup(func() { _ = auditSvc.Close() })
 
 	// Real settings service backed by the same DB
-	settingsSvc, err := settings.NewService(repos.Setting, auditSvc, nil)
+	settingsSvc, err := settings.NewService(repos.Setting, slog.Default(), auditSvc, nil, repos.CacheVersion, repos.Node)
 	if err != nil {
 		t.Fatalf("new settings service: %v", err)
 	}
@@ -254,7 +257,6 @@ func TestAuthNonExistentUser(t *testing.T) {
 // TestAuth_BannedIP verifies that a banned IP is rejected before any user lookup.
 func TestAuth_BannedIP(t *testing.T) {
 	t.Parallel()
-
 	store := newUserStoreForTest(t)
 	sec := &trackedSecMgr{
 		banned:    true,
@@ -364,6 +366,56 @@ func TestAuth_OSUser_WrongPassword(t *testing.T) {
 	}
 	if len(sec.addedCounts) < 2 {
 		t.Fatalf("expected at least 2 AddFailedCount calls, got %d", len(sec.addedCounts))
+	}
+}
+
+// TestAuth_OSUser_StaleDBExpired trusts LDAP success over stale portal DB status (e.g. IPA admin reset).
+func TestAuth_OSUser_StaleDBExpired(t *testing.T) {
+	t.Parallel()
+
+	store := newUserStoreForTest(t)
+	user := &model.User{Username: "osuser", Status: model.UserPasswordExpired, Type: model.UserTypeSystem}
+	if err := store.Create(context.Background(), user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	sec := &trackedSecMgr{}
+	mgr := newAuthManagerWithMocks(t, store, fixedVerifier{err: nil}, sec)
+
+	result, err := mgr.Authenticate(context.Background(), "osuser", "pw", "1.2.3.4")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.PasswordMustChange {
+		t.Fatal("expected PasswordMustChange = false when LDAP verifier succeeded despite stale DB expired status")
+	}
+}
+
+// TestAuth_OSUser_StaleDBLockedAndDisabled verifies locked DB records still probe the provider while disabled records fail closed.
+func TestAuth_OSUser_StaleDBLockedAndDisabled(t *testing.T) {
+	t.Parallel()
+
+	store := newUserStoreForTest(t)
+	ctx := context.Background()
+	if err := store.Create(ctx, &model.User{Username: "locked-os", Status: model.UserLocked, Type: model.UserTypeSystem}); err != nil {
+		t.Fatalf("create locked user: %v", err)
+	}
+	if err := store.ChangeStatus(ctx, "locked-os", model.UserLocked); err != nil {
+		t.Fatalf("mark locked: %v", err)
+	}
+	if err := store.Create(ctx, &model.User{Username: "disabled-os", Status: model.UserDisabled, Type: model.UserTypeSystem}); err != nil {
+		t.Fatalf("create disabled user: %v", err)
+	}
+	if err := store.ChangeStatus(ctx, "disabled-os", model.UserDisabled); err != nil {
+		t.Fatalf("mark disabled: %v", err)
+	}
+
+	mgr := newAuthManagerWithMocks(t, store, fixedVerifier{err: nil}, &trackedSecMgr{})
+	if res, err := mgr.Authenticate(ctx, "locked-os", "pw", "1.2.3.4"); err != nil || res.PasswordMustChange {
+		t.Fatalf("locked-os auth = (%+v, %v), want success without PasswordMustChange", res, err)
+	}
+	if _, err := mgr.Authenticate(ctx, "disabled-os", "pw", "1.2.3.4"); !errors.Is(err, userprovider.ErrUserNotActive) {
+		t.Fatalf("disabled-os err = %v, want ErrUserNotActive", err)
 	}
 }
 

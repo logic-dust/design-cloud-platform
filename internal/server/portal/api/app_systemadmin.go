@@ -23,7 +23,7 @@ func (h *appHandler) adminAppsAPI(g *echo.Group) {
 
 // --- 获取所有应用（管理员）
 func (h *appHandler) adminListApps(c *echo.Context) error {
-	p := httputil.ParsePagination(c, 50, 200)
+	p := httputil.ParsePage(c)
 	list, total, err := h.app.List(c.Request().Context(), p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)
@@ -41,7 +41,7 @@ func (h *appHandler) adminGetApp(c *echo.Context) error {
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return httputil.RespondData(c, app)
+	return httputil.RespondOK(c, app)
 }
 
 // --- 获取应用的用户列表
@@ -52,32 +52,26 @@ func (h *appHandler) adminListAppUsers(c *echo.Context) error {
 		return err
 	}
 
-	p := httputil.ParsePagination(c, 50, 200)
-	users, err := h.app.ListUsers(c.Request().Context(), appID)
+	p := httputil.ParsePage(c)
+	users, total, err := h.app.ListUsersPage(c.Request().Context(), appID, p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-
-	total := len(users)
-	if p.Offset >= total {
-		return httputil.RespondPage(c, []string{}, total)
-	}
-	end := min(p.Offset+p.Limit, total)
-	return httputil.RespondPage(c, users[p.Offset:end], total)
+	return httputil.RespondPage(c, users, total)
 }
 
 // --- 创建新应用
 func (h *appHandler) adminCreateApp(c *echo.Context) error {
 	var req model.AppBase
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
 	}
 
 	app, err := h.app.Create(c.Request().Context(), req)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusCreated, httputil.Response{Data: app})
+	return httputil.RespondCreated(c, app)
 }
 
 // --- 更新应用信息
@@ -87,14 +81,14 @@ func (h *appHandler) adminUpdateApp(c *echo.Context) error {
 		return err
 	}
 	var req model.AppBase
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
 	}
 	app, err := h.app.Update(c.Request().Context(), appID, req)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return httputil.RespondData(c, app)
+	return httputil.RespondOK(c, app)
 }
 
 // --- 删除指定应用
@@ -106,7 +100,7 @@ func (h *appHandler) adminDeleteApp(c *echo.Context) error {
 	if err := h.app.Delete(c.Request().Context(), appID); err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.NoContent(http.StatusNoContent)
+	return httputil.RespondNoContent(c)
 }
 
 // --- 设置应用的完整用户列表（替换式）
@@ -120,16 +114,16 @@ func (h *appHandler) adminSetAppUsers(c *echo.Context) error {
 	var req struct {
 		Users []string `json:"users"`
 	}
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
 	}
 	if len(req.Users) == 0 {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "users list is required"})
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, "users list is required")
 	}
 	if err := h.app.SetUsers(c.Request().Context(), appID, req.Users); err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.NoContent(http.StatusNoContent)
+	return httputil.RespondNoContent(c)
 }
 
 // --- 增量更新应用用户（补丁式）
@@ -144,11 +138,11 @@ func (h *appHandler) adminPatchAppUsers(c *echo.Context) error {
 		Add    []string `json:"add"`
 		Remove []string `json:"remove"`
 	}
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
 	}
 	if len(req.Add) == 0 && len(req.Remove) == 0 {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "at least one of 'add' or 'remove' is required"})
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, "at least one of 'add' or 'remove' is required")
 	}
 	if len(req.Add) > 0 {
 		if err := h.app.AddUsers(c.Request().Context(), appID, req.Add); err != nil {
@@ -160,5 +154,5 @@ func (h *appHandler) adminPatchAppUsers(c *echo.Context) error {
 			return httputil.RespondError(c, err)
 		}
 	}
-	return c.NoContent(http.StatusNoContent)
+	return httputil.RespondNoContent(c)
 }

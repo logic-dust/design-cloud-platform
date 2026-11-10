@@ -1,422 +1,451 @@
 package ticket
 
 import (
+	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
-	"slices"
+	"reflect"
+	"time"
 
-	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/push"
 )
 
-var (
-	ErrTitleRequired       = errors.New("title is required")
-	ErrProjectNameRequired = errors.New("project name is required")
-	ErrProjectNameTooLong  = errors.New("project name cannot exceed 128 chars")
-	ErrPermissionDenied    = errors.New("permission denied")
-	ErrProjectHasTickets   = errors.New("cannot delete project with active tickets")
-	ErrProjectNameConflict = errors.New("project name already exists")
-)
+// sortGap 是看板列内相邻工单的初始排序间距。
+const sortGap = 1024.0
 
-// Service 工单系统业务逻辑
-type Service struct {
-	ticketRepo  *db.TicketRepo
-	projectRepo *db.TicketProjectRepo
-	userRepo    *db.UserRepo
-	auditSvc    *audit.Service
-	logger      *slog.Logger
-	publisher   push.Publisher
-}
-
-// NewService 创建工单服务
-func NewService(
-	ticketRepo *db.TicketRepo,
-	projectRepo *db.TicketProjectRepo,
-	userRepo *db.UserRepo,
-	auditSvc *audit.Service,
-	logger *slog.Logger,
-	publisher push.Publisher,
-) *Service {
-	if publisher == nil {
-		publisher = push.NoopPublisher{}
+// Create 创建工单；报告人为当前用户，新工单排在所在列末尾。
+func (s *Service) Create(ctx context.Context, actor Actor, req CreateTicketRequest) (TicketDTO, error) {
+	t := model.Ticket{
+		ReporterID:  actor.ID,
+		Description: req.Description,
+		DueDate:     req.DueDate,
+		Type:        model.TicketTypeTask,
+		Priority:    model.TicketPriorityMedium,
+		Status:      model.TicketStatusToDo,
+		Version:     1,
 	}
-	return &Service{
-		ticketRepo:  ticketRepo,
-		projectRepo: projectRepo,
-		userRepo:    userRepo,
-		auditSvc:    auditSvc,
-		logger:      logger.With("component", "ticket"),
-		publisher:   publisher,
+	var err error
+	if _, err = s.activeProject(ctx, req.ProjectID); err != nil {
+		return TicketDTO{}, err
 	}
-}
-
-// --- 工单 CRUD ---
-
-// Create 创建工单
-func (s *Service) Create(ctx context.Context, req CreateTicketRequest, currentUserID uint, currentUsername string) (*model.Ticket, error) {
-	// 1. 校验请求
-	if err := s.validateCreateRequest(ctx, req); err != nil {
-		return nil, err
+	t.ProjectID = req.ProjectID
+	if t.Title, err = validateTitle(req.Title); err != nil {
+		return TicketDTO{}, err
 	}
-
-	// 2. 计算 sortOrder
-	sortOrder := s.calculateInitialSortOrder(ctx, req.ProjectID, model.TicketStatus(req.Status))
-
-	// 3. 序列化 JSON 字段
-	criteriaJSON := serializeAcceptanceCriteria(req.AcceptanceCriteria)
-	attachmentsJSON := serializeAttachments(req.Attachments)
-
-	// 4. 创建工单
-	ticket := &model.Ticket{
-		ProjectID:          req.ProjectID,
-		Type:               model.TicketType(req.Type),
-		Title:              req.Title,
-		Description:        req.Description,
-		ReporterID:         currentUserID,
-		AssigneeID:         req.AssigneeID,
-		DueDate:            req.DueDate,
-		Priority:           model.TicketPriority(req.Priority),
-		Status:             model.TicketStatus(req.Status),
-		AcceptanceCriteria: criteriaJSON,
-		Attachments:        attachmentsJSON,
-		SortOrder:          sortOrder,
+	if err = validateDescription(req.Description); err != nil {
+		return TicketDTO{}, err
 	}
-
-	if err := s.ticketRepo.Create(ctx, ticket); err != nil {
-		return nil, fmt.Errorf("create ticket: %w", err)
-	}
-
-	// 5. 重新加载关联对象
-	created, err := s.ticketRepo.GetByID(ctx, ticket.ID)
-	if err != nil {
-		return nil, fmt.Errorf("load created ticket: %w", err)
-	}
-
-	// 6. 审计日志
-	s.auditSvc.LogUser(ctx, "TICKET_CREATE", "success", formatUint(currentUserID), slog.LevelInfo, map[string]any{
-		"ticket_id":   created.ID,
-		"project_id":  req.ProjectID,
-		"assignee_id": req.AssigneeID,
-		"title":       req.Title,
-	})
-
-	// 7. 推送事件：通知相关用户刷新列表（排除操作者，被动方=assignee+reporter 中的其他人）
-	s.publisher.PublishToUser(ctx, formatUserIDs(currentUsername, created.Reporter.Username, created.Assignee.Username), push.Message{
-		Name: push.EventTicket,
-		Payload: push.EventPayload{
-			Action: "refresh",
-		},
-	})
-
-	return &created, nil
-}
-
-// GetByID 获取工单详情
-func (s *Service) GetByID(ctx context.Context, ticketID uint) (*model.Ticket, error) {
-	ticket, err := s.ticketRepo.GetByID(ctx, ticketID)
-	if err != nil {
-		return nil, fmt.Errorf("get ticket by id(%d): %w", ticketID, err)
-	}
-	return &ticket, nil
-}
-
-// List 获取工单列表（分页 + 过滤）
-func (s *Service) List(ctx context.Context, filter Filter) (*PagedResponse, error) {
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 50
-	}
-	limit = min(limit, 200)
-	offset := max(filter.Offset, 0)
-
-	dbFilter := db.TicketFilter{
-		ProjectID:      filter.ProjectID,
-		ReporterID:     filter.ReporterID,
-		AssigneeID:     filter.AssigneeID,
-		Limit:          limit,
-		Offset:         offset,
-		IncludeDeleted: filter.IncludeDeleted,
-	}
-
-	if filter.Type != nil {
-		dbFilter.Type = new(model.TicketType(*filter.Type))
-	}
-	if filter.Status != nil {
-		dbFilter.Status = new(model.TicketStatus(*filter.Status))
-	}
-	if filter.Priority != nil {
-		dbFilter.Priority = new(model.TicketPriority(*filter.Priority))
-	}
-
-	tickets, total, err := s.ticketRepo.List(ctx, dbFilter)
-	if err != nil {
-		return nil, fmt.Errorf("list tickets: %w", err)
-	}
-
-	hasMore := int64(offset+limit) < total
-
-	return &PagedResponse{
-		Items:      tickets,
-		TotalCount: total,
-		Limit:      limit,
-		Offset:     offset,
-		HasMore:    hasMore,
-	}, nil
-}
-
-// Update 更新工单
-func (s *Service) Update(ctx context.Context, ticketID uint, req UpdateTicketRequest, currentUsername string) (*model.Ticket, error) {
-	// 1. 获取现有工单
-	ticket, err := s.ticketRepo.GetByID(ctx, ticketID)
-	if err != nil {
-		return nil, fmt.Errorf("get ticket for update(id=%d): %w", ticketID, err)
-	}
-
-	// 2. 构建更新字段
-	updates := make(map[string]any)
-
 	if req.Type != nil {
-		updates["type"] = *req.Type
-	}
-	if req.Title != nil {
-		updates["title"] = *req.Title
-	}
-	if req.Description != nil {
-		updates["description"] = *req.Description
-	}
-	if req.AssigneeID != nil {
-		updates["assignee_id"] = *req.AssigneeID
-	}
-	if req.DueDate != nil {
-		updates["due_date"] = *req.DueDate
+		if t.Type, err = parseType(*req.Type); err != nil {
+			return TicketDTO{}, err
+		}
 	}
 	if req.Priority != nil {
-		updates["priority"] = *req.Priority
+		if t.Priority, err = parsePriority(*req.Priority); err != nil {
+			return TicketDTO{}, err
+		}
 	}
 	if req.Status != nil {
-		updates["status"] = *req.Status
+		if t.Status, err = parseStatus(*req.Status); err != nil {
+			return TicketDTO{}, err
+		}
 	}
-	if req.SortOrder != nil {
-		updates["sort_order"] = *req.SortOrder
+	if req.AssigneeID != nil {
+		if _, err = s.validateAssignee(ctx, *req.AssigneeID); err != nil {
+			return TicketDTO{}, err
+		}
+		t.AssigneeID = req.AssigneeID
 	}
-	if req.AcceptanceCriteria != nil {
-		updates["acceptance_criteria"] = serializeAcceptanceCriteria(req.AcceptanceCriteria)
+	if err = validateCriteria(req.AcceptanceCriteria); err != nil {
+		return TicketDTO{}, err
+	}
+	t.AcceptanceCriteria = req.AcceptanceCriteria
+	if err = s.validateAttachments(ctx, req.Attachments, actor.Username); err != nil {
+		return TicketDTO{}, err
+	}
+	t.Attachments = req.Attachments
+	if t.Status == model.TicketStatusDone {
+		now := time.Now()
+		t.CompletedAt = &now
+	}
+
+	err = s.ticketRepo.WithTx(ctx, func(tx *db.TicketRepo) error {
+		maxSort, err := tx.MaxSortOrder(ctx, t.ProjectID, t.Status)
+		if err != nil {
+			return err
+		}
+		t.SortOrder = maxSort + sortGap
+		if err := tx.Create(ctx, &t); err != nil {
+			return err
+		}
+		return tx.CreateEvents(ctx, []model.TicketEvent{{TicketID: t.ID, ActorID: actor.ID, Action: model.TicketEventCreated}})
+	})
+	if err != nil {
+		return TicketDTO{}, fmt.Errorf("create ticket: %w", err)
+	}
+
+	created, err := s.ticketRepo.Get(ctx, t.ID, false)
+	if err != nil {
+		return TicketDTO{}, fmt.Errorf("load created ticket: %w", err)
+	}
+	s.audit(ctx, actor, "TICKET_CREATE", slog.LevelInfo, map[string]any{
+		"ticket_id": created.ID, "project_id": created.ProjectID, "title": created.Title,
+	})
+	s.notify(ctx, actor, 0, created.Reporter.Username, derefUsername(created.Assignee))
+	return toTicketDTO(created), nil
+}
+
+// Get 返回未删除的工单。
+func (s *Service) Get(ctx context.Context, id uint) (TicketDTO, error) {
+	t, err := s.ticketRepo.Get(ctx, id, false)
+	if err != nil {
+		return TicketDTO{}, mapRepoErr(err, ErrTicketNotFound)
+	}
+	return toTicketDTO(t), nil
+}
+
+// AdminGet 返回工单（含已软删）。
+func (s *Service) AdminGet(ctx context.Context, id uint) (TicketDTO, error) {
+	t, err := s.ticketRepo.Get(ctx, id, true)
+	if err != nil {
+		return TicketDTO{}, mapRepoErr(err, ErrTicketNotFound)
+	}
+	return toTicketDTO(t), nil
+}
+
+// List 返回工单分页列表。
+// 携带 AfterSort+AfterID 时走 keyset 续页（仅 sort=sortOrder），忽略 Offset；仍返回准确 totalCount。
+func (s *Service) List(ctx context.Context, q ListQuery) (Page[TicketDTO], error) {
+	sort := cmp.Or(db.TicketSortKey(q.Sort), db.TicketSortOrder)
+	desc := sort != db.TicketSortOrder
+	switch q.Order {
+	case "asc":
+		desc = false
+	case "desc":
+		desc = true
+	}
+	keyset := q.HasKeyset()
+	if keyset && sort != db.TicketSortOrder {
+		return Page[TicketDTO]{}, ErrKeysetSortUnsupported
+	}
+	offset := q.Offset
+	limit := q.Limit
+	fetchLimit := limit
+	if keyset {
+		offset = 0
+		fetchLimit = limit + 1 // 多取一条判定 hasMore
+	}
+	ts, total, err := s.ticketRepo.List(ctx, db.TicketFilter{
+		ProjectID: q.ProjectID, ReporterID: q.ReporterID, AssigneeID: q.AssigneeID, Unassigned: q.Unassigned,
+		Types: q.Types, Statuses: q.Statuses, Priorities: q.Priorities, TitleQuery: q.Q,
+		Sort: sort, Desc: desc, Limit: fetchLimit, Offset: offset, IncludeDeleted: q.IncludeDeleted,
+		AfterSort: q.AfterSort, AfterID: q.AfterID,
+	})
+	if err != nil {
+		return Page[TicketDTO]{}, fmt.Errorf("list tickets: %w", err)
+	}
+	var hasMore bool
+	if keyset {
+		hasMore = len(ts) > limit
+		if hasMore {
+			ts = ts[:limit]
+		}
+	} else {
+		hasMore = int64(offset+min(len(ts), limit)) < total
+	}
+	items := make([]TicketDTO, 0, len(ts))
+	for _, t := range ts {
+		items = append(items, toTicketDTO(t))
+	}
+	page := Page[TicketDTO]{
+		Items: items, TotalCount: total, Limit: limit, Offset: offset, HasMore: hasMore,
+	}
+	if sort == db.TicketSortOrder && len(items) > 0 {
+		last := items[len(items)-1]
+		sortVal, id := last.SortOrder, last.ID
+		page.NextAfterSort = &sortVal
+		page.NextAfterID = &id
+	}
+	return page, nil
+}
+
+func canEdit(actor Actor, t model.Ticket) bool {
+	return actor.IsTicketAdmin() || t.ReporterID == actor.ID || (t.AssigneeID != nil && *t.AssigneeID == actor.ID)
+}
+
+func canManage(actor Actor, t model.Ticket) bool {
+	return actor.IsTicketAdmin() || t.ReporterID == actor.ID
+}
+
+// Update 按字段部分更新工单（乐观锁）。字段值与当前一致时不产生变更。
+func (s *Service) Update(ctx context.Context, actor Actor, id uint, req UpdateTicketRequest) (TicketDTO, error) {
+	version, err := requireVersion(req.Version)
+	if err != nil {
+		return TicketDTO{}, err
+	}
+	cur, err := s.ticketRepo.Get(ctx, id, false)
+	if err != nil {
+		return TicketDTO{}, mapRepoErr(err, ErrTicketNotFound)
+	}
+	if !canEdit(actor, cur) {
+		return TicketDTO{}, ErrPermissionDenied
+	}
+	if cur.Version != version {
+		return TicketDTO{}, ErrVersionConflict
+	}
+
+	fields := map[string]any{}
+	var events []model.TicketEvent
+	change := func(field string, from, to *string) {
+		events = append(events, model.TicketEvent{TicketID: id, ActorID: actor.ID, Action: model.TicketEventUpdated, Field: field, FromValue: from, ToValue: to})
+	}
+
+	if req.Title != nil {
+		title, err := validateTitle(*req.Title)
+		if err != nil {
+			return TicketDTO{}, err
+		}
+		if title != cur.Title {
+			fields["title"] = title
+			change("title", new(cur.Title), new(title))
+		}
+	}
+	if req.Description != nil {
+		if err := validateDescription(*req.Description); err != nil {
+			return TicketDTO{}, err
+		}
+		if *req.Description != cur.Description {
+			fields["description"] = *req.Description
+			change("description", nil, nil)
+		}
+	}
+	if req.Type != nil {
+		v, err := parseType(*req.Type)
+		if err != nil {
+			return TicketDTO{}, err
+		}
+		if v != cur.Type {
+			fields["type"] = v
+			change("type", new(cur.Type.String()), new(v.String()))
+		}
+	}
+	if req.Priority != nil {
+		v, err := parsePriority(*req.Priority)
+		if err != nil {
+			return TicketDTO{}, err
+		}
+		if v != cur.Priority {
+			fields["priority"] = v
+			change("priority", new(cur.Priority.String()), new(v.String()))
+		}
+	}
+	newStatus := cur.Status
+	if req.Status != nil {
+		if newStatus, err = parseStatus(*req.Status); err != nil {
+			return TicketDTO{}, err
+		}
+	}
+	if req.AssigneeID.Set {
+		curID := cur.AssigneeID
+		changed := (curID == nil) != (req.AssigneeID.Value == nil) || (curID != nil && *curID != *req.AssigneeID.Value)
+		if changed {
+			if !canManage(actor, cur) {
+				return TicketDTO{}, ErrPermissionDenied
+			}
+			var to *string
+			if req.AssigneeID.Value != nil {
+				u, err := s.validateAssignee(ctx, *req.AssigneeID.Value)
+				if err != nil {
+					return TicketDTO{}, err
+				}
+				to = new(u.Username)
+				fields["assignee_id"] = *req.AssigneeID.Value
+			} else {
+				fields["assignee_id"] = nil
+			}
+			change("assignee", usernameOf(cur.Assignee), to)
+		}
+	}
+	if req.DueDate.Set && !sameTime(cur.DueDate, req.DueDate.Value) {
+		fields["due_date"] = req.DueDate.Value
+		change("dueDate", timeStr(cur.DueDate), timeStr(req.DueDate.Value))
+	}
+	if req.AcceptanceCriteria.Set {
+		if err := validateCriteria(req.AcceptanceCriteria.Value); err != nil {
+			return TicketDTO{}, err
+		}
+		if !reflect.DeepEqual(cur.AcceptanceCriteria, req.AcceptanceCriteria.Value) {
+			fields["acceptance_criteria"] = jsonColumn(req.AcceptanceCriteria.Value)
+			change("acceptanceCriteria", nil, nil)
+		}
 	}
 	if req.Attachments != nil {
-		updates["attachments"] = serializeAttachments(*req.Attachments)
+		atts := *req.Attachments
+		if err := s.validateAttachments(ctx, atts, actor.Username); err != nil {
+			return TicketDTO{}, err
+		}
+		if !(len(atts) == 0 && len(cur.Attachments) == 0) && !reflect.DeepEqual(atts, cur.Attachments) {
+			fields["attachments"] = jsonColumn(atts)
+			change("attachments", nil, nil)
+		}
 	}
 
-	if len(updates) == 0 {
-		return &ticket, nil
-	}
-
-	// 3. 执行更新
-	if err := s.ticketRepo.UpdateFields(ctx, ticketID, updates); err != nil {
-		return nil, fmt.Errorf("update ticket: %w", err)
-	}
-
-	// 4. 重新加载
-	updated, err := s.ticketRepo.GetByID(ctx, ticketID)
+	err = s.ticketRepo.WithTx(ctx, func(tx *db.TicketRepo) error {
+		if newStatus != cur.Status {
+			maxSort, err := tx.MaxSortOrder(ctx, cur.ProjectID, newStatus)
+			if err != nil {
+				return err
+			}
+			fields["status"] = newStatus
+			fields["sort_order"] = maxSort + sortGap
+			fields["completed_at"] = completedAtFor(newStatus)
+			change("status", new(cur.Status.String()), new(newStatus.String()))
+		}
+		if len(fields) == 0 {
+			return nil
+		}
+		if err := tx.UpdateVersioned(ctx, id, version, fields); err != nil {
+			return err
+		}
+		return tx.CreateEvents(ctx, events)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("load updated ticket: %w", err)
+		return TicketDTO{}, mapRepoErr(err, ErrTicketNotFound)
+	}
+	if len(fields) == 0 {
+		return toTicketDTO(cur), nil
 	}
 
-	// 5. 审计日志
-	s.auditSvc.LogUser(ctx, "TICKET_UPDATE", "success", formatUint(ticket.ReporterID), slog.LevelInfo, map[string]any{
-		"ticket_id": ticketID,
-		"updates":   updates,
-	})
-
-	// 6. 推送事件：带 targetId 局部刷新（排除操作者）
-	s.publisher.PublishToUser(ctx, formatUserIDs(currentUsername, updated.Reporter.Username, updated.Assignee.Username), push.Message{
-		Name: push.EventTicket,
-		Payload: push.EventPayload{
-			Action:   "refresh",
-			TargetID: formatUint(updated.ID),
-		},
-	})
-
-	return &updated, nil
+	updated, err := s.ticketRepo.Get(ctx, id, false)
+	if err != nil {
+		return TicketDTO{}, mapRepoErr(err, ErrTicketNotFound)
+	}
+	changed := make([]string, 0, len(events))
+	for _, e := range events {
+		changed = append(changed, e.Field)
+	}
+	s.audit(ctx, actor, "TICKET_UPDATE", slog.LevelInfo, map[string]any{"ticket_id": id, "fields": changed})
+	s.notify(ctx, actor, id, updated.Reporter.Username, derefUsername(updated.Assignee), derefUsername(cur.Assignee))
+	return toTicketDTO(updated), nil
 }
 
-// Delete 软删除工单（只有 Reporter 可删除自己的）
-func (s *Service) Delete(ctx context.Context, currentUserID uint, currentUsername string, ticketIDs ...uint) error {
-	if len(ticketIDs) == 0 {
-		return nil
+func completedAtFor(status model.TicketStatus) any {
+	if status == model.TicketStatusDone {
+		return time.Now()
 	}
-	tickets, err := s.ticketRepo.GetByIDs(ctx, ticketIDs)
-	if err != nil {
-		return fmt.Errorf("get tickets for delete: %w", err)
-	}
-	if len(tickets) == 0 {
-		return nil
-	}
-
-	actualIDs := make([]uint, 0, len(tickets))
-	usernames := make(map[string]struct{})
-	for _, ticket := range tickets {
-		if ticket.ReporterID != currentUserID {
-			return ErrPermissionDenied
-		}
-		actualIDs = append(actualIDs, ticket.ID)
-		if ticket.Reporter.Username != "" {
-			usernames[ticket.Reporter.Username] = struct{}{}
-		}
-		if ticket.Assignee.Username != "" {
-			usernames[ticket.Assignee.Username] = struct{}{}
-		}
-	}
-
-	if err := s.ticketRepo.SoftDeleteByIDs(ctx, actualIDs); err != nil {
-		return fmt.Errorf("soft delete tickets %v: %w", actualIDs, err)
-	}
-
-	for _, id := range actualIDs {
-		s.auditSvc.LogUser(ctx, "TICKET_DELETE", "success", formatUint(currentUserID), slog.LevelInfo, map[string]any{
-			"ticket_id": id,
-		})
-	}
-
-	delete(usernames, currentUsername)
-	userList := slices.Collect(maps.Keys(usernames))
-
-	// 推送事件：通知相关用户刷新列表（排除操作者）
-	s.publisher.PublishToUser(ctx, userList, push.Message{
-		Name: push.EventTicket,
-		Payload: push.EventPayload{
-			Action: "refresh",
-		},
-	})
 	return nil
 }
 
-// --- 管理员操作 ---
-
-// AdminDelete 管理员软删除任意工单
-func (s *Service) AdminDelete(ctx context.Context, ticketIDs ...uint) error {
-	if len(ticketIDs) == 0 {
-		return nil
+// jsonColumn 把 JSON 列的新值包装为 GORM 可写入 map 更新的值（nil 写 NULL）。
+func jsonColumn(v any) any {
+	switch x := v.(type) {
+	case *model.TicketAcceptanceCriteria:
+		if x == nil {
+			return nil
+		}
+	case []model.TicketAttachment:
+		if len(x) == 0 {
+			return nil
+		}
 	}
-	tickets, err := s.ticketRepo.GetByIDs(ctx, ticketIDs)
+	data, err := jsonMarshal(v)
 	if err != nil {
-		return fmt.Errorf("get tickets for admin delete: %w", err)
-	}
-	if len(tickets) == 0 {
 		return nil
 	}
-
-	actualIDs := make([]uint, 0, len(tickets))
-	usernames := make(map[string]struct{})
-	for _, ticket := range tickets {
-		actualIDs = append(actualIDs, ticket.ID)
-		if ticket.Reporter.Username != "" {
-			usernames[ticket.Reporter.Username] = struct{}{}
-		}
-		if ticket.Assignee.Username != "" {
-			usernames[ticket.Assignee.Username] = struct{}{}
-		}
-	}
-
-	if err := s.ticketRepo.SoftDeleteByIDs(ctx, actualIDs); err != nil {
-		return fmt.Errorf("admin soft delete tickets %v: %w", actualIDs, err)
-	}
-
-	for _, id := range actualIDs {
-		s.auditSvc.LogUser(ctx, "TICKET_ADMIN_DELETE", "success", "0", slog.LevelWarn, map[string]any{
-			"ticket_id": id,
-		})
-	}
-
-	userList := slices.Collect(maps.Keys(usernames))
-
-	// 推送事件：管理员删除工单，通知相关用户刷新列表
-	s.publisher.PublishToUser(ctx, userList, push.Message{
-		Name: push.EventTicket,
-		Payload: push.EventPayload{
-			Action: "refresh",
-		},
-	})
-	return nil
+	return string(data)
 }
 
-// AdminPermanentDelete 管理员硬删除
-func (s *Service) AdminPermanentDelete(ctx context.Context, ticketIDs ...uint) error {
-	if len(ticketIDs) == 0 {
-		return nil
+func derefUsername(u *model.User) string {
+	if u == nil {
+		return ""
 	}
-	tickets, err := s.ticketRepo.GetByIDs(ctx, ticketIDs) // GetByIDs 为 Unscoped，软删记录也能取到
+	return u.Username
+}
+
+// Delete 软删除工单（报告人或工单管理员）；全有或全无。
+func (s *Service) Delete(ctx context.Context, actor Actor, ids ...uint) error {
+	ids = dedupe(ids)
+	if len(ids) == 0 || len(ids) > MaxBatchIDs {
+		return invalid("ids must contain 1 to 100 ticket ids")
+	}
+	var deleted []model.Ticket
+	err := s.ticketRepo.WithTx(ctx, func(tx *db.TicketRepo) error {
+		ts, err := tx.GetMany(ctx, ids, false)
+		if err != nil {
+			return err
+		}
+		if missing := missingIDs(ids, ts); len(missing) > 0 {
+			if len(ids) == 1 {
+				return ErrTicketNotFound
+			}
+			return batchNotFound(missing)
+		}
+		var forbidden []uint
+		for _, t := range ts {
+			if !canManage(actor, t) {
+				forbidden = append(forbidden, t.ID)
+			}
+		}
+		if len(forbidden) > 0 {
+			if len(ids) == 1 {
+				return ErrPermissionDenied
+			}
+			return batchForbidden(forbidden)
+		}
+		if err := tx.SoftDelete(ctx, ids); err != nil {
+			return err
+		}
+		deleted = ts
+		return tx.CreateEvents(ctx, eventsFor(ids, actor.ID, model.TicketEventDeleted))
+	})
 	if err != nil {
-		return fmt.Errorf("get tickets for admin permanent delete: %w", err)
+		return err
 	}
-	if len(tickets) == 0 {
-		return nil
+	for _, id := range ids {
+		s.audit(ctx, actor, "TICKET_DELETE", slog.LevelInfo, map[string]any{"ticket_id": id})
 	}
-
-	actualIDs := make([]uint, 0, len(tickets))
-	usernames := make(map[string]struct{})
-	for _, ticket := range tickets {
-		actualIDs = append(actualIDs, ticket.ID)
-		if ticket.Reporter.Username != "" {
-			usernames[ticket.Reporter.Username] = struct{}{}
-		}
-		if ticket.Assignee.Username != "" {
-			usernames[ticket.Assignee.Username] = struct{}{}
-		}
-	}
-
-	if err := s.ticketRepo.HardDeleteByIDs(ctx, actualIDs); err != nil {
-		return fmt.Errorf("admin hard delete tickets %v: %w", actualIDs, err)
-	}
-
-	for _, id := range actualIDs {
-		s.auditSvc.LogUser(ctx, "TICKET_PERMANENT_DELETE", "success", "0", slog.LevelWarn, map[string]any{
-			"ticket_id": id,
-			"warning":   "permanent deletion",
-		})
-	}
-
-	userList := slices.Collect(maps.Keys(usernames))
-
-	// 推送事件：管理员硬删除工单，通知相关用户刷新列表
-	s.publisher.PublishToUser(ctx, userList, push.Message{
-		Name: push.EventTicket,
-		Payload: push.EventPayload{
-			Action: "refresh",
-		},
-	})
+	s.notifyParticipants(ctx, actor, deleted)
 	return nil
 }
 
-// --- 辅助方法 ---
-
-// validateCreateRequest 验证创建工单请求
-func (s *Service) validateCreateRequest(ctx context.Context, req CreateTicketRequest) error {
-	if req.Title == "" {
-		return ErrTitleRequired
+func eventsFor(ids []uint, actorID uint, action model.TicketEventAction) []model.TicketEvent {
+	out := make([]model.TicketEvent, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, model.TicketEvent{TicketID: id, ActorID: actorID, Action: action})
 	}
-
-	if _, err := s.projectRepo.GetByID(ctx, req.ProjectID); err != nil {
-		return fmt.Errorf("project(id=%d): %w", req.ProjectID, common.ErrNotFound)
-	}
-
-	if _, err := s.userRepo.GetByID(ctx, req.AssigneeID); err != nil {
-		return fmt.Errorf("assignee(id=%d): %w", req.AssigneeID, common.ErrNotFound)
-	}
-
-	return nil
+	return out
 }
 
-// calculateInitialSortOrder 新工单的初始排序
-func (s *Service) calculateInitialSortOrder(ctx context.Context, projectID uint, status model.TicketStatus) float64 {
-	maxSort, err := s.ticketRepo.GetMaxSortOrderInStatus(ctx, projectID, status)
-	if err != nil || maxSort == 0 {
-		return 1000.0
+func missingIDs(ids []uint, found []model.Ticket) []uint {
+	have := make(map[uint]struct{}, len(found))
+	for _, t := range found {
+		have[t.ID] = struct{}{}
 	}
-	return maxSort + 1000.0
+	var out []uint
+	for _, id := range ids {
+		if _, ok := have[id]; !ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// notifyParticipants 通知一组工单的报告人与指派人刷新列表。
+func (s *Service) notifyParticipants(ctx context.Context, actor Actor, ts []model.Ticket) {
+	userIDs := map[uint]struct{}{}
+	for _, t := range ts {
+		userIDs[t.ReporterID] = struct{}{}
+		if t.AssigneeID != nil {
+			userIDs[*t.AssigneeID] = struct{}{}
+		}
+	}
+	var names []string
+	for id := range userIDs {
+		if u, err := s.userRepo.GetByID(ctx, id); err == nil {
+			names = append(names, u.Username)
+		}
+	}
+	s.notify(ctx, actor, 0, names...)
 }

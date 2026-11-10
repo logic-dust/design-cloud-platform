@@ -29,17 +29,17 @@ func (h *userHandler) listRoles(c *echo.Context) error {
 			Name: r.String(),
 		})
 	}
-	return httputil.RespondData(c, roles)
+	return httputil.RespondOK(c, roles)
 }
 
 // GET /roles/:role/members — 分页成员列表
 func (h *userHandler) listRoleMembers(c *echo.Context) error {
 	parsedRole, err := model.ParseRole(c.Param("role"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, err.Error())
 	}
 
-	p := httputil.ParsePagination(c, 50, 200)
+	p := httputil.ParsePage(c)
 	members, total, err := h.roleSvc.ListRoleMembers(c.Request().Context(), parsedRole, p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)
@@ -53,18 +53,18 @@ func (h *userHandler) setUserRole(c *echo.Context) error {
 	var req struct {
 		Role string `json:"role"`
 	}
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
 	}
 
 	parsedRole, err := model.ParseRole(req.Role)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, err.Error())
 	}
 
-	updatedUser, err := h.roleSvc.SetUserRole(c.Request().Context(), targetUser, parsedRole)
+	updatedUser, err := h.identity.AssignRole(c.Request().Context(), targetUser, parsedRole)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return httputil.RespondData(c, updatedUser)
+	return httputil.RespondOK(c, updatedUser)
 }

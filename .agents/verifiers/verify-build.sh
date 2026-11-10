@@ -1,7 +1,7 @@
 #!/bin/bash
 # Harness Verifier: Build Health Check
 # 快速验证整个项目能否成功编译，作为轻量级的"任何修改后"首道卡点。
-# 默认复用 Go 缓存以获得秒级反馈；仅在显式指定 --clean 时做隔离干净构建。
+# 复用 Go 构建缓存；不清理共享缓存。
 #
 # 用法:
 #   ./.agents/verifiers/verify-build.sh                       # 全项目构建（复用缓存，秒级反馈）
@@ -18,7 +18,6 @@ export GOARCH="${GOARCH:-amd64}"
 
 echo "=== Verifying Build Health ==="
 
-CLEAN=0
 TARGET="./..."
 
 for arg in "$@"; do

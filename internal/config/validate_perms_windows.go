@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	fsutil "design-cloud-engine/internal/common/fs"
+	fsutil "design-cloud-engine/internal/infra/fs"
 )
 
 func checkSecretFilePermissions(label, path string) error {

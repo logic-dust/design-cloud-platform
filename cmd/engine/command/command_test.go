@@ -46,9 +46,9 @@ func TestResolveStartMode(t *testing.T) {
 		}
 	})
 
-	t.Run("data-dir without servers fails", func(t *testing.T) {
-		if _, err := ResolveStartMode(flagsWith("data-dir")); err == nil {
-			t.Fatal("expected error for --data-dir without --servers")
+	t.Run("state-dir without servers fails", func(t *testing.T) {
+		if _, err := ResolveStartMode(flagsWith("state-dir")); err == nil {
+			t.Fatal("expected error for --state-dir without --servers")
 		}
 	})
 
@@ -104,8 +104,8 @@ func TestParseFlagsExplicit(t *testing.T) {
 			t.Fatalf("--%s must be recorded as explicit", name)
 		}
 	}
-	if flags.Explicit("data-dir") {
-		t.Fatal("--data-dir must not be explicit")
+	if flags.Explicit("state-dir") {
+		t.Fatal("--state-dir must not be explicit")
 	}
 	if flags.ConfigFile != "" || flags.Servers != "mgt01,mgt02" || flags.Port != 55051 || flags.LogDir != "/tmp/logs" {
 		t.Fatalf("unexpected flags: %+v", flags)
@@ -132,7 +132,7 @@ func TestParseFlagsRejectsCertOverrides(t *testing.T) {
 }
 
 func TestStartArgv(t *testing.T) {
-	f := &Flags{Servers: "mgt01,mgt02", Port: 52255, DataDir: "/var/lib/design-cloud", LogLevel: "INFO", explicit: map[string]bool{"servers": true}}
+	f := &Flags{Servers: "mgt01,mgt02", Port: 52255, StateDir: "/var/lib/design-cloud", LogLevel: "INFO", explicit: map[string]bool{"servers": true}}
 	got, err := StartArgv(f, StartModeConfigless)
 	if err != nil {
 		t.Fatalf("StartArgv: %v", err)
@@ -192,6 +192,23 @@ func TestRegisterRequiresPortalURL(t *testing.T) {
 	}
 }
 
+func TestNewRegisterHTTPClientCA(t *testing.T) {
+	t.Parallel()
+	if _, err := newRegisterHTTPClient(""); err != nil {
+		t.Fatalf("empty --ca: %v", err)
+	}
+	if _, err := newRegisterHTTPClient(filepath.Join(t.TempDir(), "missing.crt")); err == nil {
+		t.Fatal("missing --ca file must fail")
+	}
+	bad := filepath.Join(t.TempDir(), "bad.crt")
+	if err := os.WriteFile(bad, []byte("not-a-cert"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newRegisterHTTPClient(bad); err == nil {
+		t.Fatal("non-PEM --ca must fail")
+	}
+}
+
 func TestRegisterInsecureHTTPRejection(t *testing.T) {
 	// Rejects plain http without --insecure-http
 	err := runRegisterCommand([]string{"--token", "dummy", "--portal-url", "http://mgt01:8443"})
@@ -208,12 +225,43 @@ func TestRegisterInsecureHTTPRejection(t *testing.T) {
 		"--token", "dummy",
 		"--portal-url", "http://127.0.0.1:59999",
 		"--insecure-http",
-		"--data-dir", tempDataDir,
+		"--state-dir", tempDataDir,
 	})
 	if errWithOverride == nil {
 		t.Fatal("expected failure due to unreachable server, but got nil")
 	}
 	if strings.Contains(errWithOverride.Error(), "insecure http portal URL rejected") {
 		t.Fatalf("--insecure-http flag should have bypassed insecure rejection, got: %v", errWithOverride)
+	}
+}
+
+func TestRunGenConfigCommand_CustomFlags(t *testing.T) {
+	outFile := filepath.Join(t.TempDir(), "custom.toml")
+	err := runGenConfigCommand(&Flags{}, []string{
+		"--servers", "mgt01, mgt02",
+		"--log-level", "DEBUG",
+		"--out", outFile,
+	})
+	if err != nil {
+		t.Fatalf("runGenConfigCommand failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read generated file: %v", err)
+	}
+	content := string(raw)
+	if !strings.Contains(content, "'mgt01'") || !strings.Contains(content, "'mgt02'") {
+		t.Errorf("expected mgt01 and mgt02 in generated config:\n%s", content)
+	}
+	if !strings.Contains(content, "app_level = 'DEBUG'") {
+		t.Errorf("expected app_level = 'DEBUG' in generated config:\n%s", content)
+	}
+
+	if err := runGenConfigCommand(&Flags{}, []string{"--servers", " , ", "--out", outFile}); err == nil {
+		t.Fatal("expected error for empty --servers list")
+	}
+	if err := runGenConfigCommand(&Flags{}, []string{"--log-level", "NOPE", "--out", outFile}); err == nil {
+		t.Fatal("expected error for invalid --log-level")
 	}
 }

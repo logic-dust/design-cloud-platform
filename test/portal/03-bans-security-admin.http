@@ -1,0 +1,87 @@
+# ========================================
+# ===== BANS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+
+### 获取当前登录封禁记录
+GET {{addr}}/api/admin/security/bans
+Authorization: Bearer {{accessToken}}
+
+### 手动封禁 IP（1 小时）
+POST {{addr}}/api/admin/security/bans
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "subject": "IP",
+  "ip": "192.0.2.100",
+  "duration": 3600,
+  "reason": "abusive scanner"
+}
+
+### 手动封禁指定 IP 下的用户（10 分钟）
+POST {{addr}}/api/admin/security/bans
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "subject": "UserIP",
+  "ip": "192.0.2.100",
+  "username": "alice",
+  "duration": 600
+}
+
+### 手动封禁参数非法（应返回 400）
+POST {{addr}}/api/admin/security/bans
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "subject": "UserIP",
+  "ip": "192.0.2.100",
+  "duration": 600
+}
+
+### 手动解除某条登录封禁记录（UserIP 键需 URL 编码冒号）
+DELETE {{addr}}/api/admin/security/bans/192.0.2.100%3Aalice
+Authorization: Bearer {{accessToken}}
+
+### 手动解除某条登录封禁记录
+DELETE {{addr}}/api/admin/security/bans/192.0.2.100
+Authorization: Bearer {{accessToken}}
+
+### 清除所有登录封禁记录
+DELETE {{addr}}/api/admin/security/bans
+Authorization: Bearer {{accessToken}}
+
+# ----- 封禁放行名单（AuthSettings.BanAllowlist）-----
+
+### 查看封禁放行名单
+GET {{addr}}/api/admin/security/bans/allowlist
+Authorization: Bearer {{accessToken}}
+
+### 追加放行条目（单个 IP + CIDR 网段）
+POST {{addr}}/api/admin/security/bans/allowlist
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "entries": ["192.0.2.10", "10.0.0.0/8"]
+}
+
+### 追加非法条目（应返回 422，整次变更不生效）
+POST {{addr}}/api/admin/security/bans/allowlist
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "entries": ["not-an-ip"]
+}
+
+### 移除放行条目（CIDR 含 / 须查询串编码）
+DELETE {{addr}}/api/admin/security/bans/allowlist?entry=10.0.0.0%2F8
+Authorization: Bearer {{accessToken}}
+
+### 移除放行条目（单个 IP）
+DELETE {{addr}}/api/admin/security/bans/allowlist?entry=192.0.2.10
+Authorization: Bearer {{accessToken}}

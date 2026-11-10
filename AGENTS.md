@@ -1,6 +1,4 @@
-# Agent 启动协议
+任务路由、项目约束与提交前门禁见 [`.agents/README.md`](.agents/README.md)。
 
-- 遵守凭证安全与高风险操作边界；未经用户明确同意，不执行 `sudo`、破坏性数据操作或外部发布。
-- 既有对外 API 契约的破坏性变更先与用户协商；内部实现不保留历史兼容层。
-- Go 变更提交前运行 `./.agents/verifiers/verify-changed.sh`。
-- 按任务读取 [`.agents/README.md`](.agents/README.md) 路由到相关规则、技能与事实源；不要预加载无关目录。
+- 工具链最低要求：Go 1.27.2+；`go.mod` 的 `go` / `toolchain` 指令管理语言版本与工具链切换，不代替最低补丁版本要求。
+- 提交前按变更类型选择门禁，不默认跑全量：日常 Go / `.proto` / `go.mod` 变更 → `./.agents/verifiers/verify-changed.sh`；发版或大重构 → `./.agents/verifiers/verify-all.sh --full`；仅文档 / 纯 Harness 文案 → 见 README「入口与验证」。

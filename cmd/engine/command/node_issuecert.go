@@ -4,42 +4,40 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/common"
-	fsutil "design-cloud-engine/internal/common/fs"
+	"design-cloud-engine/cmd/engine/console"
 	"design-cloud-engine/internal/config"
-	"design-cloud-engine/internal/db"
+	fsutil "design-cloud-engine/internal/infra/fs"
 	nodeService "design-cloud-engine/internal/server/service/node"
-	"design-cloud-engine/internal/server/service/push"
 )
 
 func runIssueCertCommand(flags *Flags, args []string) error {
 	fs := newCommandFlagSet("issue-cert", os.Stderr)
 
-	var hostname, hostsFlag, csrFile, outDir, archive, configFile string
+	var nodesFlag, sansFlag, csrFile, outDir, archive, configFile string
 	var validDays int
 	var isServer, force bool
 
 	fs.StringVar(&configFile, "config", "", "Path to config file")
-	fs.StringVar(&hostname, "hostname", "", "Target Node ID to issue certificate for (required)")
+	fs.StringVar(&nodesFlag, "nodes", "", "Target Node ID(s): single ID, comma list, or topology pattern (e.g. cn01, cn01,cn02, cn[01-11])")
 	fs.BoolVar(&isServer, "server", false, "Mark node as composite server role (default false: pure agent compute node)")
-	fs.StringVar(&hostsFlag, "hosts", "", "Comma-separated SANs (default: <nodeID>,127.0.0.1,localhost)")
+	fs.StringVar(&sansFlag, "hosts", "", "Comma-separated certificate SANs (default per node: <nodeID>,127.0.0.1,localhost); only with a single node")
 	fs.IntVar(&validDays, "valid-days", 0, "Certificate validity in days (default: 730 for agent, 1095 for server; max 3650)")
-	fs.StringVar(&csrFile, "csr", "", "Optional path to node-generated CSR (PEM). When omitted, server generates new private key")
+	fs.StringVar(&csrFile, "csr", "", "Optional path to node-generated CSR (PEM). When omitted, server generates new private key; only with a single node")
 	fs.StringVar(&outDir, "out-dir", "", "Export materials under this directory (mutually exclusive with --archive)")
 	fs.StringVar(&archive, "archive", "", "Package materials into a tar.gz bundle (mutually exclusive with --out-dir)")
 	fs.BoolVar(&force, "force", false, "Force overwrite and rotate fingerprint if node already has an active certificate")
 
 	fs.Usage = func() {
-		common.PrintStderr("Usage: %s node issue-cert --hostname <nodeID> [options]\n\n", config.AppName)
-		common.PrintStderr("Offline issue cluster certificate materials for a node directly using the local CA.\n")
-		common.PrintStderr("Must run on a server node with access to the database and cluster CA key.\n\n")
+		console.PrintStderr("Usage: %s node issue-cert --nodes <list> [options]\n\n", config.AppName)
+		console.PrintStderr("Offline issue cluster certificate materials using the local CA.\n")
+		console.PrintStderr("Must run on a server node with access to the database and cluster CA key.\n")
+		console.PrintStderr("--nodes accepts a single ID, comma-separated IDs, or topology patterns (e.g. cn01, cn01,cn02, cn[01-02]).\n")
+		console.PrintStderr("--hosts is certificate SANs for a single node, not the node list.\n\n")
 		fs.PrintDefaults()
 	}
 
@@ -47,11 +45,20 @@ func runIssueCertCommand(flags *Flags, args []string) error {
 		return fmt.Errorf("issue-cert parse error: %w", err)
 	}
 
-	if hostname == "" {
-		return fmt.Errorf("--hostname is required")
+	nodeIDs, err := resolveTargetNodeIDs(nodesFlag)
+	if err != nil {
+		return err
 	}
 	if outDir != "" && archive != "" {
 		return fmt.Errorf("--out-dir and --archive are mutually exclusive")
+	}
+	if len(nodeIDs) > 1 {
+		if csrFile != "" {
+			return fmt.Errorf("--csr is only supported with a single node")
+		}
+		if sansFlag != "" {
+			return fmt.Errorf("--hosts (certificate SANs) is only supported with a single node; omit it so each node gets default SANs")
+		}
 	}
 
 	var csrPEM []byte
@@ -69,59 +76,58 @@ func runIssueCertCommand(flags *Flags, args []string) error {
 		return err
 	}
 
-	store, err := db.NewStore(cfg.Database, slog.Default())
+	nodeSvc, _, cleanup, err := newNodeOfflineService(cfg)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return err
 	}
-	defer func() { _ = store.Close() }()
+	defer cleanup()
 
-	repos := db.NewRepos(store)
-
-	auditSvc, err := audit.NewService(audit.Config{
-		PrimaryLogPath:  cfg.AuditLogPath(),
-		SecurityLogPath: cfg.SecurityLogPath(),
-		NodeID:          cfg.Runtime.NodeID,
-		Version:         config.VERSION,
-	})
-	if err != nil {
-		return fmt.Errorf("init audit service: %w", err)
-	}
-	defer func() { _ = auditSvc.Close() }()
-
-	certDir := filepath.Join(cfg.Runtime.DataDir, "certs", "cluster")
-	nodeSvc := nodeService.NewService(repos.Node, slog.Default(), nodeService.Config{
-		NodeID:  cfg.Runtime.NodeID,
-		CertDir: certDir,
-	}, auditSvc, push.NoopPublisher{}, nil, nil)
-
+	certDir := filepath.Join(cfg.Runtime.StateRoot, "certs", "cluster")
 	ctx := context.Background()
-	req := nodeService.OfflineIssueCertRequest{
-		NodeID:    hostname,
-		IsServer:  isServer,
-		Hosts:     parseCertHosts(hostsFlag),
-		ValidDays: validDays,
-		CSRPEM:    csrPEM,
-		Force:     force,
-	}
+	sans := parseCertHosts(sansFlag)
 
-	result, err := nodeSvc.OfflineIssueCert(ctx, req)
-	if err != nil {
-		return fmt.Errorf("offline issue certificate: %w", err)
+	type issued struct {
+		nodeID string
+		result *nodeService.OfflineIssueCertResult
+	}
+	issuedList := make([]issued, 0, len(nodeIDs))
+
+	for _, nodeID := range nodeIDs {
+		req := nodeService.OfflineIssueCertRequest{
+			NodeID:    nodeID,
+			IsServer:  isServer,
+			Hosts:     sans,
+			ValidDays: validDays,
+			CSRPEM:    csrPEM,
+			Force:     force,
+		}
+		result, err := nodeSvc.OfflineIssueCert(ctx, req)
+		if err != nil {
+			return fmt.Errorf("offline issue certificate for %q: %w", nodeID, err)
+		}
+		issuedList = append(issuedList, issued{nodeID: nodeID, result: result})
 	}
 
 	var destinationDesc string
 	switch {
 	case archive != "":
 		entries := []fsutil.ArchiveEntry{
-			{Name: "ca.crt", Mode: 0644, Data: result.CAPEM},
-			{Name: fmt.Sprintf("%s/%s.crt", hostname, hostname), Mode: 0644, Data: result.CertPEM},
+			{Name: "ca.crt", Mode: 0644, Data: issuedList[0].result.CAPEM},
 		}
-		if len(result.KeyPEM) > 0 {
+		for _, item := range issuedList {
+			n := item.nodeID
 			entries = append(entries, fsutil.ArchiveEntry{
-				Name: fmt.Sprintf("%s/%s.key", hostname, hostname),
-				Mode: 0600,
-				Data: result.KeyPEM,
+				Name: fmt.Sprintf("%s/%s.crt", n, n),
+				Mode: 0644,
+				Data: item.result.CertPEM,
 			})
+			if len(item.result.KeyPEM) > 0 {
+				entries = append(entries, fsutil.ArchiveEntry{
+					Name: fmt.Sprintf("%s/%s.key", n, n),
+					Mode: 0600,
+					Data: item.result.KeyPEM,
+				})
+			}
 		}
 		if err := fsutil.CreateTarGz(archive, entries); err != nil {
 			return fmt.Errorf("create archive %q: %w", archive, err)
@@ -129,50 +135,53 @@ func runIssueCertCommand(flags *Flags, args []string) error {
 		destinationDesc = fmt.Sprintf("Archive bundle: %s", archive)
 
 	case outDir != "":
-		caPath := filepath.Join(outDir, "ca.crt")
-		certPath := filepath.Join(outDir, hostname, fmt.Sprintf("%s.crt", hostname))
-		keyPath := filepath.Join(outDir, hostname, fmt.Sprintf("%s.key", hostname))
-
 		if err := fsutil.MkdirShared(outDir); err != nil {
 			return fmt.Errorf("create output directory: %w", err)
 		}
-		if err := fsutil.WriteSharedFile(caPath, result.CAPEM); err != nil {
+		caPath := filepath.Join(outDir, "ca.crt")
+		if err := fsutil.WriteSharedFile(caPath, issuedList[0].result.CAPEM); err != nil {
 			return fmt.Errorf("write CA file: %w", err)
 		}
-		if err := fsutil.MkdirPrivate(filepath.Dir(certPath)); err != nil {
-			return fmt.Errorf("create node cert directory: %w", err)
-		}
-		if err := fsutil.WriteSharedFile(certPath, result.CertPEM); err != nil {
-			return fmt.Errorf("write certificate file: %w", err)
-		}
-		if len(result.KeyPEM) > 0 {
-			if err := fsutil.WritePrivateFile(keyPath, result.KeyPEM); err != nil {
-				return fmt.Errorf("write private key file: %w", err)
+		for _, item := range issuedList {
+			n := item.nodeID
+			certPath := filepath.Join(outDir, n, fmt.Sprintf("%s.crt", n))
+			keyPath := filepath.Join(outDir, n, fmt.Sprintf("%s.key", n))
+			if err := fsutil.MkdirPrivate(filepath.Dir(certPath)); err != nil {
+				return fmt.Errorf("create node cert directory for %q: %w", n, err)
+			}
+			if err := fsutil.WriteSharedFile(certPath, item.result.CertPEM); err != nil {
+				return fmt.Errorf("write certificate for %q: %w", n, err)
+			}
+			if len(item.result.KeyPEM) > 0 {
+				if err := fsutil.WritePrivateFile(keyPath, item.result.KeyPEM); err != nil {
+					return fmt.Errorf("write private key for %q: %w", n, err)
+				}
 			}
 		}
 		destinationDesc = fmt.Sprintf("Directory layout under %s", outDir)
 
 	default:
-		// Default: write straight into standard cluster certificate directory
-		nodeCertPath := cfg.ClusterNodeCertPath(hostname)
-		nodeKeyPath := cfg.ClusterNodeKeyPath(hostname)
 		caPath := cfg.ClusterCACertPath()
-
 		if err := fsutil.MkdirShared(filepath.Dir(caPath)); err != nil {
 			return fmt.Errorf("create cluster cert dir: %w", err)
 		}
-		if err := fsutil.WriteSharedFile(caPath, result.CAPEM); err != nil {
+		if err := fsutil.WriteSharedFile(caPath, issuedList[0].result.CAPEM); err != nil {
 			return fmt.Errorf("write cluster CA file: %w", err)
 		}
-		if err := fsutil.MkdirPrivate(filepath.Dir(nodeCertPath)); err != nil {
-			return fmt.Errorf("create node cert directory: %w", err)
-		}
-		if err := fsutil.WriteSharedFile(nodeCertPath, result.CertPEM); err != nil {
-			return fmt.Errorf("write node cert file: %w", err)
-		}
-		if len(result.KeyPEM) > 0 {
-			if err := fsutil.WritePrivateFile(nodeKeyPath, result.KeyPEM); err != nil {
-				return fmt.Errorf("write node key file: %w", err)
+		for _, item := range issuedList {
+			n := item.nodeID
+			nodeCertPath := cfg.ClusterNodeCertPath(n)
+			nodeKeyPath := cfg.ClusterNodeKeyPath(n)
+			if err := fsutil.MkdirPrivate(filepath.Dir(nodeCertPath)); err != nil {
+				return fmt.Errorf("create node cert directory for %q: %w", n, err)
+			}
+			if err := fsutil.WriteSharedFile(nodeCertPath, item.result.CertPEM); err != nil {
+				return fmt.Errorf("write node cert for %q: %w", n, err)
+			}
+			if len(item.result.KeyPEM) > 0 {
+				if err := fsutil.WritePrivateFile(nodeKeyPath, item.result.KeyPEM); err != nil {
+					return fmt.Errorf("write node key for %q: %w", n, err)
+				}
 			}
 		}
 		destinationDesc = fmt.Sprintf("Standard cluster cert layout (%s)", certDir)
@@ -183,17 +192,18 @@ func runIssueCertCommand(flags *Flags, args []string) error {
 		role = "server (composite node)"
 	}
 
-	common.PrintlnStdout("Successfully issued offline certificate:")
-	common.PrintStdout("   Node ID     : %s\n", hostname)
-	common.PrintStdout("   Role        : %s\n", role)
-	common.PrintStdout("   Fingerprint : %s\n", result.Fingerprint)
-	common.PrintStdout("   Subject     : %s\n", result.Subject)
-	common.PrintStdout("   Expires At  : %s\n", result.ExpiresAt.UTC().Format(time.RFC3339))
-	common.PrintStdout("   Destination : %s\n", destinationDesc)
-	if result.IsNewNode {
-		common.PrintStdout("   DB Status   : Created new node record (status: provisioned)\n")
-	} else {
-		common.PrintStdout("   DB Status   : Updated certificate binding on existing node\n")
+	console.PrintlnStdout("Successfully issued offline certificate(s):")
+	console.PrintStdout("   Nodes       : %d (%s)\n", len(issuedList), strings.Join(nodeIDs, ", "))
+	console.PrintStdout("   Role        : %s\n", role)
+	console.PrintStdout("   Destination : %s\n", destinationDesc)
+	for _, item := range issuedList {
+		console.PrintStdout("   - %s  fingerprint=%s  expires=%s",
+			item.nodeID, item.result.Fingerprint, item.result.ExpiresAt.UTC().Format(time.RFC3339))
+		if item.result.IsNewNode {
+			console.PrintStdout("  [new node record]\n")
+		} else {
+			console.PrintStdout("  [updated binding]\n")
+		}
 	}
 
 	return nil

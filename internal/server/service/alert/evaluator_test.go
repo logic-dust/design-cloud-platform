@@ -8,17 +8,20 @@ import (
 	"time"
 
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/push"
+	"design-cloud-engine/internal/server/push"
 )
 
 func newTestEvaluator(t *testing.T) (*Evaluator, *push.Client, *push.Hub) {
 	t.Helper()
 	hub := push.NewHub()
-	client := hub.Register("admin-1", model.RoleSystemAdmin)
+	client, err := hub.Register("admin-1", model.RoleSystemAdmin)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
 	t.Cleanup(func() { hub.Unregister(client) })
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	e := NewEvaluator(hub, nil, logger)
+	e := NewEvaluator(hub, nil, nil, logger)
 	return e, client, hub
 }
 
@@ -184,6 +187,27 @@ func TestSanitizeKey(t *testing.T) {
 	for in, want := range cases {
 		if got := sanitizeKey(in); got != want {
 			t.Errorf("sanitizeKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFormatMetricValue(t *testing.T) {
+	tests := []struct {
+		val  float64
+		unit string
+		want string
+	}{
+		{val: 95.5, unit: "%", want: "95.50%"},
+		{val: 512, unit: "KiB", want: "512.00 KiB"},
+		{val: 2048, unit: "KiB", want: "2.00 MiB"},
+		{val: 52428800, unit: "KiB", want: "50.00 GiB"},
+		{val: 2 * 1024 * 1024 * 1024, unit: "KiB", want: "2.00 TiB"},
+		{val: 12.34, unit: "ms", want: "12.34 ms"},
+		{val: 90.0, unit: "", want: "90.00"},
+	}
+	for _, tt := range tests {
+		if got := formatMetricValue(tt.val, tt.unit); got != tt.want {
+			t.Errorf("formatMetricValue(%v, %q) = %q, want %q", tt.val, tt.unit, got, tt.want)
 		}
 	}
 }

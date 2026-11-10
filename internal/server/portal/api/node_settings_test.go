@@ -3,22 +3,23 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	json "design-cloud-engine/internal/infra/jsoncodec"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"design-cloud-engine/internal/audit"
 	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/portal/httputil"
+	"design-cloud-engine/internal/server/push"
 	nodesvc "design-cloud-engine/internal/server/service/node"
-	"design-cloud-engine/internal/server/service/push"
 	"design-cloud-engine/internal/server/service/settings"
-	"design-cloud-engine/internal/server/service/settings/schema"
 
 	"github.com/labstack/echo/v5"
 )
@@ -52,16 +53,15 @@ func setupTestNodeSettingsAPI(t *testing.T) (*nodeHandler, *db.NodeRepo, *echo.E
 	}
 	t.Cleanup(func() { _ = auditSvc.Close() })
 
-	settingsSvc, err := settings.NewService(repos.Setting, auditSvc, nil)
+	settingsSvc, err := settings.NewService(repos.Setting, slog.Default(), auditSvc, nil, repos.CacheVersion, repos.Node)
 	if err != nil {
 		t.Fatalf("settings.NewService: %v", err)
 	}
-	settingsSvc.SetNodeRepo(repos.Node)
 
 	nodeService := nodesvc.NewService(repos.Node, slog.Default(), nodesvc.Config{
 		NodeID:  "test-master",
 		CertDir: filepath.Join(tempDir, "certs", "cluster"),
-	}, auditSvc, push.NoopPublisher{}, nil, settingsSvc)
+	}, auditSvc, push.NoopPublisher{}, nil, settingsSvc, nil)
 
 	cfg := &config.Config{}
 	h := newNodeHandler(nodeService, cfg)
@@ -96,7 +96,7 @@ func TestNodeSettingsAPI_Get(t *testing.T) {
 	{
 		node := &model.Node{
 			NodeID: "node-1",
-			Status: model.NodeStatusOnline,
+			Online: true,
 		}
 		if err := nodeRepo.Create(ctx, node); err != nil {
 			t.Fatalf("Create node: %v", err)
@@ -115,7 +115,7 @@ func TestNodeSettingsAPI_Get(t *testing.T) {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 
-		var resp httputil.Response
+		var resp httputil.SuccessResponse
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("unmarshal response: %v", err)
 		}
@@ -141,7 +141,7 @@ func TestNodeSettingsAPI_Put_ValidAndClear(t *testing.T) {
 
 	node := &model.Node{
 		NodeID: "node-2",
-		Status: model.NodeStatusOnline,
+		Online: true,
 	}
 	if err := nodeRepo.Create(ctx, node); err != nil {
 		t.Fatalf("Create node: %v", err)
@@ -154,7 +154,7 @@ func TestNodeSettingsAPI_Put_ValidAndClear(t *testing.T) {
 				"scanInterval": 120
 			},
 			"monitor": {
-				"resourceReportInterval": 45
+				"nvidiaSmiPath": "/usr/bin/nvidia-smi"
 			}
 		}
 	}`
@@ -172,7 +172,7 @@ func TestNodeSettingsAPI_Put_ValidAndClear(t *testing.T) {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 
-		var resp httputil.Response
+		var resp httputil.SuccessResponse
 		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 		viewBytes, _ := json.Marshal(resp.Data)
 		var view schema.NodeSettingsView
@@ -187,8 +187,8 @@ func TestNodeSettingsAPI_Put_ValidAndClear(t *testing.T) {
 		if view.Effective.Agent.VNC.ScanInterval != 120 {
 			t.Errorf("expected effective scanInterval 120, got %d", view.Effective.Agent.VNC.ScanInterval)
 		}
-		if view.Effective.Agent.Monitor.ResourceReportInterval != 45 {
-			t.Errorf("expected effective resourceReportInterval 45, got %d", view.Effective.Agent.Monitor.ResourceReportInterval)
+		if view.Effective.Agent.Monitor.NvidiaSmiPath != "/usr/bin/nvidia-smi" {
+			t.Errorf("expected effective nvidiaSmiPath, got %q", view.Effective.Agent.Monitor.NvidiaSmiPath)
 		}
 	}
 
@@ -207,7 +207,7 @@ func TestNodeSettingsAPI_Put_ValidAndClear(t *testing.T) {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 
-		var resp httputil.Response
+		var resp httputil.SuccessResponse
 		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 		viewBytes, _ := json.Marshal(resp.Data)
 		var view schema.NodeSettingsView
@@ -236,7 +236,7 @@ func TestNodeSettingsAPI_Put_ValidAndClear(t *testing.T) {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 
-		var resp httputil.Response
+		var resp httputil.SuccessResponse
 		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 		viewBytes, _ := json.Marshal(resp.Data)
 		var view schema.NodeSettingsView
@@ -246,8 +246,8 @@ func TestNodeSettingsAPI_Put_ValidAndClear(t *testing.T) {
 			t.Errorf("expected override to be cleared (nil), got: %+v", view.Override)
 		}
 		// Effective resets to global default
-		if view.Effective.Agent.VNC.ScanInterval != 1800 {
-			t.Errorf("expected effective scanInterval reset to 1800, got %d", view.Effective.Agent.VNC.ScanInterval)
+		if view.Effective.Agent.VNC.ScanInterval != 60 {
+			t.Errorf("expected effective scanInterval reset to 60, got %d", view.Effective.Agent.VNC.ScanInterval)
 		}
 	}
 }
@@ -260,7 +260,7 @@ func TestNodeSettingsAPI_Put_ValidationAndUnknownFields(t *testing.T) {
 
 	node := &model.Node{
 		NodeID: "node-3",
-		Status: model.NodeStatusOnline,
+		Online: true,
 	}
 	if err := nodeRepo.Create(ctx, node); err != nil {
 		t.Fatalf("Create node: %v", err)
@@ -317,7 +317,7 @@ func TestNodeSettingsAPI_Put_ValidationAndUnknownFields(t *testing.T) {
 		{
 			name:       "Invalid relative path -> 422",
 			nodeID:     "node-3",
-			body:       `{"agent": {"launcherPath": "relative/path"}}`,
+			body:       `{"agent": {"execBinPath": "relative/path"}}`,
 			wantStatus: http.StatusUnprocessableEntity,
 		},
 	}
@@ -348,21 +348,21 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 	nodes := []*model.Node{
 		{
 			NodeID: "batch-gpu-01",
-			Status: model.NodeStatusOnline,
+			Online: true,
 			OS:     "linux",
-			Labels: map[string]string{"pool": "gpu", "rack": "r1"},
+			Groups: []string{"gpu", "r1"},
 		},
 		{
 			NodeID: "batch-gpu-02",
-			Status: model.NodeStatusOffline,
+			Online: false,
 			OS:     "linux",
-			Labels: map[string]string{"pool": "gpu", "rack": "r2"},
+			Groups: []string{"gpu", "r2"},
 		},
 		{
 			NodeID: "batch-cpu-01",
-			Status: model.NodeStatusOnline,
+			Online: true,
 			OS:     "windows",
-			Labels: map[string]string{"pool": "cpu"},
+			Groups: []string{"cpu"},
 		},
 	}
 	for _, n := range nodes {
@@ -374,10 +374,10 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 	// 1. Empty selector -> 422
 	{
 		reqBody := `{"selector": {}, "patch": {"agent": {"vnc": {"scanInterval": 120}}}}`
-		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch", bytes.NewBufferString(reqBody))
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch-update", bytes.NewBufferString(reqBody))
 		rec := httptest.NewRecorder()
 		c := e.NewContext(req, rec)
-		c.SetPath("/api/admin/system/nodes/settings/batch")
+		c.SetPath("/api/admin/system/nodes/settings/batch-update")
 
 		_ = h.batchUpdateNodeSettings(c)
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -388,10 +388,10 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 	// 2. Nil selector -> 422
 	{
 		reqBody := `{"patch": {"agent": {"vnc": {"scanInterval": 120}}}}`
-		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch", bytes.NewBufferString(reqBody))
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch-update", bytes.NewBufferString(reqBody))
 		rec := httptest.NewRecorder()
 		c := e.NewContext(req, rec)
-		c.SetPath("/api/admin/system/nodes/settings/batch")
+		c.SetPath("/api/admin/system/nodes/settings/batch-update")
 
 		_ = h.batchUpdateNodeSettings(c)
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -402,10 +402,10 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 	// 3. Unknown field or domain (storage) -> 422
 	{
 		reqBody := `{"selector": {"nodeIds": ["batch-gpu-01"]}, "patch": {"storage": {"foo": "bar"}}}`
-		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch", bytes.NewBufferString(reqBody))
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch-update", bytes.NewBufferString(reqBody))
 		rec := httptest.NewRecorder()
 		c := e.NewContext(req, rec)
-		c.SetPath("/api/admin/system/nodes/settings/batch")
+		c.SetPath("/api/admin/system/nodes/settings/batch-update")
 
 		_ = h.batchUpdateNodeSettings(c)
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -416,10 +416,10 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 	// 4. Malformed JSON -> 400
 	{
 		reqBody := `{bad json`
-		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch", bytes.NewBufferString(reqBody))
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch-update", bytes.NewBufferString(reqBody))
 		rec := httptest.NewRecorder()
 		c := e.NewContext(req, rec)
-		c.SetPath("/api/admin/system/nodes/settings/batch")
+		c.SetPath("/api/admin/system/nodes/settings/batch-update")
 
 		_ = h.batchUpdateNodeSettings(c)
 		if rec.Code != http.StatusBadRequest {
@@ -430,10 +430,10 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 	// 5. Invalid status string -> 422
 	{
 		reqBody := `{"selector": {"status": ["invalid_status"]}, "patch": {"agent": {"vnc": {"scanInterval": 120}}}}`
-		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch", bytes.NewBufferString(reqBody))
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch-update", bytes.NewBufferString(reqBody))
 		rec := httptest.NewRecorder()
 		c := e.NewContext(req, rec)
-		c.SetPath("/api/admin/system/nodes/settings/batch")
+		c.SetPath("/api/admin/system/nodes/settings/batch-update")
 
 		_ = h.batchUpdateNodeSettings(c)
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -441,14 +441,13 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 		}
 	}
 
-	// 6. Dry run with labels selector -> matched=2, updated=2, unchanged=0, but DB NOT changed
+	// 6. Dry run with groups selector -> matched=2, updated=2, unchanged=0, but DB NOT changed
 	{
 		reqBody := `{
-			"selector": {"labels": {"pool": "gpu"}},
+			"selector": {"groups": ["gpu"]},
 			"patch": {
 				"agent": {
 					"monitor": {
-						"resourceReportInterval": 30,
 						"diskMounts": [
 							{"name": "data", "path": "/data", "enabled": true, "os": "linux"}
 						]
@@ -457,17 +456,17 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 			},
 			"dryRun": true
 		}`
-		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch", bytes.NewBufferString(reqBody))
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch-update", bytes.NewBufferString(reqBody))
 		rec := httptest.NewRecorder()
 		c := e.NewContext(req, rec)
-		c.SetPath("/api/admin/system/nodes/settings/batch")
+		c.SetPath("/api/admin/system/nodes/settings/batch-update")
 
 		_ = h.batchUpdateNodeSettings(c)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200 for dryRun, got %d: %s", rec.Code, rec.Body.String())
 		}
 
-		var resp httputil.Response
+		var resp httputil.SuccessResponse
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("unmarshal resp: %v", err)
 		}
@@ -486,11 +485,10 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 	// 7. Execute batch update (dryRun=false)
 	{
 		reqBody := `{
-			"selector": {"labels": {"pool": "gpu"}},
+			"selector": {"groups": ["gpu"]},
 			"patch": {
 				"agent": {
 					"monitor": {
-						"resourceReportInterval": 30,
 						"diskMounts": [
 							{"name": "data", "path": "/data", "enabled": true, "os": "linux"}
 						]
@@ -499,17 +497,17 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 			},
 			"dryRun": false
 		}`
-		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch", bytes.NewBufferString(reqBody))
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch-update", bytes.NewBufferString(reqBody))
 		rec := httptest.NewRecorder()
 		c := e.NewContext(req, rec)
-		c.SetPath("/api/admin/system/nodes/settings/batch")
+		c.SetPath("/api/admin/system/nodes/settings/batch-update")
 
 		_ = h.batchUpdateNodeSettings(c)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200 for batch update, got %d: %s", rec.Code, rec.Body.String())
 		}
 
-		var resp httputil.Response
+		var resp httputil.SuccessResponse
 		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 		dataMap := resp.Data.(map[string]any)
 		if int(dataMap["matched"].(float64)) != 2 || int(dataMap["updated"].(float64)) != 2 {
@@ -531,9 +529,6 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 		if err != nil || view.Override == nil || view.Override.Agent.Monitor == nil {
 			t.Fatalf("failed to get node1 settings: %v", err)
 		}
-		if *view.Override.Agent.Monitor.ResourceReportInterval != 30 {
-			t.Errorf("expected interval 30, got %d", *view.Override.Agent.Monitor.ResourceReportInterval)
-		}
 		if len(view.Override.Agent.Monitor.DiskMounts) != 1 || view.Override.Agent.Monitor.DiskMounts[0].Name != "data" {
 			t.Errorf("expected disk mount data, got %+v", view.Override.Agent.Monitor.DiskMounts)
 		}
@@ -542,11 +537,10 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 	// 8. Re-running same batch update reports updated=0, unchanged=2 (idempotency)
 	{
 		reqBody := `{
-			"selector": {"labels": {"pool": "gpu"}},
+			"selector": {"groups": ["gpu"]},
 			"patch": {
 				"agent": {
 					"monitor": {
-						"resourceReportInterval": 30,
 						"diskMounts": [
 							{"name": "data", "path": "/data", "enabled": true, "os": "linux"}
 						]
@@ -555,21 +549,95 @@ func TestNodeSettingsAPI_Batch(t *testing.T) {
 			},
 			"dryRun": false
 		}`
-		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch", bytes.NewBufferString(reqBody))
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/system/nodes/settings/batch-update", bytes.NewBufferString(reqBody))
 		rec := httptest.NewRecorder()
 		c := e.NewContext(req, rec)
-		c.SetPath("/api/admin/system/nodes/settings/batch")
+		c.SetPath("/api/admin/system/nodes/settings/batch-update")
 
 		_ = h.batchUpdateNodeSettings(c)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200 on retry, got %d: %s", rec.Code, rec.Body.String())
 		}
 
-		var resp httputil.Response
+		var resp httputil.SuccessResponse
 		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 		dataMap := resp.Data.(map[string]any)
 		if int(dataMap["matched"].(float64)) != 2 || int(dataMap["updated"].(float64)) != 0 || int(dataMap["unchanged"].(float64)) != 2 {
 			t.Fatalf("expected 0 updated and 2 unchanged on idempotent retry, got: %+v", dataMap)
 		}
+	}
+}
+
+func TestListNodeMetricsAPI(t *testing.T) {
+	h, nodeRepo, e := setupTestNodeSettingsAPI(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := nodeRepo.Create(ctx, &model.Node{NodeID: "m-node-1", Groups: []string{"gpu"}}); err != nil {
+		t.Fatalf("create node 1: %v", err)
+	}
+	if err := nodeRepo.Create(ctx, &model.Node{NodeID: "m-node-2", Groups: []string{"cpu"}}); err != nil {
+		t.Fatalf("create node 2: %v", err)
+	}
+	if err := nodeRepo.UpsertMetrics(ctx, &model.NodeMetrics{NodeID: "m-node-1", CPUCores: 16, CPUUtil: 0.75, ReportedAt: now}); err != nil {
+		t.Fatalf("upsert metrics 1: %v", err)
+	}
+	if err := nodeRepo.UpsertMetrics(ctx, &model.NodeMetrics{NodeID: "m-node-2", CPUCores: 8, CPUUtil: 0.25, ReportedAt: now}); err != nil {
+		t.Fatalf("upsert metrics 2: %v", err)
+	}
+
+	// 1. 分页查询
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/system/nodes/metrics?limit=1&offset=0", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	if err := h.listNodeMetrics(c); err != nil {
+		t.Fatalf("listNodeMetrics: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var pageResp struct {
+		Data struct {
+			Items []nodesvc.NodeMetricsView `json:"items"`
+			Total int64                     `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &pageResp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if pageResp.Data.Total != 2 || len(pageResp.Data.Items) != 1 || pageResp.Data.Items[0].NodeID != "m-node-1" {
+		t.Fatalf("unexpected paginated metrics: %+v", pageResp.Data)
+	}
+
+	// 2. 分组过滤
+	reqGroup := httptest.NewRequest(http.MethodGet, "/api/admin/system/nodes/metrics?groups=cpu", nil)
+	recGroup := httptest.NewRecorder()
+	cGroup := e.NewContext(reqGroup, recGroup)
+	if err := h.listNodeMetrics(cGroup); err != nil {
+		t.Fatalf("listNodeMetrics groups: %v", err)
+	}
+	if recGroup.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recGroup.Code, recGroup.Body.String())
+	}
+	var groupResp struct {
+		Data struct {
+			Items []nodesvc.NodeMetricsView `json:"items"`
+			Total int64                     `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recGroup.Body.Bytes(), &groupResp); err != nil {
+		t.Fatalf("unmarshal group response: %v", err)
+	}
+	if groupResp.Data.Total != 1 || len(groupResp.Data.Items) != 1 || groupResp.Data.Items[0].NodeID != "m-node-2" {
+		t.Fatalf("unexpected group metrics: %+v", groupResp.Data)
+	}
+
+	// 3. 非法分组名返回 422
+	reqBad := httptest.NewRequest(http.MethodGet, "/api/admin/system/nodes/metrics?groups=bad%20group!", nil)
+	recBad := httptest.NewRecorder()
+	cBad := e.NewContext(reqBad, recBad)
+	_ = h.listNodeMetrics(cBad)
+	if recBad.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for invalid group, got %d: %s", recBad.Code, recBad.Body.String())
 	}
 }

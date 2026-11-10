@@ -1,0 +1,13 @@
+# Audit and security logs under /var/log/design-cloud (Portal tail/SSE).
+# App and HTTP access logs go to journald — do not rotate here.
+/var/log/design-cloud/audit.*.log
+/var/log/design-cloud/security.*.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    copytruncate
+}

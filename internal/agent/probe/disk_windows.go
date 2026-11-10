@@ -8,56 +8,34 @@ import (
 	"unsafe"
 
 	pb "design-cloud-engine/internal/contract/proto"
-	"golang.org/x/sync/singleflight"
 	"golang.org/x/sys/windows"
 )
 
 var (
 	kernel32Dll                = windows.NewLazySystemDLL("kernel32.dll")
 	procGetLogicalDriveStrings = kernel32Dll.NewProc("GetLogicalDriveStringsW")
-	diskSFGroupWin             singleflight.Group
 )
 
 // StatfsWithTimeout queries disk space on Windows using GetDiskFreeSpaceExW with timeout.
 func StatfsWithTimeout(ctx context.Context, path string) (*pb.DiskUsage, error) {
-	type result struct {
-		usage *pb.DiskUsage
-		err   error
-	}
-
 	cleanPath := filepath.Clean(path)
-	ch := make(chan result, 1)
-	go func() {
-		v, err, _ := diskSFGroupWin.Do(cleanPath, func() (any, error) {
-			pathPtr, err := windows.UTF16PtrFromString(cleanPath)
-			if err != nil {
-				return nil, err
-			}
-			var freeBytesAvailable, totalBytes, totalFreeBytes uint64
-			if err := windows.GetDiskFreeSpaceEx(pathPtr, &freeBytesAvailable, &totalBytes, &totalFreeBytes); err != nil {
-				return nil, err
-			}
-			totalKB := int64(totalBytes / 1024)
-			usedKB := totalKB - int64(totalFreeBytes/1024)
-			return &pb.DiskUsage{
-				MountPoint: cleanPath,
-				Total:      totalKB,
-				Used:       usedKB,
-			}, nil
-		})
+	return runDiskProbe(ctx, cleanPath, func() (*pb.DiskUsage, error) {
+		pathPtr, err := windows.UTF16PtrFromString(cleanPath)
 		if err != nil {
-			ch <- result{nil, err}
-			return
+			return nil, err
 		}
-		ch <- result{v.(*pb.DiskUsage), nil}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case res := <-ch:
-		return res.usage, res.err
-	}
+		var freeBytesAvailable, totalBytes, totalFreeBytes uint64
+		if err := windows.GetDiskFreeSpaceEx(pathPtr, &freeBytesAvailable, &totalBytes, &totalFreeBytes); err != nil {
+			return nil, err
+		}
+		totalKB := int64(totalBytes / 1024)
+		usedKB := totalKB - int64(totalFreeBytes/1024)
+		return &pb.DiskUsage{
+			MountPoint: cleanPath,
+			Total:      totalKB,
+			Used:       usedKB,
+		}, nil
+	})
 }
 
 // detectFilesystemMap on Windows returns drive letter -> filesystem type.

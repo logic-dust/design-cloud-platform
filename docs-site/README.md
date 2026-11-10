@@ -1,10 +1,10 @@
 # 文档站
 
-本目录是 `Hugo + Hextra` 站点工程，业务文档位于 `docs/`（本站的 `docs-site/docs/`），构建时组织为文档站。
+本目录是 `Hugo + Hextra` 站点工程，业务文档位于 `docs-site/docs/`（站内挂载为 `content/docs`）。
 
 ## 设计原则
 
-- `docs/`（`docs-site/docs/`）作为文档事实源
+- `docs-site/docs/` 作为文档事实源
 - 文档站配置与业务代码分离
 - 主题按 Hextra 官方推荐的 Hugo module 方式接入
 - 站点负责导航、搜索与发布承载
@@ -13,13 +13,13 @@
 
 站点通过 Hugo module mounts 将：
 
-- `docs/`
+- `docs/`（本目录下的 `docs/` 子目录）
 
 挂载为：
 
 - `content/docs`
 
-因此站点内容直接来自仓库根目录下的 `docs/**/*.md`。
+因此站点内容直接来自 `docs-site/docs/**/*.md`。
 
 ## 预期工具链
 

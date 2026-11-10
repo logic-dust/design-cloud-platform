@@ -1,0 +1,18 @@
+# ========================================
+# ===== SYSTEM DIRECTORY GROUPS Http =====
+# ========================================
+# ----- 先执行 02-session.http 登录 -----
+# ----- 目录组在 /api/admin/system/groups（ScopeUsers） -----
+
+### 获取目录组列表（name + 可选 gid，无 total） (System admin)
+GET {{addr}}/api/admin/system/groups
+Authorization: Bearer {{accessToken}}
+
+### 获取目录组详情（含 members） (System admin)
+GET {{addr}}/api/admin/system/groups/{{testGroup}}
+Authorization: Bearer {{accessToken}}
+
+### 刷新 UID/GID 名字映射缓存 (System admin)
+# ----- 202=本机已清空并广播；503=广播失败（本机已生效，可重试） -----
+POST {{addr}}/api/admin/system/id-mappings/refresh
+Authorization: Bearer {{accessToken}}

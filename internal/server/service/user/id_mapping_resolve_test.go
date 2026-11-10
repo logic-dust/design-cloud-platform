@@ -8,10 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"design-cloud-engine/internal/common"
+	"design-cloud-engine/internal/contract/schema"
+	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/server/service/settings"
-	"design-cloud-engine/internal/server/service/settings/schema"
 
+	"design-cloud-engine/internal/contract"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,9 +21,9 @@ func updateAuthSettings(t *testing.T, settingsSvc *settings.Service, pos, neg in
 	t.Helper()
 	body := fmt.Sprintf(`{
 		"sessionTTL": 86400,
-		"maxLoginSessionsPerUser": 1,
-		"maxUserLoginAttempts": 5,
-		"maxIPLoginAttempts": 20,
+		"maxSessionsPerUser": 1,
+		"maxUserLoginAttempts": 7,
+		"maxIPLoginAttempts": 15,
 		"userBanDuration": 300,
 		"ipBanDuration": 86400,
 		"idMappingFoundCacheTTL": %d,
@@ -155,7 +156,7 @@ func TestResolveNamespace_StaleNegativeNeverBecomesNotFound(t *testing.T) {
 
 	_, err := core.resolveNamespace(context.Background(), namespaceUser, []uint32{1000}, ttls, local, ldapF)
 	require.Error(t, err)
-	var domainErr common.DomainError
+	var domainErr contract.DomainError
 	require.ErrorAs(t, err, &domainErr)
 	require.Equal(t, http.StatusServiceUnavailable, domainErr.HTTPStatus())
 }
@@ -270,7 +271,7 @@ func TestResolveIDMappings_UnavailableWhenNoSources(t *testing.T) {
 
 	_, err := core.ResolveIDMappings(context.Background(), IDMappingsRequest{UIDs: []uint32{1000}})
 	require.Error(t, err)
-	var domainErr common.DomainError
+	var domainErr contract.DomainError
 	require.ErrorAs(t, err, &domainErr)
 	require.Equal(t, http.StatusServiceUnavailable, domainErr.HTTPStatus())
 }
@@ -344,7 +345,7 @@ func TestIDMappingCacheTTLs_ChangeClearsCachedEntries(t *testing.T) {
 	require.Equal(t, "after", res.Users[1000], "TTL 变更必须让旧条目失效，本次解析应回到源")
 }
 
-// --- 集群广播只保留给管理员 refresh：TTL 配置变更只清本机，不得写 cache_versions。
+// --- TTL 配置变更只清本机，不得写 cache_versions。identity 广播来自 admin refresh 与成功的用户同步。
 
 func TestIDMappingCacheTTLs_TTLChangeDoesNotBroadcast(t *testing.T) {
 	t.Parallel()
@@ -367,15 +368,15 @@ func TestIDMappingCacheTTLs_TTLChangeDoesNotBroadcast(t *testing.T) {
 
 	after, err := core.cacheVersion.GetAll(ctx)
 	require.NoError(t, err)
-	require.Equal(t, before["id_mappings"], after["id_mappings"],
-		"TTL settings change must not bump id_mappings (admin refresh is the only broadcast trigger)")
+	require.Equal(t, before[db.CacheVersionTopicIdentity], after[db.CacheVersionTopicIdentity],
+		"TTL settings change must not bump identity")
 
 	// 对照：管理员 refresh 必须广播。
 	require.NoError(t, core.RefreshIDMappingCache(ctx, "admin"))
 	refreshed, err := core.cacheVersion.GetAll(ctx)
 	require.NoError(t, err)
-	require.Equal(t, after["id_mappings"]+1, refreshed["id_mappings"],
-		"admin refresh must bump the id_mappings topic")
+	require.Equal(t, after[db.CacheVersionTopicIdentity]+1, refreshed[db.CacheVersionTopicIdentity],
+		"admin refresh must bump the identity topic")
 }
 
 // --- 组命名空间与用户命名空间彼此独立。

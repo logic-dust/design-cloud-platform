@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	fsutil "design-cloud-engine/internal/common/fs"
+	fsutil "design-cloud-engine/internal/infra/fs"
 )
 
 const (
@@ -58,6 +58,8 @@ type CertResult struct {
 	Fingerprint string `json:"fingerprint"`
 	Subject     string `json:"subject"`
 	ExpiresAt   string `json:"expiresAt"`
+	CertPEM     []byte `json:"-"` // in-memory for enrollment only; never serialize to admin API
+	KeyPEM      []byte `json:"-"`
 }
 
 // CAResult contains metadata for a generated CA.
@@ -74,11 +76,11 @@ type CAResult struct {
 
 // InitializeCA generates or reuses the cluster Root CA (exactly one per cluster).
 //
-// Layout: ca.crt is flat under certs/cluster (0755, traversable by every node) while
-// ca.key is nested under certs/cluster/ca (0700). The two parent directories must be
-// created separately with different permissions — creating only the cert parent would
-// make the key write fail with ENOENT, and 0700 on certs/cluster would lock out
-// compute nodes on shared storage.
+// Layout: certs/ and certs/cluster are 0750 (group-traversable, no world access);
+// ca.crt is flat under certs/cluster while ca.key is nested under certs/cluster/ca (0700).
+// The two parent directories must be created separately with different permissions —
+// creating only the cert parent would make the key write fail with ENOENT, and 0700
+// on certs/cluster would lock out group-member nodes on shared storage.
 //
 // Reuse semantics (force=false):
 //   - ca.crt and ca.key exist as a pair → return ErrCAExists (caller treats as no-op);
@@ -90,7 +92,11 @@ func InitializeCA(caCertFile, caKeyFile string, force bool) (*CAResult, error) {
 	if caCertFile == "" || caKeyFile == "" {
 		return nil, fmt.Errorf("CA cert and key paths are required")
 	}
-	if err := fsutil.MkdirShared(filepath.Dir(caCertFile)); err != nil { // certs/cluster → 0755
+	clusterDir := filepath.Dir(caCertFile)
+	if err := fsutil.MkdirShared(filepath.Dir(clusterDir)); err != nil { // certs → 0750
+		return nil, fmt.Errorf("failed to create certs root dir: %w", err)
+	}
+	if err := fsutil.MkdirShared(clusterDir); err != nil { // certs/cluster → 0750
 		return nil, fmt.Errorf("failed to create CA cert dir: %w", err)
 	}
 	if err := fsutil.MkdirPrivate(filepath.Dir(caKeyFile)); err != nil { // certs/cluster/ca → 0700
@@ -117,12 +123,8 @@ func InitializeCA(caCertFile, caKeyFile string, force bool) (*CAResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate CA: %w", err)
 	}
-	if err := fsutil.WriteSharedFile(caCertFile, certPEM); err != nil { // public asset 0644
-		return nil, fmt.Errorf("failed to write CA cert: %w", err)
-	}
-	if err := fsutil.WritePrivateFile(caKeyFile, keyPEM); err != nil { // private asset 0600
-		_ = os.Remove(caCertFile)
-		return nil, fmt.Errorf("failed to write CA key: %w", err)
+	if err := publishCertKeyPair(caCertFile, caKeyFile, certPEM, keyPEM); err != nil {
+		return nil, err
 	}
 
 	parsed, err := parseCert(certPEM)
@@ -199,12 +201,8 @@ func IssueNodeCert(opts CertOptions) (*CertResult, error) {
 		return nil, err
 	}
 
-	if err := fsutil.WriteSharedFile(certPath, certPEM); err != nil { // 证书 0644
-		return nil, fmt.Errorf("failed to write cert: %w", err)
-	}
-	if err := fsutil.WritePrivateFile(keyPath, keyPEM); err != nil { // 私钥 0600
-		_ = os.Remove(certPath)
-		return nil, fmt.Errorf("failed to write key: %w", err)
+	if err := publishCertKeyPair(certPath, keyPath, certPEM, keyPEM); err != nil {
+		return nil, err
 	}
 
 	parsed, err := parseCert(certPEM)
@@ -218,6 +216,8 @@ func IssueNodeCert(opts CertOptions) (*CertResult, error) {
 		Fingerprint: fingerprintSHA256(parsed),
 		Subject:     parsed.Subject.String(),
 		ExpiresAt:   parsed.NotAfter.UTC().Format(time.RFC3339),
+		CertPEM:     append([]byte(nil), certPEM...),
+		KeyPEM:      append([]byte(nil), keyPEM...),
 	}, nil
 }
 
@@ -465,6 +465,93 @@ func loadCAFiles(certPath, keyPath string) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("failed to read CA key: %w", err)
 	}
 	return certPEM, keyPEM, nil
+}
+
+const certPairPrevSuffix = ".prev"
+
+// publishCertKeyPair writes cert+key as one logical publish: snapshot any
+// existing pair to <path>.prev, then write both; on failure restore the pair
+// (or remove half-written files when there was no previous pair). Callers MUST
+// call CommitCertPair after the DB binding succeeds, or RollbackCertPair when a
+// later step fails, so the snapshots do not outlive the issuance transaction.
+func certPairPrevPath(path string) string {
+	return filepath.Join(filepath.Dir(path), fmt.Sprintf("%s%s", filepath.Base(path), certPairPrevSuffix))
+}
+
+func publishCertKeyPair(certPath, keyPath string, certPEM, keyPEM []byte) error {
+	certPrev := certPairPrevPath(certPath)
+	keyPrev := certPairPrevPath(keyPath)
+
+	if err := snapshotToPrev(certPath, certPrev, false); err != nil {
+		return fmt.Errorf("backup cert: %w", err)
+	}
+	if err := snapshotToPrev(keyPath, keyPrev, true); err != nil {
+		return fmt.Errorf("backup key: %w", err)
+	}
+
+	if err := fsutil.WriteSharedFile(certPath, certPEM); err != nil {
+		_ = restoreFromPrev(certPath, certPrev, false)
+		_ = restoreFromPrev(keyPath, keyPrev, true)
+		return fmt.Errorf("failed to write cert: %w", err)
+	}
+	if err := fsutil.WritePrivateFile(keyPath, keyPEM); err != nil {
+		_ = restoreFromPrev(certPath, certPrev, false)
+		_ = restoreFromPrev(keyPath, keyPrev, true)
+		return fmt.Errorf("failed to write key: %w", err)
+	}
+	return nil
+}
+
+func snapshotToPrev(path, prev string, private bool) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			_ = os.Remove(prev)
+			return nil
+		}
+		return err
+	}
+	if private {
+		return fsutil.WritePrivateFile(prev, data)
+	}
+	return fsutil.WriteSharedFile(prev, data)
+}
+
+func restoreFromPrev(path, prev string, private bool) error {
+	data, err := os.ReadFile(prev)
+	if err != nil {
+		if os.IsNotExist(err) {
+			_ = os.Remove(path)
+			return nil
+		}
+		return err
+	}
+	if private {
+		return fsutil.WritePrivateFile(path, data)
+	}
+	return fsutil.WriteSharedFile(path, data)
+}
+
+// CommitCertPair removes the rollback snapshots after the caller has durably
+// persisted the new binding (DB update) and no longer needs to roll back files.
+func CommitCertPair(certPath, keyPath string) {
+	_ = os.Remove(certPairPrevPath(certPath))
+	_ = os.Remove(certPairPrevPath(keyPath))
+}
+
+// RollbackCertPair restores the pre-issuance cert/key pair from .prev and then
+// removes the snapshots. It is used when the new pair was published but the
+// subsequent DB binding failed, so files and DB stay consistent (old pair).
+// If no snapshot exists (first issuance), the published pair is removed.
+func RollbackCertPair(certPath, keyPath string) error {
+	if err := restoreFromPrev(certPath, certPairPrevPath(certPath), false); err != nil {
+		return err
+	}
+	if err := restoreFromPrev(keyPath, certPairPrevPath(keyPath), true); err != nil {
+		return err
+	}
+	CommitCertPair(certPath, keyPath)
+	return nil
 }
 
 func fileExists(path string) bool {

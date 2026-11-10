@@ -1,8 +1,6 @@
 package api
 
 import (
-	"net/http"
-
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/portal/httputil"
 
@@ -20,11 +18,12 @@ func (h *licenseHandler) adminLicensesAPI(g *echo.Group) {
 
 // --- 获取许可证服务列表（管理员，含未启用）
 func (h *licenseHandler) adminListLicenseServices(c *echo.Context) error {
-	list, err := h.license.AdminList(c.Request().Context())
+	p := httputil.ParsePage(c)
+	list, total, err := h.license.AdminListPage(c.Request().Context(), p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: list})
+	return httputil.RespondPage(c, list, total)
 }
 
 // --- 获取许可证服务详情（管理员，含未启用）
@@ -38,7 +37,7 @@ func (h *licenseHandler) adminGetLicenseService(c *echo.Context) error {
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: licService})
+	return httputil.RespondOK(c, licService)
 }
 
 type createLicenseRequest struct {
@@ -49,8 +48,8 @@ type createLicenseRequest struct {
 // --- 创建许可证服务（管理员）
 func (h *licenseHandler) adminCreateLicenseService(c *echo.Context) error {
 	var req createLicenseRequest
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
 	}
 
 	base := req.LicenseServiceBase
@@ -64,7 +63,7 @@ func (h *licenseHandler) adminCreateLicenseService(c *echo.Context) error {
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusCreated, httputil.Response{Data: licService})
+	return httputil.RespondCreated(c, licService)
 }
 
 // --- 更新许可证服务（管理员）
@@ -75,15 +74,15 @@ func (h *licenseHandler) adminUpdateLicenseService(c *echo.Context) error {
 	}
 
 	var req model.LicenseServiceBase
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &req); err != nil {
+		return httputil.RespondError(c, err)
 	}
 
 	licService, err := h.license.UpdateFromInput(c.Request().Context(), id, req)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: licService})
+	return httputil.RespondOK(c, licService)
 }
 
 // --- 删除许可证服务（管理员）
@@ -96,5 +95,5 @@ func (h *licenseHandler) adminDeleteLicenseService(c *echo.Context) error {
 	if err := h.license.Delete(c.Request().Context(), id); err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.NoContent(http.StatusNoContent)
+	return httputil.RespondNoContent(c)
 }

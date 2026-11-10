@@ -6,20 +6,20 @@ import (
 	"log/slog"
 	"time"
 
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/contract"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/execution"
 )
 
 var (
-	ErrUserNotFound             = common.NewNotFoundError("user not found")
-	ErrGroupNotFound            = common.NewNotFoundError("Group not found")
+	ErrUserNotFound             = contract.NewNotFoundError("user not found")
+	ErrGroupNotFound            = contract.NewNotFoundError("Group not found")
 	ErrUserNotActive            = errors.New("this user account is not active")
 	ErrUserPasswordIncorrect    = errors.New("user or password is incorrect")
 	ErrUserPasswordExpired      = errors.New("user password has expired and must be changed")
 	ErrUserPasswordSameAsOld    = errors.New("new password cannot be the same as the old password")
-	ErrLDAPPasswordNotSupported = common.NewInvalidParamError("password change is not supported for LDAP users; please use your organization's LDAP management portal")
+	ErrLDAPPasswordNotSupported = contract.NewInvalidParamError("password change is not supported for LDAP users; please use your organization's LDAP management portal")
 )
 
 type SystemUser struct {
@@ -37,12 +37,21 @@ type SystemUser struct {
 	PasswordExpiresAt *time.Time `json:"passwordExpiresAt,omitempty"`
 }
 
+// GroupInfo is a directory group from the identity source (local /etc/group or LDAP).
+// Gid is omitted when the source has no posix gidNumber.
+type GroupInfo struct {
+	Name    string   `json:"name"`
+	Gid     *uint32  `json:"gid,omitempty"`
+	Members []string `json:"members,omitempty"`
+}
+
 type Provider interface {
 	GetUser(ctx context.Context, username string) (*SystemUser, error)
 	ListUsers(ctx context.Context) ([]SystemUser, error)
-	ListGroups(ctx context.Context) (map[string][]string, error)
-	ListUserGroups(ctx context.Context) (map[string][]string, error)
-	GetGroupMembers(ctx context.Context, groupName string) ([]string, error)
+	// ListGroups returns directory groups (sorted by name) with optional gid and members.
+	ListGroups(ctx context.Context) ([]GroupInfo, error)
+	// GetGroup returns one directory group by name, or ErrGroupNotFound.
+	GetGroup(ctx context.Context, groupName string) (*GroupInfo, error)
 	// UsersByIDs resolves posix uidNumber → username. Missing IDs are omitted (not an error).
 	// On ID-source failure the error must be returned; callers must not treat misses as notFound.
 	UsersByIDs(ctx context.Context, uids []uint32) (map[uint32]string, error)

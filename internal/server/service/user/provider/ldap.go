@@ -129,7 +129,7 @@ func (p *ldapProvider) ListUsers(ctx context.Context) ([]SystemUser, error) {
 		return nil, err
 	}
 	dbIDByName := make(map[string]uint)
-	if dbUsers, _, err := p.db.List(ctx, 0, 0); err == nil {
+	if dbUsers, err := p.db.ListAll(ctx); err == nil {
 		for _, u := range dbUsers {
 			dbIDByName[u.Username] = u.ID
 		}
@@ -224,7 +224,7 @@ func (p *ldapProvider) idLookup(
 	return out, nil
 }
 
-func (p *ldapProvider) ListGroups(_ context.Context) (map[string][]string, error) {
+func (p *ldapProvider) ListGroups(_ context.Context) ([]GroupInfo, error) {
 	l, err := p.ldapDial()
 	if err != nil {
 		return nil, err
@@ -236,7 +236,7 @@ func (p *ldapProvider) ListGroups(_ context.Context) (map[string][]string, error
 	return p.ldapSearchAllGroups(l)
 }
 
-func (p *ldapProvider) GetGroupMembers(_ context.Context, groupName string) ([]string, error) {
+func (p *ldapProvider) GetGroup(_ context.Context, groupName string) (*GroupInfo, error) {
 	l, err := p.ldapDial()
 	if err != nil {
 		return nil, err
@@ -247,47 +247,27 @@ func (p *ldapProvider) GetGroupMembers(_ context.Context, groupName string) ([]s
 	}
 
 	filter := fmt.Sprintf("(&%s(cn=%s))", p.groupFilter(), ldap.EscapeFilter(groupName))
-	req := ldap.NewSearchRequest(p.groupBaseDN(), ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 1, 0, false, filter, []string{"member", "memberUid"}, nil)
+	req := ldap.NewSearchRequest(
+		p.groupBaseDN(),
+		ldap.ScopeWholeSubtree,
+		ldap.NeverDerefAliases,
+		1, 0, false,
+		filter,
+		[]string{"cn", "gidNumber", "member", "memberUid"},
+		nil,
+	)
 	res, err := l.Search(req)
 	if err != nil {
-		return nil, fmt.Errorf("ldap group members search failed: %w", err)
+		return nil, fmt.Errorf("ldap group search failed: %w", err)
 	}
 	if len(res.Entries) == 0 {
 		return nil, ErrGroupNotFound
 	}
-
-	e := res.Entries[0]
-	idAttr := p.idAttribute()
-	var members []string
-	members = append(members, e.GetAttributeValues("memberUid")...)
-	for _, dn := range e.GetAttributeValues("member") {
-		if uid := parseMemberDN(dn, idAttr); uid != "" {
-			members = append(members, uid)
-		}
+	g := p.entryToGroupInfo(res.Entries[0])
+	if g == nil {
+		return nil, ErrGroupNotFound
 	}
-	return members, nil
-}
-
-func (p *ldapProvider) ListUserGroups(_ context.Context) (map[string][]string, error) {
-	l, err := p.ldapDial()
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = l.Close() }()
-	if err := p.ldapBindServiceAccount(l); err != nil {
-		return nil, err
-	}
-	allGroups, err := p.ldapSearchAllGroups(l)
-	if err != nil {
-		return nil, err
-	}
-	userGroupsMap := make(map[string][]string)
-	for groupName, members := range allGroups {
-		for _, member := range members {
-			userGroupsMap[member] = append(userGroupsMap[member], groupName)
-		}
-	}
-	return userGroupsMap, nil
+	return g, nil
 }
 
 func (p *ldapProvider) VerifyPassword(_ context.Context, username, password string) error {
@@ -607,43 +587,67 @@ func (p *ldapProvider) ldapSearchGroupsByIDs(l *ldap.Conn, gids []uint32) (map[u
 	return idNameMap(res.Entries, "gidNumber", "cn"), nil
 }
 
-func (p *ldapProvider) ldapSearchAllGroups(l *ldap.Conn) (map[string][]string, error) {
-	req := ldap.NewSearchRequest(p.groupBaseDN(), ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false, p.groupFilter(), []string{"cn", "member", "memberUid"}, nil)
+func (p *ldapProvider) ldapSearchAllGroups(l *ldap.Conn) ([]GroupInfo, error) {
+	req := ldap.NewSearchRequest(
+		p.groupBaseDN(),
+		ldap.ScopeWholeSubtree,
+		ldap.NeverDerefAliases,
+		0, 0, false,
+		p.groupFilter(),
+		[]string{"cn", "gidNumber", "member", "memberUid"},
+		nil,
+	)
 	res, err := l.Search(req)
 	if err != nil {
 		return nil, fmt.Errorf("ldap group list search failed: %w", err)
 	}
-	idAttr := p.idAttribute()
-	groups := make(map[string][]string, len(res.Entries))
+	groups := make([]GroupInfo, 0, len(res.Entries))
 	for _, e := range res.Entries {
-		cn := e.GetAttributeValue("cn")
-		if cn == "" {
-			continue
+		if g := p.entryToGroupInfo(e); g != nil {
+			groups = append(groups, *g)
 		}
-		var members []string
-		members = append(members, e.GetAttributeValues("memberUid")...)
-		for _, dn := range e.GetAttributeValues("member") {
-			if uid := parseMemberDN(dn, idAttr); uid != "" {
-				members = append(members, uid)
-			}
-		}
-		groups[cn] = members
 	}
+	sortGroupsByName(groups)
 	return groups, nil
+}
+
+func (p *ldapProvider) entryToGroupInfo(e *ldap.Entry) *GroupInfo {
+	cn := e.GetAttributeValue("cn")
+	if cn == "" {
+		return nil
+	}
+	idAttr := p.idAttribute()
+	var members []string
+	members = append(members, e.GetAttributeValues("memberUid")...)
+	for _, dn := range e.GetAttributeValues("member") {
+		if uid := parseMemberDN(dn, idAttr); uid != "" {
+			members = append(members, uid)
+		}
+	}
+	return &GroupInfo{
+		Name:    cn,
+		Gid:     parseOptionalGid(e.GetAttributeValue("gidNumber")),
+		Members: normalizeMembers(members),
+	}
 }
 
 func (p *ldapProvider) entryToSystemUser(e *ldap.Entry) SystemUser {
 	idAttr := p.idAttribute()
+	exp := parsePasswordExpiration(e)
+	status := "active"
+	if exp != nil && time.Now().After(*exp) {
+		status = "passwordExpired"
+	}
 	u := SystemUser{
-		Username: e.GetAttributeValue(idAttr),
-		Uid:      e.GetAttributeValue("uidNumber"),
-		Gid:      e.GetAttributeValue("gidNumber"),
-		Comment:  e.GetAttributeValue("gecos"),
-		Home:     e.GetAttributeValue("homeDirectory"),
-		Shell:    e.GetAttributeValue("loginShell"),
-		Status:   "active",
-
-		PasswordExpiresAt: parsePasswordExpiration(e)}
+		Username:          e.GetAttributeValue(idAttr),
+		Uid:               e.GetAttributeValue("uidNumber"),
+		Gid:               e.GetAttributeValue("gidNumber"),
+		Comment:           e.GetAttributeValue("gecos"),
+		Home:              e.GetAttributeValue("homeDirectory"),
+		Shell:             e.GetAttributeValue("loginShell"),
+		Status:            status,
+		PasswordExpiresAt: exp,
+	}
 	groupBaseDN := strings.ToLower(p.groupBaseDN())
 	for _, memberOf := range e.GetAttributeValues("memberOf") {
 		if strings.HasSuffix(strings.ToLower(memberOf), ","+groupBaseDN) {

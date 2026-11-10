@@ -1,0 +1,1164 @@
+# deadcode 报告（RTA，-test）
+
+工具: `/tmp/deadcode-tools/deadcode`（`go install golang.org/x/tools/cmd/deadcode@latest`）
+
+入口: `cmd/engine`、`cmd/exec`、`cmd/dc-desktop-installer`
+
+说明: unreachable 表示从该 main 的调用图不可达；不等于可安全删除（接口/反射/linkname/其他 binary 可能仍需要）。
+
+
+## engine（17）
+
+- **StartArgv** — `cmd/engine/command/command.go:139`
+  - 仓内其它引用（最多 20 条）:
+    - `./cmd/engine/command/command.go:137:// StartArgv builds the argv fragment that re-launches the engine with the same`
+    - `./cmd/engine/command/command.go:139:func StartArgv(f *Flags, mode StartMode) ([]string, error) {`
+    - `./cmd/engine/command/service_windows.go:65:	serviceArgs, err := StartArgv(f, mode)`
+    - `./cmd/engine/command/command_test.go:136:	got, err := StartArgv(f, StartModeConfigless)`
+    - `./cmd/engine/command/command_test.go:138:		t.Fatalf("StartArgv: %v", err)`
+- **MergeFlags** — `cmd/engine/command/command.go:171`
+  - 仓内其它引用（最多 20 条）:
+    - `./cmd/engine/command/command.go:169:// MergeFlags overlays argv onto a copy of parent.`
+    - `./cmd/engine/command/command.go:171:func MergeFlags(parent *Flags, args []string, errOut io.Writer, name string) (*Flags, error) {`
+    - `./cmd/engine/command/service_windows.go:57:	f, err := MergeFlags(parent, args, os.Stderr, "install")`
+- **ActionSpec.IsStream** — `internal/execution/actions.go:63`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/execution/actions.go:63:func (s ActionSpec) IsStream() bool {`
+- **CleanCurrentProcessEnv** — `internal/execution/dcexec_env.go:61`
+  - 仓内其它引用（最多 20 条）:
+    - `./cmd/exec/main.go:33:	execution.CleanCurrentProcessEnv()`
+    - `./internal/execution/dcexec_env.go:60:// CleanCurrentProcessEnv removes dangerous loader variables before privilege changes.`
+    - `./internal/execution/dcexec_env.go:61:func CleanCurrentProcessEnv() {`
+- **MatchDcExecProtocolVersion** — `internal/execution/execution.go:219`
+  - 仓内其它引用（最多 20 条）:
+    - `./cmd/exec/main.go:69:	if err := execution.MatchDcExecProtocolVersion(input.Version, Version); err != nil {`
+    - `./internal/execution/protocol_version_test.go:6:	if err := MatchDcExecProtocolVersion("0.5.0", "0.5.0"); err != nil {`
+    - `./internal/execution/protocol_version_test.go:9:	if err := MatchDcExecProtocolVersion("", ""); err != nil {`
+    - `./internal/execution/protocol_version_test.go:12:	if err := MatchDcExecProtocolVersion("0.5.0", "0.4.0"); err == nil {`
+    - `./internal/execution/protocol_version_test.go:15:	if err := MatchDcExecProtocolVersion("0.5.0", ""); err == nil {`
+    - `./internal/execution/execution.go:218:// MatchDcExecProtocolVersion rejects any engine↔PrivilegedExec version skew (exact match only).`
+    - `./internal/execution/execution.go:219:func MatchDcExecProtocolVersion(engineVersion, dcExecVersion string) error {`
+- **BoundedGo** — `internal/infra/concurrency/goroutine.go:26`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/concurrency/goroutine.go:21:// BoundedGo acquires a slot from sem before starting fn, then releases it when`
+    - `./internal/infra/concurrency/goroutine.go:26:func BoundedGo(sem chan struct{}, logger *slog.Logger, name string, fn func()) {`
+    - `./internal/infra/concurrency/goroutine.go:40:// Unlike BoundedGo, it never blocks the caller; it returns false when the`
+    - `./internal/infra/concurrency/goroutine_test.go:99:	BoundedGo(sem, slog.Default(), "first", func() {`
+    - `./internal/infra/concurrency/goroutine_test.go:108:		BoundedGo(sem, slog.Default(), "second", func() {`
+    - `./internal/infra/concurrency/goroutine_test.go:116:		t.Fatal("second BoundedGo ran before first released the slot")`
+    - `./internal/infra/concurrency/goroutine_test.go:124:		t.Fatal("timed out waiting for second BoundedGo")`
+- **VerifyShadowHash** — `internal/infra/crypto/shadow_crypt.go:22`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/crypto/shadow_crypt_test.go:62:			got := VerifyShadowHash(tc.password, tc.hash)`
+    - `./internal/infra/crypto/shadow_crypt_test.go:64:				t.Errorf("VerifyShadowHash(%q, %q) = %v; want %v", tc.password, tc.hash, got, tc.valid)`
+    - `./internal/infra/crypto/shadow_crypt_test.go:94:		if !VerifyShadowHash(tc.password, hash) {`
+    - `./internal/infra/crypto/shadow_crypt_test.go:95:			t.Errorf("VerifyShadowHash failed for dynamically generated openssl hash: %s (password: %s)", hash, tc.password)`
+    - `./internal/infra/crypto/shadow_crypt_test.go:97:		if VerifyShadowHash("wrong_"+tc.password, hash) {`
+    - `./internal/infra/crypto/shadow_crypt_test.go:98:			t.Errorf("VerifyShadowHash unexpectedly succeeded for wrong password with hash: %s", hash)`
+    - `./internal/infra/crypto/shadow_crypt_test.go:115:		if VerifyShadowHash("test", h) {`
+    - `./internal/dcexec/action/local_user.go:307:	return crypto.VerifyShadowHash(password, hashedPassword)`
+    - `./internal/infra/crypto/shadow_crypt.go:18:// VerifyShadowHash verifies a plaintext password against a standard Unix /etc/shadow`
+    - `./internal/infra/crypto/shadow_crypt.go:22:func VerifyShadowHash(password, hashedPassword string) bool {`
+- **b64from24bit** — `internal/infra/crypto/shadow_crypt.go:36`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/crypto/shadow_crypt.go:35:// b64from24bit encodes 24 bits into n characters of custom crypt Base64.`
+    - `./internal/infra/crypto/shadow_crypt.go:36:func b64from24bit(b2, b1, b0 byte, n int, sb *strings.Builder) {`
+    - `./internal/infra/crypto/shadow_crypt.go:181:	b64from24bit(c[0], c[21], c[42], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:182:	b64from24bit(c[22], c[43], c[1], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:183:	b64from24bit(c[44], c[2], c[23], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:184:	b64from24bit(c[3], c[24], c[45], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:185:	b64from24bit(c[25], c[46], c[4], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:186:	b64from24bit(c[47], c[5], c[26], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:187:	b64from24bit(c[6], c[27], c[48], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:188:	b64from24bit(c[28], c[49], c[7], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:189:	b64from24bit(c[50], c[8], c[29], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:190:	b64from24bit(c[9], c[30], c[51], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:191:	b64from24bit(c[31], c[52], c[10], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:192:	b64from24bit(c[53], c[11], c[32], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:193:	b64from24bit(c[12], c[33], c[54], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:194:	b64from24bit(c[34], c[55], c[13], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:195:	b64from24bit(c[56], c[14], c[35], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:196:	b64from24bit(c[15], c[36], c[57], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:197:	b64from24bit(c[37], c[58], c[16], 4, &sb)`
+    - `./internal/infra/crypto/shadow_crypt.go:198:	b64from24bit(c[59], c[17], c[38], 4, &sb)`
+- **parseSha512Setting** — `internal/infra/crypto/shadow_crypt.go:46`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/crypto/shadow_crypt.go:45:// parseSha512Setting extracts rounds, salt, and whether custom rounds was explicitly specified.`
+    - `./internal/infra/crypto/shadow_crypt.go:46:func parseSha512Setting(setting string) (rounds int, customRounds bool, salt string, err error) {`
+    - `./internal/infra/crypto/shadow_crypt.go:82:	rounds, customRounds, salt, err := parseSha512Setting(setting)`
+- **cryptSha512** — `internal/infra/crypto/shadow_crypt.go:81`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/crypto/shadow_crypt.go:27:	computed, err := cryptSha512(password, hashedPassword)`
+    - `./internal/infra/crypto/shadow_crypt.go:80:// cryptSha512 implements Ulrich Drepper's SHA-512 crypt ($6$).`
+    - `./internal/infra/crypto/shadow_crypt.go:81:func cryptSha512(password, setting string) (string, error) {`
+- **VerifyPrivateDir** — `internal/infra/fs/secure_fs_linux.go:95`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/fs/secure_fs_linux.go:93:// VerifyPrivateDir checks that path is an existing directory with exactly 0700`
+    - `./internal/infra/fs/secure_fs_linux.go:95:func VerifyPrivateDir(path string) error {`
+    - `./internal/infra/fs/secure_fs_windows.go:50:// VerifyPrivateDir checks that path is an existing directory whose Owner and DACL keep`
+    - `./internal/infra/fs/secure_fs_windows.go:52:func VerifyPrivateDir(path string) error {`
+    - `./internal/infra/fs/secure_fs_windows_test.go:63:	if err := VerifyPrivateDir(dir); err != nil {`
+    - `./internal/infra/fs/secure_fs_test.go:17:	if err := VerifyPrivateDir(dir); err != nil {`
+    - `./internal/infra/fs/secure_fs_test.go:18:		t.Fatalf("VerifyPrivateDir: %v", err)`
+    - `./internal/dcexec/verifier/token.go:50:	if err := fs.VerifyPrivateDir(tokenDir); err != nil {`
+- **VerifyPrivateFileDescriptor** — `internal/infra/fs/secure_fs_linux.go:108`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/fs/secure_fs_windows_test.go:76:	if err := VerifyPrivateFileDescriptor(f); err != nil {`
+    - `./internal/infra/fs/secure_fs_test.go:37:	if err := VerifyPrivateFileDescriptor(f); err != nil {`
+    - `./internal/infra/fs/secure_fs_test.go:38:		t.Fatalf("VerifyPrivateFileDescriptor: %v", err)`
+    - `./internal/infra/fs/secure_fs_windows.go:63:// VerifyPrivateFileDescriptor checks that f is an open file whose Owner and DACL keep`
+    - `./internal/infra/fs/secure_fs_windows.go:65:func VerifyPrivateFileDescriptor(f *os.File) error {`
+    - `./internal/infra/fs/secure_fs_linux.go:106:// VerifyPrivateFileDescriptor checks that f is an open file with exactly 0600`
+    - `./internal/infra/fs/secure_fs_linux.go:108:func VerifyPrivateFileDescriptor(f *os.File) error {`
+    - `./internal/dcexec/verifier/token.go:62:	if err := fs.VerifyPrivateFileDescriptor(f); err != nil {`
+- **verifyOwnerAndPerm** — `internal/infra/fs/secure_fs_linux.go:121`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/fs/secure_fs_linux.go:103:	return verifyOwnerAndPerm(path, info, 0700)`
+    - `./internal/infra/fs/secure_fs_linux.go:116:	return verifyOwnerAndPerm(f.Name(), info, 0600)`
+    - `./internal/infra/fs/secure_fs_linux.go:119:// verifyOwnerAndPerm is the shared owner/permission check for secure`
+    - `./internal/infra/fs/secure_fs_linux.go:121:func verifyOwnerAndPerm(path string, info os.FileInfo, expectedPerm os.FileMode) error {`
+- **MarshalIndent** — `internal/infra/jsoncodec/jsoncodec.go:71`
+  - 仓内其它引用（最多 20 条）:
+    - `./cmd/dc-desktop-installer/client_config.go:55:		cfgBytes, err := json.MarshalIndent(cfg, "", "  ")`
+    - `./internal/infra/jsoncodec/jsoncodec.go:70:// MarshalIndent is like Marshal but with indented output.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:71:func MarshalIndent(v any, prefix, indent string) ([]byte, error) {`
+- **ReadFrom** — `internal/infra/overlay/overlay.go:35`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/overlay/overlay_test.go:87:	_, err := ReadFrom(buf)`
+    - `./internal/infra/overlay/overlay.go:34:// ReadFrom reads the overlay payload from a ReadSeeker (e.g. an open executable file).`
+    - `./internal/infra/overlay/overlay.go:35:func ReadFrom(r io.ReadSeeker) (*Payload, error) {`
+    - `./internal/infra/overlay/overlay.go:98:	return ReadFrom(f)`
+- **ReadExecutable** — `internal/infra/overlay/overlay.go:83`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/overlay/overlay.go:82:// ReadExecutable reads the overlay payload from the currently running executable.`
+    - `./internal/infra/overlay/overlay.go:83:func ReadExecutable() (*Payload, error) {`
+    - `./cmd/dc-desktop-installer/main.go:43:	embeddedPayload, err := overlay.ReadExecutable()`
+- **ReadFile** — `internal/infra/overlay/overlay.go:92`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/config/resolve.go:94:		data, err := os.ReadFile(c.Database.PasswordFile)`
+    - `./internal/config/resolve.go:105:		pwd, err := os.ReadFile(c.User.Ldap.BindPasswordFile)`
+    - `./internal/audit/service_test.go:35:	data, err := os.ReadFile(filepath.Join(dir, "audit.log"))`
+    - `./internal/audit/service_test.go:44:	data, err := os.ReadFile(filepath.Join(dir, "security.log"))`
+    - `./internal/infra/procfs/session.go:43:	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cgroup"))`
+    - `./internal/infra/procfs/session.go:51:	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))`
+    - `./internal/infra/overlay/overlay_test.go:22:	_, err := ReadFile(dummyExe)`
+    - `./internal/infra/overlay/overlay_test.go:38:	readP, err := ReadFile(outExe)`
+    - `./internal/infra/overlay/overlay_test.go:40:		t.Fatalf("ReadFile failed: %v", err)`
+    - `./internal/infra/overlay/overlay_test.go:60:	readP2, err := ReadFile(reInjectedExe)`
+    - `./internal/infra/overlay/overlay_test.go:62:		t.Fatalf("ReadFile re-injected failed: %v", err)`
+    - `./internal/infra/overlay/overlay.go:88:	return ReadFile(exePath)`
+    - `./internal/infra/overlay/overlay.go:91:// ReadFile reads the overlay payload from the specified file path.`
+    - `./internal/infra/overlay/overlay.go:92:func ReadFile(path string) (*Payload, error) {`
+    - `./internal/infra/fs/secure_fs_windows_test.go:203:	data, err := os.ReadFile(path)`
+    - `./internal/infra/fs/secure_fs_test.go:41:	data, err := os.ReadFile(path)`
+    - `./internal/server/portal/web.go:62:	content, err := fs.ReadFile(subFS, name)`
+    - `./internal/server/controlplane/grpc_transport.go:83:	certPEM, err := os.ReadFile(r.certPath)`
+    - `./internal/server/controlplane/grpc_transport.go:87:	keyPEM, err := os.ReadFile(r.keyPath)`
+    - `./internal/server/controlplane/grpc_transport.go:129:	ca, err := os.ReadFile(certs.CAPath)`
+
+
+## exec（39）
+
+- **NewInvalidParamError** — `internal/contract/errors.go:56`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/contract/errors.go:56:func NewInvalidParamError(msg string, cause ...error) error {`
+    - `./internal/db/connection_resource.go:39:			return nil, 0, contract.NewInvalidParamError(err.Error())`
+    - `./internal/contract/errors_test.go:39:			err:        NewInvalidParamError("invalid port number"),`
+    - `./internal/server/service/node/node.go:243:		return nil, contract.NewInvalidParamError("items is required")`
+    - `./internal/server/service/node/node.go:246:		return nil, contract.NewInvalidParamError(fmt.Sprintf("items exceeds limit of %d", maxNodeBatchItems))`
+    - `./internal/server/service/app/form.go:34:			return contract.NewInvalidParamError("form app must have a form")`
+    - `./internal/server/service/file/file.go:158:		return contract.NewInvalidParamError("path is required")`
+    - `./internal/server/service/proxy/proxy.go:191:		return nil, contract.NewInvalidParamError("requester is required")`
+    - `./internal/server/service/proxy/proxy.go:194:		return nil, contract.NewInvalidParamError("connectionId and resourceId are mutually exclusive")`
+    - `./internal/server/service/proxy/proxy.go:200:		return nil, contract.NewInvalidParamError("connectionId or resourceId is required")`
+    - `./internal/server/service/proxy/proxy.go:291:		return nil, contract.NewInvalidParamError("session template is required")`
+    - `./internal/server/service/proxy/proxy.go:371:		return contract.ProtocolUnknown, "", 0, model.Connection{}, contract.NewInvalidParamError("proxy protocol not defined")`
+    - `./internal/server/service/proxy/proxy.go:378:		return contract.ProtocolUnknown, "", 0, model.Connection{}, contract.NewInvalidParamError("proxy target host not defined")`
+    - `./internal/server/service/proxy/proxy.go:381:		return contract.ProtocolUnknown, "", 0, model.Connection{}, contract.NewInvalidParamError("proxy target host not defined")`
+    - `./internal/server/service/proxy/proxy.go:386:			return contract.ProtocolUnknown, "", 0, model.Connection{}, contract.NewInvalidParamError("proxy target host not defined")`
+    - `./internal/server/service/proxy/proxy.go:398:		return contract.ProtocolUnknown, "", 0, model.Connection{}, contract.NewInvalidParamError("proxy target host not defined")`
+    - `./internal/server/service/proxy/proxy.go:411:		return contract.NewInvalidParamError("requester is required")`
+    - `./internal/server/service/file/delete.go:43:		return nil, contract.NewInvalidParamError("missing paths")`
+    - `./internal/server/service/file/delete.go:53:			return nil, contract.NewInvalidParamError("path is required")`
+    - `./internal/server/service/file/download.go:51:		return "", contract.NewInvalidParamError("location is required")`
+- **NewUnauthorizedError** — `internal/contract/errors.go:61`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/contract/errors.go:61:func NewUnauthorizedError(msg string, cause ...error) error {`
+    - `./internal/server/portal/api/scheduler.go:83:		return httputil.RespondError(c, contract.NewUnauthorizedError("session required"))`
+    - `./internal/contract/errors_test.go:47:			err:        NewUnauthorizedError("unauthorized request"),`
+- **NewForbiddenError** — `internal/contract/errors.go:66`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/server/portal/api/api_test.go:32:		{"forbidden → 403", contract.NewForbiddenError("no perm"), http.StatusForbidden},`
+    - `./internal/server/portal/httputil/response_test.go:60:			name:         "contract.NewForbiddenError → 403",`
+    - `./internal/server/portal/httputil/response_test.go:61:			err:          contract.NewForbiddenError("read-only"),`
+    - `./internal/contract/errors.go:66:func NewForbiddenError(msg string, cause ...error) error {`
+    - `./internal/contract/errors_test.go:55:			err:        NewForbiddenError("access denied"),`
+    - `./internal/server/service/ticket/errors.go:17:	ErrPermissionDenied = contract.NewForbiddenError("permission denied")`
+    - `./internal/server/service/file/file.go:18:var ErrFileDisabled = contract.NewForbiddenError("file service disabled")`
+    - `./internal/server/service/user/errors.go:9:	ErrForbidden         = contract.NewForbiddenError("insufficient permissions to modify this user")`
+    - `./internal/server/service/file/list.go:173:		return contract.NewForbiddenError("file location is read-only")`
+    - `./internal/server/service/app/app.go:95:		return model.App{}, contract.NewForbiddenError("permission denied")`
+    - `./internal/server/service/connection/delete.go:14:		return contract.NewForbiddenError(fmt.Sprintf("only admin or owner can delete connection %d (owner:%s)", connection.ID, connection.Username))`
+    - `./internal/server/service/connection/crud.go:101:		return model.Connection{}, contract.NewForbiddenError("no permission to access this connection")`
+- **NewNotFoundError** — `internal/contract/errors.go:71`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/server/portal/httputil/response_test.go:54:			name:         "contract.NewNotFoundError → 404",`
+    - `./internal/server/portal/httputil/response_test.go:55:			err:          contract.NewNotFoundError("file missing"),`
+    - `./internal/server/service/ticket/errors.go:14:	ErrTicketNotFound   = contract.NewNotFoundError("ticket not found")`
+    - `./internal/server/service/ticket/errors.go:15:	ErrProjectNotFound  = contract.NewNotFoundError("project not found")`
+    - `./internal/server/service/ticket/errors.go:16:	ErrCommentNotFound  = contract.NewNotFoundError("comment not found")`
+    - `./internal/server/service/settings/settings.go:104:// Returns contract.NewNotFoundError for unknown domains; schema validation failures`
+    - `./internal/server/service/settings/settings.go:109:		return contract.NewNotFoundError(fmt.Sprintf("unknown domain: %s", d))`
+    - `./internal/server/service/settings/settings.go:281:		return nil, contract.NewNotFoundError(fmt.Sprintf("unknown domain: %s", d))`
+    - `./internal/contract/errors.go:71:func NewNotFoundError(msg string, cause ...error) error {`
+    - `./internal/server/service/desktop/plugin_release.go:49:		return contract.NewNotFoundError("desktop plugins disabled by admin")`
+    - `./internal/server/service/desktop/plugin_release.go:52:		return contract.NewNotFoundError(fmt.Sprintf("plugin release for platform %q disabled by admin", platform))`
+    - `./internal/server/service/desktop/plugin_release.go:79:			return PluginRelease{}, contract.NewNotFoundError(fmt.Sprintf("%s not found", LatestVersionFile))`
+    - `./internal/server/service/desktop/plugin_release.go:86:		return PluginRelease{}, contract.NewNotFoundError(err.Error())`
+    - `./internal/server/service/desktop/plugin_release.go:93:			return PluginRelease{}, contract.NewNotFoundError(fmt.Sprintf("%s not found", LatestZipFile))`
+    - `./internal/server/service/desktop/plugin_release.go:99:		return PluginRelease{}, contract.NewNotFoundError(fmt.Sprintf("%s size mismatch", LatestZipFile))`
+    - `./internal/server/service/desktop/plugin_release.go:131:		return PluginRelease{}, contract.NewNotFoundError(fmt.Sprintf("unsupported platform %q", platform))`
+    - `./internal/server/service/desktop/plugin_release.go:145:		return "", contract.NewNotFoundError(fmt.Sprintf("unsupported platform %q", platform))`
+    - `./internal/server/service/desktop/plugin_release.go:158:		return "", contract.NewNotFoundError("file not found")`
+    - `./internal/server/service/desktop/plugin_release.go:163:		return "", contract.NewNotFoundError("file not found")`
+    - `./internal/contract/errors_test.go:23:			err:        NewNotFoundError("user not found"),`
+- **NewConflictError** — `internal/contract/errors.go:76`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/db/connection.go:274:				return contract.NewConflictError(`
+    - `./internal/db/connection.go:283:				return contract.NewConflictError("connection already exists", err)`
+    - `./internal/db/connection.go:354:		return contract.NewConflictError(`
+    - `./internal/db/connection.go:359:	return contract.NewConflictError("connection already exists", lastConflict)`
+    - `./internal/db/connection.go:411:	return contract.NewConflictError("connection already exists", errClaimConflict)`
+    - `./internal/db/connection.go:450:			return contract.NewConflictError("connection display or port already exists", res.Error)`
+    - `./internal/db/connection.go:488:			return contract.NewConflictError("connection port already exists", res.Error)`
+    - `./internal/db/connection.go:519:			return contract.NewConflictError(`
+    - `./internal/db/connection.go:532:		return contract.NewConflictError(`
+    - `./internal/db/connection.go:548:		return contract.NewConflictError(`
+    - `./internal/db/connection.go:595:		return contract.NewConflictError("connection is not stopped")`
+    - `./internal/db/connection.go:614:			return contract.NewConflictError("connection display or port already exists", res.Error)`
+    - `./internal/contract/errors.go:76:func NewConflictError(msg string, cause ...error) error {`
+    - `./internal/contract/errors_test.go:63:			err:        NewConflictError("already exists"),`
+    - `./internal/server/service/ticket/errors.go:19:	ErrVersionConflict     = contract.NewConflictError("ticket was modified")`
+    - `./internal/server/service/ticket/errors.go:20:	ErrProjectArchived     = contract.NewConflictError("project is archived")`
+    - `./internal/server/service/ticket/errors.go:21:	ErrProjectDeleted      = contract.NewConflictError("project is deleted")`
+    - `./internal/server/service/ticket/errors.go:22:	ErrProjectNameConflict = contract.NewConflictError("project name already exists")`
+    - `./internal/server/service/ticket/errors.go:23:	ErrProjectHasTickets   = contract.NewConflictError("project has tickets")`
+    - `./internal/server/service/ticket/errors.go:24:	ErrTicketNotDeleted    = contract.NewConflictError("ticket is not deleted")`
+- **NewUnavailableError** — `internal/contract/errors.go:86`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/contract/errors.go:86:func NewUnavailableError(msg string, cause ...error) error {`
+    - `./internal/server/controlplane/dispatch/dispatch.go:146:			return nil, contract.NewUnavailableError(fmt.Sprintf("forward dispatch to leader %s failed", leaderID))`
+    - `./internal/contract/errors_test.go:79:			err:        NewUnavailableError("node offline"),`
+    - `./internal/server/service/user/id_mapping_cache.go:185:		return nil, contract.NewUnavailableError("ID-mapping resolution is not available on this platform")`
+    - `./internal/server/service/user/id_mapping_cache.go:441:		return nil, contract.NewUnavailableError("ID source unavailable", cause)`
+    - `./internal/server/service/user/id_mapping_cache.go:476:		return contract.NewUnavailableError("ID mapping cache refresh broadcast failed", bumpErr)`
+- **Protocol.Valid** — `internal/contract/protocol.go:21`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/server/service/connection/resource_admin.go:322:	if !res.Protocol.Valid() {`
+    - `./internal/contract/protocol.go:21:func (p Protocol) Valid() bool {`
+- **Protocol.UsesXDisplay** — `internal/contract/protocol.go:31`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/server/service/connection/resource_admin.go:344:		if !res.Protocol.UsesXDisplay() {`
+    - `./internal/contract/protocol.go:31:func (p Protocol) UsesXDisplay() bool {`
+- **Protocol.DialDefaultPort** — `internal/contract/protocol.go:36`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/server/service/connection/resource_admin.go:34:	return res.Protocol.DialDefaultPort()`
+    - `./internal/server/service/connection/launch_dial.go:27:	dialPort := cmp.Or(res.Protocol.DialDefaultPort(), 22)`
+    - `./internal/server/service/connection/ssh_proxy_target.go:48:	port = cmp.Or(res.Protocol.DialDefaultPort(), 22)`
+    - `./internal/server/service/connection/start_place.go:64:	dialPort := cmp.Or(res.Protocol.DialDefaultPort(), 22)`
+    - `./internal/contract/protocol.go:36:func (p Protocol) DialDefaultPort() uint {`
+- **Protocol.String** — `internal/contract/protocol.go:47`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/server/service/connection/delete.go:76:				"connectionID", c.ID, "protocol", c.Protocol.String(),`
+    - `./internal/server/service/connection/launch_dial.go:51:		return model.Connection{}, fmt.Errorf("select node for %s failed: %w", res.Protocol.String(), err)`
+    - `./internal/server/service/connection/launch.go:65:		return model.Connection{}, fmt.Errorf("unsupported protocol %q", res.Protocol.String())`
+    - `./internal/server/service/connection/refresh.go:133:			Protocol:     conn.Protocol.String(),`
+    - `./internal/server/service/connection/start_place.go:61:		return model.Connection{}, fmt.Errorf("select node for %s failed: %w", res.Protocol.String(), err)`
+    - `./internal/server/service/connection/sync_rdp.go:47:					"connectionID", c.ID, "protocol", c.Protocol.String(), "error", err)`
+    - `./internal/server/service/connection/admin.go:141:					"connectionID", c.ID, "protocol", c.Protocol.String(), "nodeID", c.NodeID, "error", err)`
+    - `./internal/server/service/connection/teardown.go:105:			Protocol:     conn.Protocol.String(),`
+    - `./internal/server/service/connection/lifecycle.go:84:				"connectionID", conn.ID, "protocol", conn.Protocol.String(),`
+    - `./internal/infra/process/output.go:71:func (b *BoundedBuffer) String() string {`
+    - `./internal/server/portal/api/events_test.go:49:func (r *safeRecorder) String() string {`
+    - `./internal/infra/concurrency/goroutine_test.go:29:func (s *safeBuffer) String() string {`
+    - `./internal/contract/protocol.go:47:func (p Protocol) String() string {`
+    - `./internal/contract/schema/domain.go:78:func (d Domain) String() string { return string(d) }`
+    - `./internal/contract/proto/cluster.pb.go:50:func (x NodeAffinity) String() string {`
+    - `./internal/contract/proto/cluster.pb.go:96:func (x RunMode) String() string {`
+    - `./internal/contract/proto/cluster.pb.go:142:func (x *AgentMessage) String() string {`
+    - `./internal/contract/proto/cluster.pb.go:313:func (x *StorageProbeItem) String() string {`
+    - `./internal/contract/proto/cluster.pb.go:373:func (x *StorageProbeReport) String() string {`
+    - `./internal/contract/proto/cluster.pb.go:428:func (x *RegisterRequest) String() string {`
+- **ParseProtocol** — `internal/contract/protocol.go:62`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/db/connection_resource.go:37:		p, err := contract.ParseProtocol(protocol)`
+    - `./internal/contract/protocol_test.go:41:	p, err := ParseProtocol("vnc")`
+    - `./internal/contract/protocol_test.go:45:	x, err := ParseProtocol("XRDP")`
+    - `./internal/contract/protocol.go:62:func ParseProtocol(s string) (Protocol, error) {`
+    - `./internal/contract/protocol.go:89:		parsed, err := ParseProtocol(strVal)`
+    - `./internal/contract/protocol.go:131:		parsed, err := ParseProtocol(v)`
+- **Protocol.MarshalJSON** — `internal/contract/protocol.go:79`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/model/execution.go:60:func (s ExecutionStatus) MarshalJSON() ([]byte, error) {`
+    - `./internal/model/ticket.go:68:func (t TicketType) MarshalJSON() ([]byte, error) {`
+    - `./internal/model/ticket.go:115:func (p TicketPriority) MarshalJSON() ([]byte, error) {`
+    - `./internal/model/ticket.go:162:func (s TicketStatus) MarshalJSON() ([]byte, error) {`
+    - `./internal/model/node.go:59:func (s NodeStatus) MarshalJSON() ([]byte, error) {`
+    - `./internal/model/download_request.go:47:func (s DownloadRequestStatus) MarshalJSON() ([]byte, error) {`
+    - `./internal/model/connection.go:77:func (s ConnectionStatus) MarshalJSON() ([]byte, error) {`
+    - `./internal/model/user.go:62:func (c UserStatusCode) MarshalJSON() ([]byte, error) {`
+    - `./internal/model/user.go:108:func (t UserType) MarshalJSON() ([]byte, error) {`
+    - `./internal/infra/jsoncodec/jsoncodec_test.go:10:func (s marshalJSONString) MarshalJSON() ([]byte, error) {`
+    - `./internal/contract/protocol.go:79:func (p Protocol) MarshalJSON() ([]byte, error) {`
+- **Protocol.UnmarshalJSON** — `internal/contract/protocol.go:86`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/contract/protocol.go:86:func (p *Protocol) UnmarshalJSON(data []byte) error {`
+    - `./internal/model/ticket.go:72:func (t *TicketType) UnmarshalJSON(data []byte) error {`
+    - `./internal/model/ticket.go:119:func (p *TicketPriority) UnmarshalJSON(data []byte) error {`
+    - `./internal/model/ticket.go:166:func (s *TicketStatus) UnmarshalJSON(data []byte) error {`
+    - `./internal/model/download_request.go:51:func (s *DownloadRequestStatus) UnmarshalJSON(data []byte) error {`
+    - `./internal/model/connection.go:81:func (s *ConnectionStatus) UnmarshalJSON(data []byte) error {`
+    - `./internal/model/execution.go:64:func (s *ExecutionStatus) UnmarshalJSON(data []byte) error {`
+    - `./internal/model/node.go:66:func (s *NodeStatus) UnmarshalJSON(data []byte) error {`
+    - `./internal/model/user.go:66:func (c *UserStatusCode) UnmarshalJSON(data []byte) error {`
+    - `./internal/model/user.go:112:func (t *UserType) UnmarshalJSON(data []byte) error {`
+    - `./internal/server/portal/httputil/params.go:94:func (l *IDList) UnmarshalJSON(data []byte) error {`
+    - `./internal/server/service/ticket/types.go:17:func (n *Nullable[T]) UnmarshalJSON(data []byte) error {`
+- **Protocol.Value** — `internal/contract/protocol.go:108`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/db/json_serializer.go:45:func (codecJSONSerializer) Value(ctx context.Context, field *schema.Field, dst reflect.Value, fieldValue any) (any, error) {`
+    - `./internal/contract/protocol.go:108:func (p Protocol) Value() (driver.Value, error) {`
+- **Protocol.Scan** — `internal/contract/protocol.go:116`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/db/json_serializer.go:19:func (codecJSONSerializer) Scan(ctx context.Context, field *schema.Field, dst reflect.Value, dbValue any) (err error) {`
+    - `./internal/contract/protocol.go:116:func (p *Protocol) Scan(value any) error {`
+- **BuildCleanEnv** — `internal/execution/dcexec_env.go:74`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/execution/dcexec_env.go:70:// BuildCleanEnv returns a new list of environment variables starting with the current process`
+    - `./internal/execution/dcexec_env.go:74:func BuildCleanEnv(extra map[string]string) []string {`
+    - `./internal/agent/executor/direct/executor.go:161:	cmd.Env = execution.BuildCleanEnv(req.Env)`
+- **BuildDcExecEnv** — `internal/execution/dcexec_env.go:98`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/agent/executor/dcexec/executor.go:107:	cmd.Env = execution.BuildDcExecEnv(nil)`
+    - `./internal/execution/dcexec_env.go:97:// BuildDcExecEnv returns a sanitized environment for invoking PrivilegedExec.`
+    - `./internal/execution/dcexec_env.go:98:func BuildDcExecEnv(extra map[string]string) []string {`
+    - `./internal/server/service/file/download_test.go:418:// 经 BuildDcExecEnv 透传（不在 blocked env 名单内），跨平台可用。`
+    - `./internal/server/service/file/stream.go:104:	cmd.Env = execution.BuildDcExecEnv(nil)`
+    - `./internal/server/service/file/stream.go:182:	cmd.Env = execution.BuildDcExecEnv(nil)`
+    - `./internal/server/service/file/stream.go:234:	cmd.Env = execution.BuildDcExecEnv(nil)`
+- **WithTargetNode** — `internal/execution/execution.go:161`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/execution/execution.go:160:// WithTargetNode pins the request to a specific agent by node ID / hostname.`
+    - `./internal/execution/execution.go:161:func WithTargetNode(nodeID string) RequestOption {`
+    - `./internal/server/controlplane/dispatch/dispatch_test.go:29:		execution.WithTargetNode("agent-a"),`
+    - `./internal/server/controlplane/dispatch/dispatch_test.go:64:	req := execution.NewExecuteRequest(execution.ActionUserList, "request-1", execution.WithTargetNode("agent-a"))`
+    - `./internal/server/controlplane/dispatch/dispatch_test.go:71:	duplicate := execution.NewExecuteRequest(execution.ActionUserList, "request-1", execution.WithTargetNode("agent-a"))`
+    - `./internal/server/service/connection/vnc_launch_exec.go:113:		execution.WithTargetNode(node.NodeID),`
+    - `./internal/server/service/connection/vnc_otp.go:49:		execution.WithTargetNode(conn.NodeID),`
+    - `./internal/server/service/connection/teardown.go:63:		execution.WithTargetNode(nodeID),`
+    - `./internal/server/service/connection/teardown.go:83:		execution.WithTargetNode(nodeID),`
+    - `./internal/server/service/connection/teardown.go:102:		execution.WithTargetNode(conn.NodeID),`
+    - `./internal/server/service/connection/refresh.go:142:		execution.WithTargetNode(nodeID),`
+    - `./internal/server/service/scheduler/actions.go:44:		execution.WithTargetNode(targetNode),`
+    - `./internal/server/service/license/flexlm.go:53:		execution.WithTargetNode(targetNode),`
+- **WithTimeout** — `internal/execution/execution.go:175`
+  - 仓内其它引用（最多 20 条）:
+    - `./cmd/exec/main.go:54:	ctx, cancel := context.WithTimeout(context.Background(), startupTimeout)`
+    - `./cmd/engine/command/node_register.go:99:	ctx, cancel := context.WithTimeout(context.Background(), registerTimeout)`
+    - `./cmd/exec/execute.go:147:		ctx, cancel = context.WithTimeout(context.Background(), timeout)`
+    - `./internal/dcexec/action/helper_test.go:42:	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)`
+    - `./internal/infra/osuser/identity.go:81:	ctx, cancel := context.WithTimeout(context.Background(), userLookupTimeout)`
+    - `./internal/execution/execution.go:174:// WithTimeout sets the timeout in seconds`
+    - `./internal/execution/execution.go:175:func WithTimeout(d time.Duration) RequestOption {`
+    - `./internal/agent/probe/xrdp_linux.go:21:	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)`
+    - `./internal/agent/probe/disk.go:88:			pathCtx, cancel := context.WithTimeout(ctx, 10*time.Second)`
+    - `./internal/agent/probe/connection_linux.go:58:	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)`
+    - `./internal/agent/probe/disk_linux_test.go:97:			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)`
+    - `./internal/agent/command.go:188:		ctx, cancel = context.WithTimeout(parentCtx, cmd.Timeout.AsDuration())`
+    - `./internal/agent/executor/executor.go:102:		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)`
+    - `./internal/server/controlplane/leader/leader.go:148:	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)`
+    - `./internal/server/controlplane/execution_prune.go:74:	ctx, cancel := context.WithTimeout(s.ctx, executionPruneTimeout)`
+    - `./internal/server/portal/portal.go:143:				shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)`
+    - `./internal/server/controlplane/command.go:112:			forwardCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)`
+    - `./internal/server/service/node/node.go:461:			pCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)`
+    - `./internal/server/service/node/node.go:632:				pCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)`
+    - `./internal/server/controlplane/forward_test.go:86:	return context.WithTimeout(context.Background(), 5*time.Second)`
+- **WithNodeAffinity** — `internal/execution/execution.go:185`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/execution/execution.go:183:// WithNodeAffinity sets the node-selection strategy applied within the`
+    - `./internal/execution/execution.go:185:func WithNodeAffinity(affinity NodeAffinity) RequestOption {`
+    - `./internal/server/service/scheduler/actions.go:45:		execution.WithNodeAffinity(nodeAffinity),`
+    - `./internal/server/service/license/flexlm.go:56:		execution.WithNodeAffinity(execution.NodeAffinityLocalPreferred),`
+- **ActionError.Error** — `internal/execution/execution.go:257`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/execution/execution.go:257:func (e *ActionError) Error() string {`
+    - `./internal/agent/stream.go:388:func (e *redirectError) Error() string {`
+    - `./internal/server/controlplane/agent_lifecycle.go:21:func (e standbyError) Error() string {`
+    - `./internal/contract/errors.go:33:func (e *appError) Error() string {`
+    - `./internal/server/service/ticket/errors.go:40:func (e *BatchError) Error() string   { return e.Msg }`
+    - `./internal/server/service/node/errors.go:28:func (e MissingNodeIDsError) Error() string {`
+    - `./internal/server/service/proxy/dataplane.go:25:func (e *BackendDialError) Error() string {`
+- **Run** — `internal/execution/execution.go:278`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/config/validate_perms_linux.go:35:			return fmt.Errorf("failed to fix permissions for '%s': %w. Run 'chmod 600 %s' manually", path, err, path)`
+    - `./internal/config/validate_test.go:33:		t.Run(tt.name, func(t *testing.T) {`
+    - `./internal/config/validate_test.go:172:		t.Run(tt.name, func(t *testing.T) {`
+    - `./internal/config/validate_test.go:287:		t.Run(tt.name, func(t *testing.T) {`
+    - `./internal/config/validate_test.go:375:		t.Run(tt.name, func(t *testing.T) {`
+    - `./internal/config/validate_test.go:490:		t.Run(tt.name, func(t *testing.T) {`
+    - `./internal/config/validate_test.go:504:	t.Run("valid 0600 file", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:511:	t.Run("valid 0700 file (owner rwx, no group/other)", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:518:	t.Run("non-existent file", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:524:	t.Run("directory instead of file", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:536:	t.Run("valid 0600 file", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:543:	t.Run("non-existent file", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:567:	t.Run("empty servers failure", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:576:	t.Run("cluster validation failure", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:609:	t.Run("all server fields valid", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:614:	t.Run("portal validation failure when server enabled", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:622:	t.Run("portal NOT validated when server disabled", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:630:	t.Run("database validation failure when server enabled", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:638:	t.Run("user validation failure when server enabled", func(t *testing.T) {`
+    - `./internal/config/validate_test.go:669:	t.Run("all agent fields valid", func(t *testing.T) {`
+- **HandleError** — `internal/execution/execution.go:309`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/execution/execution.go:308:// HandleError logs structured execution errors and returns the original error.`
+    - `./internal/execution/execution.go:309:func HandleError(l *slog.Logger, err error, context string) error {`
+    - `./internal/server/service/file/file.go:120:		return execution.HandleError(s.logger, err, "file.mkdir")`
+    - `./internal/server/service/file/file.go:146:	return execution.HandleError(s.logger, err, "file.rename")`
+    - `./internal/server/service/file/delete.go:20:		return execution.HandleError(s.logger, err, "file.delete")`
+    - `./internal/server/service/file/download.go:250:		return nil, execution.HandleError(s.logger, err, "file.download_user_lookup")`
+    - `./internal/server/service/file/download.go:335:		return payload.FileCheckResult{}, execution.HandleError(s.logger, err, "file.download_permission")`
+    - `./internal/server/service/file/list.go:28:		return DirInfo{}, execution.HandleError(s.logger, err, "file.list_files")`
+    - `./internal/server/service/file/list.go:67:		return nil, execution.HandleError(s.logger, err, "file.list_locations")`
+    - `./internal/server/service/file/list.go:93:		return "", execution.HandleError(s.logger, err, "file.resolve_location")`
+    - `./internal/server/service/file/trash.go:37:		return TrashDirInfo{}, execution.HandleError(s.logger, err, "trash.list")`
+    - `./internal/server/service/file/trash.go:66:		return execution.HandleError(s.logger, err, "trash.move")`
+    - `./internal/server/service/file/trash.go:99:		return execution.HandleError(s.logger, err, "trash.restore_many")`
+    - `./internal/server/service/file/trash.go:113:			return execution.HandleError(s.logger, err, "trash.delete")`
+    - `./internal/server/service/file/trash.go:120:		return execution.HandleError(s.logger, err, "trash.delete_many")`
+    - `./internal/server/service/file/trash.go:127:		return execution.HandleError(s.logger, err, "trash.empty")`
+    - `./internal/server/service/connection/vnc_launch_exec.go:121:			err = execution.HandleError(s.logger, err, "vnc.launch")`
+    - `./internal/server/service/connection/vnc_otp.go:61:			return "", execution.HandleError(s.logger, err, "vnc.generate_otp")`
+    - `./internal/server/service/scheduler/jobs.go:51:		return nil, execution.HandleError(s.logger, err, "job.submit")`
+    - `./internal/server/service/license/flexlm.go:61:		return "", execution.HandleError(s.logger, err, "license."+string(actionType))`
+- **DcExecKilledBySeccomp** — `internal/execution/signal_linux.go:11`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/execution/signal_linux.go:9:// DcExecKilledBySeccomp reports whether err is a PrivilegedExec process that the kernel`
+    - `./internal/execution/signal_linux.go:11:func DcExecKilledBySeccomp(err error) bool {`
+    - `./internal/execution/signal_windows.go:5:// DcExecKilledBySeccomp always returns false on Windows: PrivilegedExec is Linux-only, and`
+    - `./internal/execution/signal_windows.go:7:func DcExecKilledBySeccomp(_ error) bool {`
+    - `./internal/server/service/file/stream.go:124:		if execution.DcExecKilledBySeccomp(runErr) {`
+    - `./internal/server/service/file/stream.go:196:		if execution.DcExecKilledBySeccomp(err) {`
+    - `./internal/server/service/file/stream.go:266:		if execution.DcExecKilledBySeccomp(err) {`
+- **ExitErrorSignaled** — `internal/execution/signal_linux.go:17`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/execution/signal_linux.go:12:	return ExitErrorSignaled(err, syscall.SIGSYS)`
+    - `./internal/execution/signal_linux.go:15:// ExitErrorSignaled reports whether err is an exec.ExitError for a process`
+    - `./internal/execution/signal_linux.go:17:func ExitErrorSignaled(err error, sig syscall.Signal) bool {`
+    - `./internal/execution/signal_windows.go:11:// ExitErrorSignaled always returns false on Windows.`
+    - `./internal/execution/signal_windows.go:13:func ExitErrorSignaled(_ error, _ syscall.Signal) bool {`
+    - `./internal/agent/executor/dcexec/executor.go:126:		if execution.ExitErrorSignaled(runErr, syscall.SIGSYS) {`
+- **NewCommand** — `internal/execution/payload/command.go:21`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/execution/payload/command.go:21:func NewCommand(program string, args ...string) CommandSpec {`
+    - `./internal/server/service/scheduler/slurm.go:154:	spec := payload.NewCommand("squeue", args...)`
+    - `./internal/server/service/scheduler/slurm.go:168:	spec := payload.NewCommand("sinfo", "--json")`
+    - `./internal/server/service/scheduler/slurm.go:178:	spec := payload.NewCommand("scontrol", "show", "partition", "--json")`
+    - `./internal/server/service/scheduler/slurm.go:188:	spec := payload.NewCommand("squeue", "--json", "--jobs", jobID)`
+    - `./internal/server/service/scheduler/slurm.go:203:	historySpec := payload.NewCommand("sacct",`
+    - `./internal/server/service/scheduler/slurm.go:242:	spec := payload.NewCommand("sbatch", args...)`
+    - `./internal/server/service/scheduler/slurm.go:311:	spec := payload.NewCommand(jobCmd, jobCmdArgs...)`
+    - `./internal/server/service/scheduler/slurm.go:327:	spec := payload.NewCommand("scontrol", updateArgs...)`
+    - `./internal/server/service/scheduler/lsf.go:113:	spec := payload.NewCommand("bjobs", args...)`
+    - `./internal/server/service/scheduler/lsf.go:122:	spec := payload.NewCommand("bhosts", "-json", "-o", bhostsOutputFields)`
+    - `./internal/server/service/scheduler/lsf.go:132:	spec := payload.NewCommand("bqueues", "-json", "-o", bqueuesOutputFields)`
+    - `./internal/server/service/scheduler/lsf.go:142:	spec := payload.NewCommand("bjobs", "-json", "-o", bjobsOutputFields, jobID)`
+    - `./internal/server/service/scheduler/lsf.go:178:	spec := payload.NewCommand("bsub", args...)`
+    - `./internal/server/service/scheduler/lsf.go:242:	spec := payload.NewCommand(jobCmd, jobCmdArgs...)`
+    - `./internal/server/service/scheduler/lsf.go:259:	spec := payload.NewCommand("bmod", cmdArgs...)`
+- **GenSecret** — `internal/infra/crypto/crypto.go:26`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/crypto/crypto_test.go:12:		result := GenSecret(length)`
+    - `./internal/infra/crypto/crypto_test.go:14:			t.Errorf("GenSecret(%d) length = %d, want %d", length, len(result), length)`
+    - `./internal/infra/crypto/crypto_test.go:22:	result := GenSecret(0)`
+    - `./internal/infra/crypto/crypto_test.go:24:		t.Errorf("GenSecret(0) = %q, want empty string", result)`
+    - `./internal/infra/crypto/crypto_test.go:32:	result := GenSecret(255)`
+    - `./internal/infra/crypto/crypto_test.go:35:			t.Errorf("GenSecret contains invalid character: %q (0x%x)", ch, ch)`
+    - `./internal/infra/crypto/crypto_test.go:50:		allBytes = append(allBytes, []byte(GenSecret(200))...)`
+    - `./internal/infra/crypto/crypto_test.go:101:	// GenSecret(0) returns "" — no panic. Only crypto/rand failure panics.`
+    - `./internal/infra/crypto/crypto_test.go:103:	result := GenSecret(0)`
+    - `./internal/infra/crypto/crypto.go:20:// GenSecret generates a cryptographically random string suitable for security`
+    - `./internal/infra/crypto/crypto.go:26:func GenSecret(length uint8) string {`
+    - `./internal/agent/executor/dcexec/token.go:17:	token := crypto.GenSecret(24)`
+    - `./internal/server/service/node/enrollment.go:30:	plain = crypto.GenSecret(32)`
+    - `./internal/server/service/user/ensure_admins.go:56:		rawPwd := crypto.GenSecret(16)`
+    - `./internal/server/service/session/session.go:493:	secret := crypto.GenSecret(24)`
+    - `./internal/server/service/user/user.go:193:		rawPwd := crypto.GenSecret(16)`
+    - `./internal/server/service/user/user.go:462:	newPassword := crypto.GenSecret(16)`
+- **CreateTarGz** — `internal/infra/fs/archive.go:21`
+  - 仓内其它引用（最多 20 条）:
+    - `./cmd/engine/command/node_issuecert.go:105:		if err := fsutil.CreateTarGz(archive, entries); err != nil {`
+    - `./internal/infra/fs/archive_test.go:32:	if err := CreateTarGz(outPath, entries); err != nil {`
+    - `./internal/infra/fs/archive_test.go:33:		t.Fatalf("CreateTarGz failed: %v", err)`
+    - `./internal/infra/fs/archive.go:20:// CreateTarGz writes the provided entries to a .tar.gz archive at outPath.`
+    - `./internal/infra/fs/archive.go:21:func CreateTarGz(outPath string, entries []ArchiveEntry) error {`
+- **MkdirPrivate** — `internal/infra/fs/secure_fs_linux.go:17`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/fs/secure_fs_linux.go:15:// MkdirPrivate creates a directory (and any missing parents) with 0700 permissions.`
+    - `./internal/infra/fs/secure_fs_linux.go:17:func MkdirPrivate(path string) error {`
+    - `./internal/infra/fs/secure_fs_linux.go:33:// MkdirPrivate forces 0700 and would break o+x traversal for non-owner nodes.`
+    - `./internal/infra/fs/secure_fs_windows.go:10:// MkdirPrivate creates a directory (and any missing parents) and hardens its DACL so that`
+    - `./internal/infra/fs/secure_fs_windows.go:13:func MkdirPrivate(path string) error {`
+    - `./internal/infra/fs/secure_fs_linux_test.go:14:	if err := MkdirPrivate(dir); err != nil {`
+    - `./internal/infra/fs/secure_fs_linux_test.go:15:		t.Fatalf("MkdirPrivate: %v", err)`
+    - `./internal/infra/fs/secure_fs_windows_test.go:60:	if err := MkdirPrivate(dir); err != nil {`
+    - `./internal/infra/fs/secure_fs_windows_test.go:61:		t.Fatalf("MkdirPrivate: %v", err)`
+    - `./internal/infra/fs/secure_fs_windows_test.go:102:	if err := MkdirPrivate(dir); err != nil {`
+    - `./internal/infra/fs/secure_fs_windows_test.go:103:		t.Fatalf("MkdirPrivate: %v", err)`
+    - `./internal/infra/fs/secure_fs_test.go:14:	if err := MkdirPrivate(dir); err != nil {`
+    - `./internal/infra/fs/secure_fs_test.go:15:		t.Fatalf("MkdirPrivate: %v", err)`
+    - `./cmd/engine/lifecycle_linux.go:64:	if err := fsutil.MkdirPrivate(dir); err != nil {`
+    - `./internal/dcexec/verifier/token_test.go:28:	if err := fs.MkdirPrivate(tokenDir); err != nil {`
+    - `./internal/dcexec/verifier/token_test.go:29:		t.Fatalf("MkdirPrivate: %v", err)`
+    - `./internal/dcexec/verifier/token_test.go:44:	if err := fs.MkdirPrivate(tokenDir); err != nil {`
+    - `./internal/dcexec/verifier/token_test.go:45:		t.Fatalf("MkdirPrivate: %v", err)`
+    - `./internal/dcexec/verifier/token_test.go:59:	if err := fs.MkdirPrivate(tokenDir); err != nil {`
+    - `./internal/dcexec/verifier/token_test.go:60:		t.Fatalf("MkdirPrivate: %v", err)`
+- **MkdirShared** — `internal/infra/fs/secure_fs_linux.go:34`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/fs/secure_fs_linux.go:28:// MkdirShared creates a directory (and any missing parents) with 0755 permissions.`
+    - `./internal/infra/fs/secure_fs_linux.go:34:func MkdirShared(path string) error {`
+    - `./internal/infra/fs/secure_fs_windows.go:23:// MkdirShared creates a directory (and any missing parents) without tightening its DACL.`
+    - `./internal/infra/fs/secure_fs_windows.go:26:func MkdirShared(path string) error {`
+    - `./internal/infra/fs/secure_fs_linux_test.go:39:// 且 MkdirShared 必须能把历史遗留的 0700 目录修复回 0755（NFS 死锁修复路径）。`
+    - `./internal/infra/fs/secure_fs_linux_test.go:42:	if err := MkdirShared(dir); err != nil {`
+    - `./internal/infra/fs/secure_fs_linux_test.go:43:		t.Fatalf("MkdirShared: %v", err)`
+    - `./internal/infra/fs/secure_fs_linux_test.go:53:	// 修复路径：0700 目录应被 MkdirShared 拉回 0755。`
+    - `./internal/infra/fs/secure_fs_linux_test.go:57:	if err := MkdirShared(dir); err != nil {`
+    - `./internal/infra/fs/secure_fs_linux_test.go:58:		t.Fatalf("MkdirShared repair: %v", err)`
+    - `./internal/infra/fs/secure_fs_windows_test.go:191:	if err := MkdirShared(dir); err != nil {`
+    - `./internal/infra/fs/secure_fs_windows_test.go:192:		t.Fatalf("MkdirShared: %v", err)`
+    - `./cmd/engine/command/node_register.go:81:	if err := fsutil.MkdirShared(filepath.Dir(certPaths.CA)); err != nil {`
+    - `./cmd/engine/command/node_issuecert.go:115:		if err := fsutil.MkdirShared(outDir); err != nil {`
+    - `./cmd/engine/command/node_issuecert.go:140:		if err := fsutil.MkdirShared(filepath.Dir(caPath)); err != nil {`
+    - `./internal/server/service/node/cert.go:95:	if err := fsutil.MkdirShared(filepath.Dir(caCertFile)); err != nil { // certs/cluster → 0755`
+    - `./internal/server/service/node/cert_perms_linux_test.go:24:// 权限矩阵七行逐项断言（§3.2 唯一事实源），并验证 MkdirShared 能修复 0700 的共享目录。`
+    - `./internal/server/service/node/cert_perms_linux_test.go:57:	// Repair path: a historically wrong 0700 on certs/cluster must be fixed by MkdirShared.`
+    - `./internal/server/service/node/cert_perms_linux_test.go:61:	if err := fsutil.MkdirShared(clusterDir); err != nil {`
+    - `./internal/server/service/node/cert_perms_linux_test.go:62:		t.Fatalf("MkdirShared repair: %v", err)`
+- **PIDFilePath** — `internal/infra/fs/secure_fs_linux.go:51`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/fs/secure_fs_linux.go:50:// PIDFilePath returns the runtime path of the engine process lock file.`
+    - `./internal/infra/fs/secure_fs_linux.go:51:func PIDFilePath() string {`
+    - `./internal/infra/fs/secure_fs_windows.go:38:// PIDFilePath returns the runtime path of the engine process lock file.`
+    - `./internal/infra/fs/secure_fs_windows.go:39:func PIDFilePath() string {`
+    - `./cmd/engine/lifecycle_linux.go:62:	path := fsutil.PIDFilePath()`
+    - `./cmd/engine/lifecycle_windows.go:114:	path := fsutil.PIDFilePath()`
+    - `./cmd/engine/command/service_windows_test.go:29:	pidPath := fsutil.PIDFilePath()`
+    - `./cmd/engine/command/service.go:15:	path := fsutil.PIDFilePath()`
+    - `./cmd/engine/command/service_linux.go:117:	path := fsutil.PIDFilePath()`
+    - `./cmd/engine/command/service_linux.go:148:	path := fsutil.PIDFilePath()`
+    - `./cmd/engine/command/service_windows.go:238:	path := fsutil.PIDFilePath()`
+- **WritePrivateFile** — `internal/infra/fs/secure_fs_linux.go:144`
+  - 仓内其它引用（最多 20 条）:
+    - `./cmd/engine/command/cert_portal.go:344:	if err := fsutil.WritePrivateFile(caKeyPath, caKeyPEM); err != nil {`
+    - `./cmd/engine/command/cert_portal.go:350:	if err := fsutil.WritePrivateFile(serverKeyPath, serverKeyPEM); err != nil {`
+    - `./cmd/engine/command/node_issuecert.go:128:			if err := fsutil.WritePrivateFile(keyPath, result.KeyPEM); err != nil {`
+    - `./cmd/engine/command/node_issuecert.go:153:			if err := fsutil.WritePrivateFile(nodeKeyPath, result.KeyPEM); err != nil {`
+    - `./internal/dcexec/verifier/token_test.go:32:	if err := fs.WritePrivateFile(tokenFile, []byte(secret)); err != nil {`
+    - `./internal/dcexec/verifier/token_test.go:33:		t.Fatalf("WritePrivateFile: %v", err)`
+    - `./internal/dcexec/verifier/token_test.go:47:	if err := fs.WritePrivateFile(tokenFile, []byte("real-secret")); err != nil {`
+    - `./internal/dcexec/verifier/token_test.go:48:		t.Fatalf("WritePrivateFile: %v", err)`
+    - `./cmd/engine/command/node_register.go:149:	if err := fsutil.WritePrivateFile(certPaths.Key, []byte(result.Data.KeyPEM)); err != nil {`
+    - `./internal/infra/fs/secure_fs_linux.go:141:// WritePrivateFile atomically writes data to a file with 0600 permissions,`
+    - `./internal/infra/fs/secure_fs_linux.go:144:func WritePrivateFile(path string, data []byte) error {`
+    - `./internal/infra/fs/secure_fs_linux.go:179:// certificates) with 0644 permissions. Symmetric to WritePrivateFile: same-dir`
+    - `./internal/infra/fs/secure_fs_linux.go:181:// WritePrivateFile (0600).`
+    - `./internal/infra/fs/secure_fs_windows.go:76:// WritePrivateFile atomically writes data to a file on Windows using a temp file + rename`
+    - `./internal/infra/fs/secure_fs_windows.go:79:func WritePrivateFile(path string, data []byte) error {`
+    - `./internal/infra/fs/secure_fs_linux_test.go:26:	if err := WritePrivateFile(path, []byte("payload")); err != nil {`
+    - `./internal/infra/fs/secure_fs_linux_test.go:27:		t.Fatalf("WritePrivateFile: %v", err)`
+    - `./internal/agent/renew.go:210:	if err := fsutil.WritePrivateFile(a.cfg.TLS.KeyPath, keyPEM); err != nil {`
+    - `./internal/infra/fs/secure_fs_windows_test.go:68:	if err := WritePrivateFile(path, []byte("payload")); err != nil {`
+    - `./internal/infra/fs/secure_fs_windows_test.go:69:		t.Fatalf("WritePrivateFile: %v", err)`
+- **WriteSharedFile** — `internal/infra/fs/secure_fs_linux.go:182`
+  - 仓内其它引用（最多 20 条）:
+    - `./cmd/engine/command/cert_portal.go:347:	if err := fsutil.WriteSharedFile(caCertPath, caCertPEM); err != nil {`
+    - `./cmd/engine/command/cert_portal.go:353:	if err := fsutil.WriteSharedFile(serverCertPath, serverCertPEM); err != nil {`
+    - `./cmd/engine/command/cert_portal.go:356:	if err := fsutil.WriteSharedFile(fullchainPath, fullchainPEM); err != nil {`
+    - `./cmd/engine/command/node_issuecert.go:118:		if err := fsutil.WriteSharedFile(caPath, result.CAPEM); err != nil {`
+    - `./cmd/engine/command/node_issuecert.go:124:		if err := fsutil.WriteSharedFile(certPath, result.CertPEM); err != nil {`
+    - `./cmd/engine/command/node_issuecert.go:143:		if err := fsutil.WriteSharedFile(caPath, result.CAPEM); err != nil {`
+    - `./cmd/engine/command/node_issuecert.go:149:		if err := fsutil.WriteSharedFile(nodeCertPath, result.CertPEM); err != nil {`
+    - `./internal/infra/fs/secure_fs_linux.go:178:// WriteSharedFile atomically writes a "public read-only asset" (ca.crt, node`
+    - `./internal/infra/fs/secure_fs_linux.go:182:func WriteSharedFile(path string, data []byte) error {`
+    - `./internal/infra/fs/secure_fs_windows.go:108:// WriteSharedFile atomically writes a "public read-only asset" (ca.crt, node`
+    - `./internal/infra/fs/secure_fs_windows.go:112:func WriteSharedFile(path string, data []byte) error {`
+    - `./internal/infra/fs/secure_fs_linux_test.go:69:	if err := WriteSharedFile(path, []byte("cert")); err != nil {`
+    - `./internal/infra/fs/secure_fs_linux_test.go:70:		t.Fatalf("WriteSharedFile: %v", err)`
+    - `./cmd/engine/command/node_register.go:146:	if err := fsutil.WriteSharedFile(certPaths.Cert, []byte(result.Data.CertPEM)); err != nil {`
+    - `./cmd/engine/command/node_register.go:152:	if err := fsutil.WriteSharedFile(certPaths.CA, []byte(result.Data.CAPEM)); err != nil {`
+    - `./internal/infra/fs/secure_fs_windows_test.go:200:	if err := WriteSharedFile(path, []byte("cert")); err != nil {`
+    - `./internal/infra/fs/secure_fs_windows_test.go:201:		t.Fatalf("WriteSharedFile: %v", err)`
+    - `./internal/agent/renew.go:207:	if err := fsutil.WriteSharedFile(a.cfg.TLS.CertPath, resp.GetCert()); err != nil {`
+    - `./internal/server/service/node/cert.go:488:	if err := fsutil.WriteSharedFile(certPath, certPEM); err != nil {`
+    - `./internal/server/service/node/cert.go:513:	return fsutil.WriteSharedFile(prev, data)`
+- **UnmarshalStrict** — `internal/infra/jsoncodec/jsoncodec.go:41`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/jsoncodec/jsoncodec_test.go:41:	err := UnmarshalStrict([]byte(`{"name":"x","extra":1}`), &s)`
+    - `./internal/infra/jsoncodec/jsoncodec_test.go:51:	err := UnmarshalStrict([]byte(`{"name":"x"} {}`), &s)`
+    - `./internal/infra/jsoncodec/jsoncodec.go:40:// UnmarshalStrict decodes a single JSON value and rejects unknown struct fields and trailing values.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:41:func UnmarshalStrict(data []byte, v any) error {`
+    - `./internal/infra/jsoncodec/jsoncodec.go:56:// UnmarshalStrictRead reads all of r and applies UnmarshalStrict.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:62:	return UnmarshalStrict(data, v)`
+    - `./internal/contract/schema/domain.go:118:	if err := json.UnmarshalStrict(raw, &value); err != nil {`
+    - `./internal/contract/schema/node_override.go:129:	if err := json.UnmarshalStrict(trimmed, &s); err != nil {`
+- **UnmarshalStrictRead** — `internal/infra/jsoncodec/jsoncodec.go:57`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/jsoncodec/jsoncodec.go:56:// UnmarshalStrictRead reads all of r and applies UnmarshalStrict.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:57:func UnmarshalStrictRead(r io.Reader, v any) error {`
+    - `./internal/server/portal/api/ticket.go:63:	if err := json.UnmarshalStrictRead(c.Request().Body, dst); err != nil {`
+- **UnmarshalRead** — `internal/infra/jsoncodec/jsoncodec.go:66`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/jsoncodec/jsoncodec.go:65:// UnmarshalRead decodes a single JSON value from r until EOF.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:66:func UnmarshalRead(r io.Reader, v any) error {`
+    - `./internal/infra/jsoncodec/jsoncodec.go:67:	return jsonv2.UnmarshalRead(r, v)`
+    - `./cmd/engine/command/node_register.go:139:	if err := json.UnmarshalRead(resp.Body, &result); err != nil {`
+- **MarshalIndent** — `internal/infra/jsoncodec/jsoncodec.go:71`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/jsoncodec/jsoncodec.go:70:// MarshalIndent is like Marshal but with indented output.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:71:func MarshalIndent(v any, prefix, indent string) ([]byte, error) {`
+    - `./cmd/dc-desktop-installer/client_config.go:55:		cfgBytes, err := json.MarshalIndent(cfg, "", "  ")`
+- **Valid** — `internal/infra/jsoncodec/jsoncodec.go:81`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/dcexec/action/vnc_test.go:244:	// 1. Valid absolute path`
+    - `./internal/agent/probe/connection_linux_test.go:49:	// 1. Valid VNC process`
+    - `./internal/infra/jsoncodec/jsoncodec.go:80:// Valid reports whether data is syntactically valid JSON.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:81:func Valid(data []byte) bool {`
+    - `./internal/agent/command.go:401:	if !json.Valid([]byte(trimmed)) {`
+    - `./internal/server/service/ticket/types.go:253:	if t.DeletedAt.Valid {`
+    - `./internal/server/service/ticket/types.go:261:	if p.DeletedAt.Valid {`
+    - `./internal/server/service/ticket/admin.go:61:	if !t.DeletedAt.Valid {`
+    - `./internal/server/controlplane/dispatch/codec.go:221:	if !json.Valid([]byte(trimmed)) {`
+    - `./internal/server/service/app/form.go:36:		if !json.Valid([]byte(form.Form)) {`
+    - `./internal/server/service/proxy/proxy.go:370:	if !protocol.Valid() {`
+    - `./internal/server/service/proxy/dataplane.go:48:	if !protocol.Valid() {`
+    - `./internal/server/service/license/license_test.go:322:	// 7. Valid with node + absolute lmutilPath`
+    - `./internal/server/service/connection/resource_admin.go:322:	if !res.Protocol.Valid() {`
+    - `./internal/contract/protocol.go:21:func (p Protocol) Valid() bool {`
+    - `./internal/contract/protocol.go:80:	if !p.Valid() {`
+    - `./internal/contract/protocol.go:101:	if !p.Valid() && *p != ProtocolUnknown {`
+    - `./internal/contract/protocol.go:109:	if !p.Valid() {`
+    - `./internal/contract/protocol.go:140:	if !p.Valid() && *p != ProtocolUnknown {`
+    - `./internal/contract/schema/merge_test.go:76:	// 1. Valid sparse payload`
+- **Compact** — `internal/infra/jsoncodec/jsoncodec.go:86`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/jsoncodec/jsoncodec_test.go:60:	if err := Compact(&dst, src); err != nil {`
+    - `./internal/infra/jsoncodec/jsoncodec.go:85:// Compact appends compacted JSON to dst.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:86:func Compact(dst *bytes.Buffer, src []byte) error {`
+    - `./internal/db/setting_test.go:66:		if err := json.Compact(&compactBuf, jsonBytes); err == nil {`
+    - `./internal/db/setting.go:45:	if err := json.Compact(&compactBuf, jsonBytes); err == nil {`
+    - `./internal/server/service/settings/ensure_defaults.go:30:		if err := json.Compact(&compactBuf, jsonBytes); err == nil {`
+
+
+## dc-desktop-installer（8）
+
+- **Marshal** — `internal/infra/jsoncodec/jsoncodec.go:30`
+  - 仓内其它引用（最多 20 条）:
+    - `./cmd/exec/stdin.go:29:// json.Marshal always produces compact JSON without embedded newlines, so the`
+    - `./cmd/exec/stdin.go:97:	data, err := json.Marshal(response)`
+    - `./internal/config/default.go:101:	bytes, err := toml.Marshal(d)`
+    - `./internal/execution/payload_normalize_test.go:28:	wire, err := json.Marshal(execution.ExecuteInput{Version: "1.2.3", Token: "t", Request: req})`
+    - `./internal/dcexec/action/xrdp.go:46:	out, err := json.Marshal(payload.XRDPControlResult{Display: display, PID: pid})`
+    - `./internal/dcexec/action/session_linux.go:43:		out, mErr := json.Marshal(payload.SessionControlResult{Terminated: n})`
+    - `./internal/execution/execution.go:110:	raw, err := json.Marshal(r.Payload)`
+    - `./internal/dcexec/action/vnc.go:78:	out, err := json.Marshal(payload.VNCGenerateOTPResult{OTP: otp})`
+    - `./internal/dcexec/action/vnc.go:747:	resultJSON, err := json.Marshal(result)`
+    - `./internal/dcexec/action/connection.go:38:		out, err := json.Marshal(payload.ConnectionCheckResult{Connections: []payload.ConnectionCheckItemResult{}})`
+    - `./internal/dcexec/action/connection.go:51:	out, err := json.Marshal(payload.ConnectionCheckResult{Connections: results})`
+    - `./cmd/engine/command/node_register.go:94:	jsonData, err := json.Marshal(payload)`
+    - `./internal/dcexec/action/file/file.go:46:	bytes, err := json.Marshal(fileListResult{Files: files, Truncated: truncated})`
+    - `./internal/dcexec/action/file/file.go:288:	bytes, err := json.Marshal(result)`
+    - `./internal/dcexec/action/file/file.go:432:	b, err := json.Marshal(result)`
+    - `./internal/db/node_runtime.go:29:	diskUsagesJSON, err := json.Marshal(metrics.DiskUsages)`
+    - `./internal/infra/jsoncodec/jsoncodec_test.go:18:	b, err := Marshal(s)`
+    - `./internal/infra/jsoncodec/jsoncodec_test.go:28:	b, err := Marshal(marshalJSONString("active"))`
+    - `./internal/db/json_serializer.go:30:			bytes, err = jsoncodec.Marshal(v)`
+    - `./internal/db/json_serializer.go:46:	result, err := jsoncodec.Marshal(fieldValue)`
+- **UnmarshalStrict** — `internal/infra/jsoncodec/jsoncodec.go:41`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/jsoncodec/jsoncodec_test.go:41:	err := UnmarshalStrict([]byte(`{"name":"x","extra":1}`), &s)`
+    - `./internal/infra/jsoncodec/jsoncodec_test.go:51:	err := UnmarshalStrict([]byte(`{"name":"x"} {}`), &s)`
+    - `./internal/infra/jsoncodec/jsoncodec.go:40:// UnmarshalStrict decodes a single JSON value and rejects unknown struct fields and trailing values.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:41:func UnmarshalStrict(data []byte, v any) error {`
+    - `./internal/infra/jsoncodec/jsoncodec.go:56:// UnmarshalStrictRead reads all of r and applies UnmarshalStrict.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:62:	return UnmarshalStrict(data, v)`
+    - `./internal/contract/schema/domain.go:118:	if err := json.UnmarshalStrict(raw, &value); err != nil {`
+    - `./internal/contract/schema/node_override.go:129:	if err := json.UnmarshalStrict(trimmed, &s); err != nil {`
+- **UnmarshalStrictRead** — `internal/infra/jsoncodec/jsoncodec.go:57`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/jsoncodec/jsoncodec.go:56:// UnmarshalStrictRead reads all of r and applies UnmarshalStrict.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:57:func UnmarshalStrictRead(r io.Reader, v any) error {`
+    - `./internal/server/portal/api/ticket.go:63:	if err := json.UnmarshalStrictRead(c.Request().Body, dst); err != nil {`
+- **UnmarshalRead** — `internal/infra/jsoncodec/jsoncodec.go:66`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/jsoncodec/jsoncodec.go:65:// UnmarshalRead decodes a single JSON value from r until EOF.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:66:func UnmarshalRead(r io.Reader, v any) error {`
+    - `./internal/infra/jsoncodec/jsoncodec.go:67:	return jsonv2.UnmarshalRead(r, v)`
+    - `./cmd/engine/command/node_register.go:139:	if err := json.UnmarshalRead(resp.Body, &result); err != nil {`
+- **Valid** — `internal/infra/jsoncodec/jsoncodec.go:81`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/contract/protocol.go:21:func (p Protocol) Valid() bool {`
+    - `./internal/contract/protocol.go:80:	if !p.Valid() {`
+    - `./internal/contract/protocol.go:101:	if !p.Valid() && *p != ProtocolUnknown {`
+    - `./internal/contract/protocol.go:109:	if !p.Valid() {`
+    - `./internal/contract/protocol.go:140:	if !p.Valid() && *p != ProtocolUnknown {`
+    - `./internal/contract/schema/merge_test.go:76:	// 1. Valid sparse payload`
+    - `./internal/contract/schema/validate_test.go:1236:	// 3. Valid values`
+    - `./internal/infra/jsoncodec/jsoncodec.go:80:// Valid reports whether data is syntactically valid JSON.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:81:func Valid(data []byte) bool {`
+    - `./internal/dcexec/action/vnc_test.go:244:	// 1. Valid absolute path`
+    - `./internal/agent/probe/connection_linux_test.go:49:	// 1. Valid VNC process`
+    - `./internal/agent/command.go:401:	if !json.Valid([]byte(trimmed)) {`
+    - `./internal/server/controlplane/dispatch/codec.go:221:	if !json.Valid([]byte(trimmed)) {`
+    - `./internal/server/service/proxy/dataplane.go:48:	if !protocol.Valid() {`
+    - `./internal/server/service/ticket/types.go:253:	if t.DeletedAt.Valid {`
+    - `./internal/server/service/ticket/types.go:261:	if p.DeletedAt.Valid {`
+    - `./internal/server/service/proxy/proxy.go:370:	if !protocol.Valid() {`
+    - `./internal/server/service/ticket/admin.go:61:	if !t.DeletedAt.Valid {`
+    - `./internal/server/service/app/form.go:36:		if !json.Valid([]byte(form.Form)) {`
+    - `./internal/server/service/connection/resource_admin.go:322:	if !res.Protocol.Valid() {`
+- **Compact** — `internal/infra/jsoncodec/jsoncodec.go:86`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/jsoncodec/jsoncodec_test.go:60:	if err := Compact(&dst, src); err != nil {`
+    - `./internal/infra/jsoncodec/jsoncodec.go:85:// Compact appends compacted JSON to dst.`
+    - `./internal/infra/jsoncodec/jsoncodec.go:86:func Compact(dst *bytes.Buffer, src []byte) error {`
+    - `./internal/db/setting.go:45:	if err := json.Compact(&compactBuf, jsonBytes); err == nil {`
+    - `./internal/db/setting_test.go:66:		if err := json.Compact(&compactBuf, jsonBytes); err == nil {`
+    - `./internal/server/service/settings/ensure_defaults.go:30:		if err := json.Compact(&compactBuf, jsonBytes); err == nil {`
+- **BaseSize** — `internal/infra/overlay/overlay.go:103`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/overlay/overlay_test.go:75:	baseSize, err := BaseSize(f)`
+    - `./internal/infra/overlay/overlay_test.go:77:		t.Fatalf("BaseSize failed: %v", err)`
+    - `./internal/infra/overlay/overlay.go:101:// BaseSize returns the size of the binary without any overlay payload.`
+    - `./internal/infra/overlay/overlay.go:103:func BaseSize(r io.ReadSeeker) (int64, error) {`
+    - `./internal/infra/overlay/overlay.go:152:	baseSize, err := BaseSize(in)`
+- **Inject** — `internal/infra/overlay/overlay.go:136`
+  - 仓内其它引用（最多 20 条）:
+    - `./internal/infra/overlay/overlay_test.go:27:	// 2. Inject payload`
+    - `./internal/infra/overlay/overlay_test.go:33:	if err := Inject(dummyExe, outExe, p); err != nil {`
+    - `./internal/infra/overlay/overlay_test.go:34:		t.Fatalf("Inject failed: %v", err)`
+    - `./internal/infra/overlay/overlay_test.go:56:	if err := Inject(outExe, reInjectedExe, p2); err != nil {`
+    - `./internal/infra/overlay/overlay.go:134:// Inject writes the payload into the output file by copying input (stripping any existing overlay)`
+    - `./internal/infra/overlay/overlay.go:136:func Inject(inputPath, outputPath string, payload *Payload) error {`
+    - `./cmd/engine/command/cert_portal.go:74:	console.PrintStderr("  inject-installer         Inject CA certificate & server URL into desktop installer EXE\n")`
+    - `./cmd/engine/command/cert_portal.go:91:		console.PrintStderr("Inject a CA certificate and server URL into a Windows desktop installer template.\n\n")`
+    - `./cmd/engine/command/cert_portal.go:136:	if err := overlay.Inject(inputPath, outputPath, payload); err != nil {`
+
+
+## 并集（58 符号）
+
+- `MergeFlags` @ `cmd/engine/command/command.go` — dead_from: **engine**
+  - `./cmd/engine/command/command.go:169:// MergeFlags overlays argv onto a copy of parent.`
+  - `./cmd/engine/command/command.go:171:func MergeFlags(parent *Flags, args []string, errOut io.Writer, name string) (*Flags, error) {`
+  - `./cmd/engine/command/service_windows.go:57:	f, err := MergeFlags(parent, args, os.Stderr, "install")`
+
+- `StartArgv` @ `cmd/engine/command/command.go` — dead_from: **engine**
+  - `./cmd/engine/command/command.go:137:// StartArgv builds the argv fragment that re-launches the engine with the same`
+  - `./cmd/engine/command/command.go:139:func StartArgv(f *Flags, mode StartMode) ([]string, error) {`
+  - `./cmd/engine/command/command_test.go:136:	got, err := StartArgv(f, StartModeConfigless)`
+  - `./cmd/engine/command/command_test.go:138:		t.Fatalf("StartArgv: %v", err)`
+  - `./cmd/engine/command/service_windows.go:65:	serviceArgs, err := StartArgv(f, mode)`
+
+- `NewConflictError` @ `internal/contract/errors.go` — dead_from: **exec**
+  - `./internal/db/connection.go:274:				return contract.NewConflictError(`
+  - `./internal/db/connection.go:283:				return contract.NewConflictError("connection already exists", err)`
+  - `./internal/db/connection.go:354:		return contract.NewConflictError(`
+  - `./internal/db/connection.go:359:	return contract.NewConflictError("connection already exists", lastConflict)`
+  - `./internal/db/connection.go:411:	return contract.NewConflictError("connection already exists", errClaimConflict)`
+  - … +15 条
+
+- `NewForbiddenError` @ `internal/contract/errors.go` — dead_from: **exec**
+  - `./internal/server/service/ticket/errors.go:17:	ErrPermissionDenied = contract.NewForbiddenError("permission denied")`
+  - `./internal/server/portal/api/api_test.go:32:		{"forbidden → 403", contract.NewForbiddenError("no perm"), http.StatusForbidden},`
+  - `./internal/server/service/connection/delete.go:14:		return contract.NewForbiddenError(fmt.Sprintf("only admin or owner can delete connection %d (owner:%s)", connection.ID, connection.Username))`
+  - `./internal/server/service/app/app.go:95:		return model.App{}, contract.NewForbiddenError("permission denied")`
+  - `./internal/server/service/connection/crud.go:101:		return model.Connection{}, contract.NewForbiddenError("no permission to access this connection")`
+  - … +7 条
+
+- `NewInvalidParamError` @ `internal/contract/errors.go` — dead_from: **exec**
+  - `./internal/db/connection_resource.go:39:			return nil, 0, contract.NewInvalidParamError(err.Error())`
+  - `./internal/server/service/proxy/proxy.go:191:		return nil, contract.NewInvalidParamError("requester is required")`
+  - `./internal/server/service/proxy/proxy.go:194:		return nil, contract.NewInvalidParamError("connectionId and resourceId are mutually exclusive")`
+  - `./internal/server/service/proxy/proxy.go:200:		return nil, contract.NewInvalidParamError("connectionId or resourceId is required")`
+  - `./internal/server/service/proxy/proxy.go:291:		return nil, contract.NewInvalidParamError("session template is required")`
+  - … +15 条
+
+- `NewNotFoundError` @ `internal/contract/errors.go` — dead_from: **exec**
+  - `./internal/server/portal/httputil/response_test.go:54:			name:         "contract.NewNotFoundError → 404",`
+  - `./internal/server/portal/httputil/response_test.go:55:			err:          contract.NewNotFoundError("file missing"),`
+  - `./internal/server/service/ticket/errors.go:14:	ErrTicketNotFound   = contract.NewNotFoundError("ticket not found")`
+  - `./internal/server/service/ticket/errors.go:15:	ErrProjectNotFound  = contract.NewNotFoundError("project not found")`
+  - `./internal/server/service/ticket/errors.go:16:	ErrCommentNotFound  = contract.NewNotFoundError("comment not found")`
+  - … +15 条
+
+- `NewUnauthorizedError` @ `internal/contract/errors.go` — dead_from: **exec**
+  - `./internal/contract/errors.go:61:func NewUnauthorizedError(msg string, cause ...error) error {`
+  - `./internal/contract/errors_test.go:47:			err:        NewUnauthorizedError("unauthorized request"),`
+  - `./internal/server/portal/api/scheduler.go:83:		return httputil.RespondError(c, contract.NewUnauthorizedError("session required"))`
+
+- `NewUnavailableError` @ `internal/contract/errors.go` — dead_from: **exec**
+  - `./internal/contract/errors.go:86:func NewUnavailableError(msg string, cause ...error) error {`
+  - `./internal/contract/errors_test.go:79:			err:        NewUnavailableError("node offline"),`
+  - `./internal/server/controlplane/dispatch/dispatch.go:146:			return nil, contract.NewUnavailableError(fmt.Sprintf("forward dispatch to leader %s failed", leaderID))`
+  - `./internal/server/service/user/id_mapping_cache.go:185:		return nil, contract.NewUnavailableError("ID-mapping resolution is not available on this platform")`
+  - `./internal/server/service/user/id_mapping_cache.go:441:		return nil, contract.NewUnavailableError("ID source unavailable", cause)`
+  - … +1 条
+
+- `ParseProtocol` @ `internal/contract/protocol.go` — dead_from: **exec**
+  - `./internal/db/connection_resource.go:37:		p, err := contract.ParseProtocol(protocol)`
+  - `./internal/contract/protocol.go:62:func ParseProtocol(s string) (Protocol, error) {`
+  - `./internal/contract/protocol.go:89:		parsed, err := ParseProtocol(strVal)`
+  - `./internal/contract/protocol.go:131:		parsed, err := ParseProtocol(v)`
+  - `./internal/contract/protocol_test.go:41:	p, err := ParseProtocol("vnc")`
+  - … +1 条
+
+- `Protocol.DialDefaultPort` @ `internal/contract/protocol.go` — dead_from: **exec**
+  - `./internal/server/service/connection/resource_admin.go:34:	return res.Protocol.DialDefaultPort()`
+  - `./internal/server/service/connection/launch_dial.go:27:	dialPort := cmp.Or(res.Protocol.DialDefaultPort(), 22)`
+  - `./internal/server/service/connection/ssh_proxy_target.go:48:	port = cmp.Or(res.Protocol.DialDefaultPort(), 22)`
+  - `./internal/server/service/connection/start_place.go:64:	dialPort := cmp.Or(res.Protocol.DialDefaultPort(), 22)`
+  - `./internal/contract/protocol.go:36:func (p Protocol) DialDefaultPort() uint {`
+
+- `Protocol.MarshalJSON` @ `internal/contract/protocol.go` — dead_from: **exec**
+  - `./internal/model/ticket.go:68:func (t TicketType) MarshalJSON() ([]byte, error) {`
+  - `./internal/model/ticket.go:115:func (p TicketPriority) MarshalJSON() ([]byte, error) {`
+  - `./internal/model/ticket.go:162:func (s TicketStatus) MarshalJSON() ([]byte, error) {`
+  - `./internal/model/node.go:59:func (s NodeStatus) MarshalJSON() ([]byte, error) {`
+  - `./internal/model/download_request.go:47:func (s DownloadRequestStatus) MarshalJSON() ([]byte, error) {`
+  - … +6 条
+
+- `Protocol.Scan` @ `internal/contract/protocol.go` — dead_from: **exec**
+  - `./internal/db/json_serializer.go:19:func (codecJSONSerializer) Scan(ctx context.Context, field *schema.Field, dst reflect.Value, dbValue any) (err error) {`
+  - `./internal/contract/protocol.go:116:func (p *Protocol) Scan(value any) error {`
+
+- `Protocol.String` @ `internal/contract/protocol.go` — dead_from: **exec**
+  - `./internal/server/service/connection/delete.go:76:				"connectionID", c.ID, "protocol", c.Protocol.String(),`
+  - `./internal/server/service/connection/launch_dial.go:51:		return model.Connection{}, fmt.Errorf("select node for %s failed: %w", res.Protocol.String(), err)`
+  - `./internal/server/service/connection/admin.go:141:					"connectionID", c.ID, "protocol", c.Protocol.String(), "nodeID", c.NodeID, "error", err)`
+  - `./internal/server/service/connection/launch.go:65:		return model.Connection{}, fmt.Errorf("unsupported protocol %q", res.Protocol.String())`
+  - `./internal/server/service/connection/refresh.go:133:			Protocol:     conn.Protocol.String(),`
+  - … +15 条
+
+- `Protocol.UnmarshalJSON` @ `internal/contract/protocol.go` — dead_from: **exec**
+  - `./internal/server/portal/httputil/params.go:94:func (l *IDList) UnmarshalJSON(data []byte) error {`
+  - `./internal/contract/protocol.go:86:func (p *Protocol) UnmarshalJSON(data []byte) error {`
+  - `./internal/server/service/ticket/types.go:17:func (n *Nullable[T]) UnmarshalJSON(data []byte) error {`
+  - `./internal/model/ticket.go:72:func (t *TicketType) UnmarshalJSON(data []byte) error {`
+  - `./internal/model/ticket.go:119:func (p *TicketPriority) UnmarshalJSON(data []byte) error {`
+  - … +7 条
+
+- `Protocol.UsesXDisplay` @ `internal/contract/protocol.go` — dead_from: **exec**
+  - `./internal/server/service/connection/resource_admin.go:344:		if !res.Protocol.UsesXDisplay() {`
+  - `./internal/contract/protocol.go:31:func (p Protocol) UsesXDisplay() bool {`
+
+- `Protocol.Valid` @ `internal/contract/protocol.go` — dead_from: **exec**
+  - `./internal/server/service/connection/resource_admin.go:322:	if !res.Protocol.Valid() {`
+  - `./internal/contract/protocol.go:21:func (p Protocol) Valid() bool {`
+
+- `Protocol.Value` @ `internal/contract/protocol.go` — dead_from: **exec**
+  - `./internal/db/json_serializer.go:45:func (codecJSONSerializer) Value(ctx context.Context, field *schema.Field, dst reflect.Value, fieldValue any) (any, error) {`
+  - `./internal/contract/protocol.go:108:func (p Protocol) Value() (driver.Value, error) {`
+
+- `ActionSpec.IsStream` @ `internal/execution/actions.go` — dead_from: **engine**
+  - `./internal/execution/actions.go:63:func (s ActionSpec) IsStream() bool {`
+
+- `BuildCleanEnv` @ `internal/execution/dcexec_env.go` — dead_from: **exec**
+  - `./internal/execution/dcexec_env.go:70:// BuildCleanEnv returns a new list of environment variables starting with the current process`
+  - `./internal/execution/dcexec_env.go:74:func BuildCleanEnv(extra map[string]string) []string {`
+  - `./internal/agent/executor/direct/executor.go:161:	cmd.Env = execution.BuildCleanEnv(req.Env)`
+
+- `BuildDcExecEnv` @ `internal/execution/dcexec_env.go` — dead_from: **exec**
+  - `./internal/execution/dcexec_env.go:97:// BuildDcExecEnv returns a sanitized environment for invoking PrivilegedExec.`
+  - `./internal/execution/dcexec_env.go:98:func BuildDcExecEnv(extra map[string]string) []string {`
+  - `./internal/agent/executor/dcexec/executor.go:107:	cmd.Env = execution.BuildDcExecEnv(nil)`
+  - `./internal/server/service/file/download_test.go:418:// 经 BuildDcExecEnv 透传（不在 blocked env 名单内），跨平台可用。`
+  - `./internal/server/service/file/stream.go:104:	cmd.Env = execution.BuildDcExecEnv(nil)`
+  - … +2 条
+
+- `CleanCurrentProcessEnv` @ `internal/execution/dcexec_env.go` — dead_from: **engine**
+  - `./cmd/exec/main.go:33:	execution.CleanCurrentProcessEnv()`
+  - `./internal/execution/dcexec_env.go:60:// CleanCurrentProcessEnv removes dangerous loader variables before privilege changes.`
+  - `./internal/execution/dcexec_env.go:61:func CleanCurrentProcessEnv() {`
+
+- `ActionError.Error` @ `internal/execution/execution.go` — dead_from: **exec**
+  - `./internal/agent/stream.go:388:func (e *redirectError) Error() string {`
+  - `./internal/execution/execution.go:257:func (e *ActionError) Error() string {`
+  - `./internal/contract/errors.go:33:func (e *appError) Error() string {`
+  - `./internal/server/controlplane/agent_lifecycle.go:21:func (e standbyError) Error() string {`
+  - `./internal/server/service/ticket/errors.go:40:func (e *BatchError) Error() string   { return e.Msg }`
+  - … +2 条
+
+- `HandleError` @ `internal/execution/execution.go` — dead_from: **exec**
+  - `./internal/execution/execution.go:308:// HandleError logs structured execution errors and returns the original error.`
+  - `./internal/execution/execution.go:309:func HandleError(l *slog.Logger, err error, context string) error {`
+  - `./internal/server/service/license/flexlm.go:61:		return "", execution.HandleError(s.logger, err, "license."+string(actionType))`
+  - `./internal/server/service/file/file.go:120:		return execution.HandleError(s.logger, err, "file.mkdir")`
+  - `./internal/server/service/file/file.go:146:	return execution.HandleError(s.logger, err, "file.rename")`
+  - … +15 条
+
+- `MatchDcExecProtocolVersion` @ `internal/execution/execution.go` — dead_from: **engine**
+  - `./internal/execution/protocol_version_test.go:6:	if err := MatchDcExecProtocolVersion("0.5.0", "0.5.0"); err != nil {`
+  - `./internal/execution/protocol_version_test.go:9:	if err := MatchDcExecProtocolVersion("", ""); err != nil {`
+  - `./internal/execution/protocol_version_test.go:12:	if err := MatchDcExecProtocolVersion("0.5.0", "0.4.0"); err == nil {`
+  - `./internal/execution/protocol_version_test.go:15:	if err := MatchDcExecProtocolVersion("0.5.0", ""); err == nil {`
+  - `./internal/execution/execution.go:218:// MatchDcExecProtocolVersion rejects any engine↔PrivilegedExec version skew (exact match only).`
+  - … +2 条
+
+- `Run` @ `internal/execution/execution.go` — dead_from: **exec**
+  - `./internal/config/validate_perms_linux.go:35:			return fmt.Errorf("failed to fix permissions for '%s': %w. Run 'chmod 600 %s' manually", path, err, path)`
+  - `./internal/config/validate_test.go:33:		t.Run(tt.name, func(t *testing.T) {`
+  - `./internal/config/validate_test.go:172:		t.Run(tt.name, func(t *testing.T) {`
+  - `./internal/config/validate_test.go:287:		t.Run(tt.name, func(t *testing.T) {`
+  - `./internal/config/validate_test.go:375:		t.Run(tt.name, func(t *testing.T) {`
+  - … +15 条
+
+- `WithNodeAffinity` @ `internal/execution/execution.go` — dead_from: **exec**
+  - `./internal/execution/execution.go:183:// WithNodeAffinity sets the node-selection strategy applied within the`
+  - `./internal/execution/execution.go:185:func WithNodeAffinity(affinity NodeAffinity) RequestOption {`
+  - `./internal/server/service/scheduler/actions.go:45:		execution.WithNodeAffinity(nodeAffinity),`
+  - `./internal/server/service/license/flexlm.go:56:		execution.WithNodeAffinity(execution.NodeAffinityLocalPreferred),`
+
+- `WithTargetNode` @ `internal/execution/execution.go` — dead_from: **exec**
+  - `./internal/execution/execution.go:160:// WithTargetNode pins the request to a specific agent by node ID / hostname.`
+  - `./internal/execution/execution.go:161:func WithTargetNode(nodeID string) RequestOption {`
+  - `./internal/server/service/connection/vnc_launch_exec.go:113:		execution.WithTargetNode(node.NodeID),`
+  - `./internal/server/service/connection/vnc_otp.go:49:		execution.WithTargetNode(conn.NodeID),`
+  - `./internal/server/controlplane/dispatch/dispatch_test.go:29:		execution.WithTargetNode("agent-a"),`
+  - … +8 条
+
+- `WithTimeout` @ `internal/execution/execution.go` — dead_from: **exec**
+  - `./internal/dcexec/action/helper_test.go:42:	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)`
+  - `./internal/infra/osuser/identity.go:81:	ctx, cancel := context.WithTimeout(context.Background(), userLookupTimeout)`
+  - `./cmd/exec/main.go:54:	ctx, cancel := context.WithTimeout(context.Background(), startupTimeout)`
+  - `./cmd/exec/execute.go:147:		ctx, cancel = context.WithTimeout(context.Background(), timeout)`
+  - `./internal/agent/probe/xrdp_linux.go:21:	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)`
+  - … +15 条
+
+- `NewCommand` @ `internal/execution/payload/command.go` — dead_from: **exec**
+  - `./internal/execution/payload/command.go:21:func NewCommand(program string, args ...string) CommandSpec {`
+  - `./internal/server/service/scheduler/slurm.go:154:	spec := payload.NewCommand("squeue", args...)`
+  - `./internal/server/service/scheduler/slurm.go:168:	spec := payload.NewCommand("sinfo", "--json")`
+  - `./internal/server/service/scheduler/slurm.go:178:	spec := payload.NewCommand("scontrol", "show", "partition", "--json")`
+  - `./internal/server/service/scheduler/slurm.go:188:	spec := payload.NewCommand("squeue", "--json", "--jobs", jobID)`
+  - … +11 条
+
+- `DcExecKilledBySeccomp` @ `internal/execution/signal_linux.go` — dead_from: **exec**
+  - `./internal/execution/signal_linux.go:9:// DcExecKilledBySeccomp reports whether err is a PrivilegedExec process that the kernel`
+  - `./internal/execution/signal_linux.go:11:func DcExecKilledBySeccomp(err error) bool {`
+  - `./internal/execution/signal_windows.go:5:// DcExecKilledBySeccomp always returns false on Windows: PrivilegedExec is Linux-only, and`
+  - `./internal/execution/signal_windows.go:7:func DcExecKilledBySeccomp(_ error) bool {`
+  - `./internal/server/service/file/stream.go:124:		if execution.DcExecKilledBySeccomp(runErr) {`
+  - … +2 条
+
+- `ExitErrorSignaled` @ `internal/execution/signal_linux.go` — dead_from: **exec**
+  - `./internal/agent/executor/dcexec/executor.go:126:		if execution.ExitErrorSignaled(runErr, syscall.SIGSYS) {`
+  - `./internal/execution/signal_linux.go:12:	return ExitErrorSignaled(err, syscall.SIGSYS)`
+  - `./internal/execution/signal_linux.go:15:// ExitErrorSignaled reports whether err is an exec.ExitError for a process`
+  - `./internal/execution/signal_linux.go:17:func ExitErrorSignaled(err error, sig syscall.Signal) bool {`
+  - `./internal/execution/signal_windows.go:11:// ExitErrorSignaled always returns false on Windows.`
+  - … +1 条
+
+- `BoundedGo` @ `internal/infra/concurrency/goroutine.go` — dead_from: **engine**
+  - `./internal/infra/concurrency/goroutine.go:21:// BoundedGo acquires a slot from sem before starting fn, then releases it when`
+  - `./internal/infra/concurrency/goroutine.go:26:func BoundedGo(sem chan struct{}, logger *slog.Logger, name string, fn func()) {`
+  - `./internal/infra/concurrency/goroutine.go:40:// Unlike BoundedGo, it never blocks the caller; it returns false when the`
+  - `./internal/infra/concurrency/goroutine_test.go:99:	BoundedGo(sem, slog.Default(), "first", func() {`
+  - `./internal/infra/concurrency/goroutine_test.go:108:		BoundedGo(sem, slog.Default(), "second", func() {`
+  - … +2 条
+
+- `GenSecret` @ `internal/infra/crypto/crypto.go` — dead_from: **exec**
+  - `./internal/infra/crypto/crypto_test.go:12:		result := GenSecret(length)`
+  - `./internal/infra/crypto/crypto_test.go:14:			t.Errorf("GenSecret(%d) length = %d, want %d", length, len(result), length)`
+  - `./internal/infra/crypto/crypto_test.go:22:	result := GenSecret(0)`
+  - `./internal/infra/crypto/crypto_test.go:24:		t.Errorf("GenSecret(0) = %q, want empty string", result)`
+  - `./internal/infra/crypto/crypto_test.go:32:	result := GenSecret(255)`
+  - … +12 条
+
+- `VerifyShadowHash` @ `internal/infra/crypto/shadow_crypt.go` — dead_from: **engine**
+  - `./internal/infra/crypto/shadow_crypt_test.go:62:			got := VerifyShadowHash(tc.password, tc.hash)`
+  - `./internal/infra/crypto/shadow_crypt_test.go:64:				t.Errorf("VerifyShadowHash(%q, %q) = %v; want %v", tc.password, tc.hash, got, tc.valid)`
+  - `./internal/infra/crypto/shadow_crypt_test.go:94:		if !VerifyShadowHash(tc.password, hash) {`
+  - `./internal/infra/crypto/shadow_crypt_test.go:95:			t.Errorf("VerifyShadowHash failed for dynamically generated openssl hash: %s (password: %s)", hash, tc.password)`
+  - `./internal/infra/crypto/shadow_crypt_test.go:97:		if VerifyShadowHash("wrong_"+tc.password, hash) {`
+  - … +5 条
+
+- `b64from24bit` @ `internal/infra/crypto/shadow_crypt.go` — dead_from: **engine**
+  - `./internal/infra/crypto/shadow_crypt.go:35:// b64from24bit encodes 24 bits into n characters of custom crypt Base64.`
+  - `./internal/infra/crypto/shadow_crypt.go:36:func b64from24bit(b2, b1, b0 byte, n int, sb *strings.Builder) {`
+  - `./internal/infra/crypto/shadow_crypt.go:181:	b64from24bit(c[0], c[21], c[42], 4, &sb)`
+  - `./internal/infra/crypto/shadow_crypt.go:182:	b64from24bit(c[22], c[43], c[1], 4, &sb)`
+  - `./internal/infra/crypto/shadow_crypt.go:183:	b64from24bit(c[44], c[2], c[23], 4, &sb)`
+  - … +15 条
+
+- `cryptSha512` @ `internal/infra/crypto/shadow_crypt.go` — dead_from: **engine**
+  - `./internal/infra/crypto/shadow_crypt.go:27:	computed, err := cryptSha512(password, hashedPassword)`
+  - `./internal/infra/crypto/shadow_crypt.go:80:// cryptSha512 implements Ulrich Drepper's SHA-512 crypt ($6$).`
+  - `./internal/infra/crypto/shadow_crypt.go:81:func cryptSha512(password, setting string) (string, error) {`
+
+- `parseSha512Setting` @ `internal/infra/crypto/shadow_crypt.go` — dead_from: **engine**
+  - `./internal/infra/crypto/shadow_crypt.go:45:// parseSha512Setting extracts rounds, salt, and whether custom rounds was explicitly specified.`
+  - `./internal/infra/crypto/shadow_crypt.go:46:func parseSha512Setting(setting string) (rounds int, customRounds bool, salt string, err error) {`
+  - `./internal/infra/crypto/shadow_crypt.go:82:	rounds, customRounds, salt, err := parseSha512Setting(setting)`
+
+- `CreateTarGz` @ `internal/infra/fs/archive.go` — dead_from: **exec**
+  - `./internal/infra/fs/archive.go:20:// CreateTarGz writes the provided entries to a .tar.gz archive at outPath.`
+  - `./internal/infra/fs/archive.go:21:func CreateTarGz(outPath string, entries []ArchiveEntry) error {`
+  - `./internal/infra/fs/archive_test.go:32:	if err := CreateTarGz(outPath, entries); err != nil {`
+  - `./internal/infra/fs/archive_test.go:33:		t.Fatalf("CreateTarGz failed: %v", err)`
+  - `./cmd/engine/command/node_issuecert.go:105:		if err := fsutil.CreateTarGz(archive, entries); err != nil {`
+
+- `MkdirPrivate` @ `internal/infra/fs/secure_fs_linux.go` — dead_from: **exec**
+  - `./cmd/engine/lifecycle_linux.go:64:	if err := fsutil.MkdirPrivate(dir); err != nil {`
+  - `./cmd/engine/lifecycle_windows.go:116:	if err := fsutil.MkdirPrivate(dir); err != nil {`
+  - `./cmd/engine/command/cert_portal.go:262:	if err := fsutil.MkdirPrivate(outDir); err != nil {`
+  - `./cmd/engine/command/node_issuecert.go:121:		if err := fsutil.MkdirPrivate(filepath.Dir(certPath)); err != nil {`
+  - `./cmd/engine/command/node_issuecert.go:146:		if err := fsutil.MkdirPrivate(filepath.Dir(nodeCertPath)); err != nil {`
+  - … +15 条
+
+- `MkdirShared` @ `internal/infra/fs/secure_fs_linux.go` — dead_from: **exec**
+  - `./cmd/engine/command/node_register.go:81:	if err := fsutil.MkdirShared(filepath.Dir(certPaths.CA)); err != nil {`
+  - `./cmd/engine/command/node_issuecert.go:115:		if err := fsutil.MkdirShared(outDir); err != nil {`
+  - `./cmd/engine/command/node_issuecert.go:140:		if err := fsutil.MkdirShared(filepath.Dir(caPath)); err != nil {`
+  - `./internal/infra/fs/secure_fs_linux.go:28:// MkdirShared creates a directory (and any missing parents) with 0755 permissions.`
+  - `./internal/infra/fs/secure_fs_linux.go:34:func MkdirShared(path string) error {`
+  - … +15 条
+
+- `PIDFilePath` @ `internal/infra/fs/secure_fs_linux.go` — dead_from: **exec**
+  - `./internal/infra/fs/secure_fs_linux.go:50:// PIDFilePath returns the runtime path of the engine process lock file.`
+  - `./internal/infra/fs/secure_fs_linux.go:51:func PIDFilePath() string {`
+  - `./internal/infra/fs/secure_fs_windows.go:38:// PIDFilePath returns the runtime path of the engine process lock file.`
+  - `./internal/infra/fs/secure_fs_windows.go:39:func PIDFilePath() string {`
+  - `./cmd/engine/lifecycle_linux.go:62:	path := fsutil.PIDFilePath()`
+  - … +6 条
+
+- `VerifyPrivateDir` @ `internal/infra/fs/secure_fs_linux.go` — dead_from: **engine**
+  - `./internal/infra/fs/secure_fs_linux.go:93:// VerifyPrivateDir checks that path is an existing directory with exactly 0700`
+  - `./internal/infra/fs/secure_fs_linux.go:95:func VerifyPrivateDir(path string) error {`
+  - `./internal/dcexec/verifier/token.go:50:	if err := fs.VerifyPrivateDir(tokenDir); err != nil {`
+  - `./internal/infra/fs/secure_fs_windows.go:50:// VerifyPrivateDir checks that path is an existing directory whose Owner and DACL keep`
+  - `./internal/infra/fs/secure_fs_windows.go:52:func VerifyPrivateDir(path string) error {`
+  - … +3 条
+
+- `VerifyPrivateFileDescriptor` @ `internal/infra/fs/secure_fs_linux.go` — dead_from: **engine**
+  - `./internal/infra/fs/secure_fs_linux.go:106:// VerifyPrivateFileDescriptor checks that f is an open file with exactly 0600`
+  - `./internal/infra/fs/secure_fs_linux.go:108:func VerifyPrivateFileDescriptor(f *os.File) error {`
+  - `./internal/infra/fs/secure_fs_windows.go:63:// VerifyPrivateFileDescriptor checks that f is an open file whose Owner and DACL keep`
+  - `./internal/infra/fs/secure_fs_windows.go:65:func VerifyPrivateFileDescriptor(f *os.File) error {`
+  - `./internal/infra/fs/secure_fs_windows_test.go:76:	if err := VerifyPrivateFileDescriptor(f); err != nil {`
+  - … +3 条
+
+- `WritePrivateFile` @ `internal/infra/fs/secure_fs_linux.go` — dead_from: **exec**
+  - `./internal/infra/fs/secure_fs_linux.go:141:// WritePrivateFile atomically writes data to a file with 0600 permissions,`
+  - `./internal/infra/fs/secure_fs_linux.go:144:func WritePrivateFile(path string, data []byte) error {`
+  - `./internal/infra/fs/secure_fs_linux.go:179:// certificates) with 0644 permissions. Symmetric to WritePrivateFile: same-dir`
+  - `./internal/infra/fs/secure_fs_linux.go:181:// WritePrivateFile (0600).`
+  - `./internal/infra/fs/secure_fs_windows.go:76:// WritePrivateFile atomically writes data to a file on Windows using a temp file + rename`
+  - … +15 条
+
+- `WriteSharedFile` @ `internal/infra/fs/secure_fs_linux.go` — dead_from: **exec**
+  - `./cmd/engine/command/node_register.go:146:	if err := fsutil.WriteSharedFile(certPaths.Cert, []byte(result.Data.CertPEM)); err != nil {`
+  - `./cmd/engine/command/node_register.go:152:	if err := fsutil.WriteSharedFile(certPaths.CA, []byte(result.Data.CAPEM)); err != nil {`
+  - `./cmd/engine/command/node_issuecert.go:118:		if err := fsutil.WriteSharedFile(caPath, result.CAPEM); err != nil {`
+  - `./cmd/engine/command/node_issuecert.go:124:		if err := fsutil.WriteSharedFile(certPath, result.CertPEM); err != nil {`
+  - `./cmd/engine/command/node_issuecert.go:143:		if err := fsutil.WriteSharedFile(caPath, result.CAPEM); err != nil {`
+  - … +15 条
+
+- `verifyOwnerAndPerm` @ `internal/infra/fs/secure_fs_linux.go` — dead_from: **engine**
+  - `./internal/infra/fs/secure_fs_linux.go:103:	return verifyOwnerAndPerm(path, info, 0700)`
+  - `./internal/infra/fs/secure_fs_linux.go:116:	return verifyOwnerAndPerm(f.Name(), info, 0600)`
+  - `./internal/infra/fs/secure_fs_linux.go:119:// verifyOwnerAndPerm is the shared owner/permission check for secure`
+  - `./internal/infra/fs/secure_fs_linux.go:121:func verifyOwnerAndPerm(path string, info os.FileInfo, expectedPerm os.FileMode) error {`
+
+- `Compact` @ `internal/infra/jsoncodec/jsoncodec.go` — dead_from: **dc-desktop-installer,exec**
+  - `./internal/db/setting.go:45:	if err := json.Compact(&compactBuf, jsonBytes); err == nil {`
+  - `./internal/db/setting_test.go:66:		if err := json.Compact(&compactBuf, jsonBytes); err == nil {`
+  - `./internal/infra/jsoncodec/jsoncodec_test.go:60:	if err := Compact(&dst, src); err != nil {`
+  - `./internal/infra/jsoncodec/jsoncodec.go:85:// Compact appends compacted JSON to dst.`
+  - `./internal/infra/jsoncodec/jsoncodec.go:86:func Compact(dst *bytes.Buffer, src []byte) error {`
+  - … +1 条
+
+- `Marshal` @ `internal/infra/jsoncodec/jsoncodec.go` — dead_from: **dc-desktop-installer**
+  - `./internal/config/default.go:101:	bytes, err := toml.Marshal(d)`
+  - `./internal/db/node_runtime.go:29:	diskUsagesJSON, err := json.Marshal(metrics.DiskUsages)`
+  - `./internal/dcexec/action/xrdp.go:46:	out, err := json.Marshal(payload.XRDPControlResult{Display: display, PID: pid})`
+  - `./internal/db/json_serializer.go:30:			bytes, err = jsoncodec.Marshal(v)`
+  - `./internal/db/json_serializer.go:46:	result, err := jsoncodec.Marshal(fieldValue)`
+  - … +15 条
+
+- `MarshalIndent` @ `internal/infra/jsoncodec/jsoncodec.go` — dead_from: **engine,exec**
+  - `./cmd/dc-desktop-installer/client_config.go:55:		cfgBytes, err := json.MarshalIndent(cfg, "", "  ")`
+  - `./internal/infra/jsoncodec/jsoncodec.go:70:// MarshalIndent is like Marshal but with indented output.`
+  - `./internal/infra/jsoncodec/jsoncodec.go:71:func MarshalIndent(v any, prefix, indent string) ([]byte, error) {`
+
+- `UnmarshalRead` @ `internal/infra/jsoncodec/jsoncodec.go` — dead_from: **dc-desktop-installer,exec**
+  - `./cmd/engine/command/node_register.go:139:	if err := json.UnmarshalRead(resp.Body, &result); err != nil {`
+  - `./internal/infra/jsoncodec/jsoncodec.go:65:// UnmarshalRead decodes a single JSON value from r until EOF.`
+  - `./internal/infra/jsoncodec/jsoncodec.go:66:func UnmarshalRead(r io.Reader, v any) error {`
+  - `./internal/infra/jsoncodec/jsoncodec.go:67:	return jsonv2.UnmarshalRead(r, v)`
+
+- `UnmarshalStrict` @ `internal/infra/jsoncodec/jsoncodec.go` — dead_from: **dc-desktop-installer,exec**
+  - `./internal/infra/jsoncodec/jsoncodec_test.go:41:	err := UnmarshalStrict([]byte(`{"name":"x","extra":1}`), &s)`
+  - `./internal/infra/jsoncodec/jsoncodec_test.go:51:	err := UnmarshalStrict([]byte(`{"name":"x"} {}`), &s)`
+  - `./internal/infra/jsoncodec/jsoncodec.go:40:// UnmarshalStrict decodes a single JSON value and rejects unknown struct fields and trailing values.`
+  - `./internal/infra/jsoncodec/jsoncodec.go:41:func UnmarshalStrict(data []byte, v any) error {`
+  - `./internal/infra/jsoncodec/jsoncodec.go:56:// UnmarshalStrictRead reads all of r and applies UnmarshalStrict.`
+  - … +3 条
+
+- `UnmarshalStrictRead` @ `internal/infra/jsoncodec/jsoncodec.go` — dead_from: **dc-desktop-installer,exec**
+  - `./internal/infra/jsoncodec/jsoncodec.go:56:// UnmarshalStrictRead reads all of r and applies UnmarshalStrict.`
+  - `./internal/infra/jsoncodec/jsoncodec.go:57:func UnmarshalStrictRead(r io.Reader, v any) error {`
+  - `./internal/server/portal/api/ticket.go:63:	if err := json.UnmarshalStrictRead(c.Request().Body, dst); err != nil {`
+
+- `Valid` @ `internal/infra/jsoncodec/jsoncodec.go` — dead_from: **dc-desktop-installer,exec**
+  - `./internal/agent/probe/connection_linux_test.go:49:	// 1. Valid VNC process`
+  - `./internal/infra/jsoncodec/jsoncodec.go:80:// Valid reports whether data is syntactically valid JSON.`
+  - `./internal/infra/jsoncodec/jsoncodec.go:81:func Valid(data []byte) bool {`
+  - `./internal/agent/command.go:401:	if !json.Valid([]byte(trimmed)) {`
+  - `./internal/server/controlplane/dispatch/codec.go:221:	if !json.Valid([]byte(trimmed)) {`
+  - … +15 条
+
+- `BaseSize` @ `internal/infra/overlay/overlay.go` — dead_from: **dc-desktop-installer**
+  - `./internal/infra/overlay/overlay_test.go:75:	baseSize, err := BaseSize(f)`
+  - `./internal/infra/overlay/overlay_test.go:77:		t.Fatalf("BaseSize failed: %v", err)`
+  - `./internal/infra/overlay/overlay.go:101:// BaseSize returns the size of the binary without any overlay payload.`
+  - `./internal/infra/overlay/overlay.go:103:func BaseSize(r io.ReadSeeker) (int64, error) {`
+  - `./internal/infra/overlay/overlay.go:152:	baseSize, err := BaseSize(in)`
+
+- `Inject` @ `internal/infra/overlay/overlay.go` — dead_from: **dc-desktop-installer**
+  - `./internal/infra/overlay/overlay_test.go:27:	// 2. Inject payload`
+  - `./internal/infra/overlay/overlay_test.go:33:	if err := Inject(dummyExe, outExe, p); err != nil {`
+  - `./internal/infra/overlay/overlay_test.go:34:		t.Fatalf("Inject failed: %v", err)`
+  - `./internal/infra/overlay/overlay_test.go:56:	if err := Inject(outExe, reInjectedExe, p2); err != nil {`
+  - `./internal/infra/overlay/overlay.go:134:// Inject writes the payload into the output file by copying input (stripping any existing overlay)`
+  - … +4 条
+
+- `ReadExecutable` @ `internal/infra/overlay/overlay.go` — dead_from: **engine**
+  - `./cmd/dc-desktop-installer/main.go:43:	embeddedPayload, err := overlay.ReadExecutable()`
+  - `./internal/infra/overlay/overlay.go:82:// ReadExecutable reads the overlay payload from the currently running executable.`
+  - `./internal/infra/overlay/overlay.go:83:func ReadExecutable() (*Payload, error) {`
+
+- `ReadFile` @ `internal/infra/overlay/overlay.go` — dead_from: **engine**
+  - `./internal/config/resolve.go:94:		data, err := os.ReadFile(c.Database.PasswordFile)`
+  - `./internal/config/resolve.go:105:		pwd, err := os.ReadFile(c.User.Ldap.BindPasswordFile)`
+  - `./internal/dcexec/action/xrdp.go:93:		raw, err := os.ReadFile(filepath.Join("/proc", pidStr, "cmdline"))`
+  - `./internal/dcexec/action/xrdp.go:117:		raw, err := os.ReadFile(filepath.Join("/proc", pidStr, "cmdline"))`
+  - `./internal/dcexec/action/xrdp.go:162:	data, err := os.ReadFile(filepath.Join("/proc", pid, "status"))`
+  - … +15 条
+
+- `ReadFrom` @ `internal/infra/overlay/overlay.go` — dead_from: **engine**
+  - `./internal/infra/overlay/overlay_test.go:87:	_, err := ReadFrom(buf)`
+  - `./internal/infra/overlay/overlay.go:34:// ReadFrom reads the overlay payload from a ReadSeeker (e.g. an open executable file).`
+  - `./internal/infra/overlay/overlay.go:35:func ReadFrom(r io.ReadSeeker) (*Payload, error) {`
+  - `./internal/infra/overlay/overlay.go:98:	return ReadFrom(f)`

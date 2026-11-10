@@ -11,8 +11,47 @@ import (
 	"time"
 
 	"design-cloud-engine/internal/agent/probe"
+	"design-cloud-engine/internal/contract"
 	pb "design-cloud-engine/internal/contract/proto"
 )
+
+// periodicProbeDisabled 用于 scanEnabled=false 等关闭周期任务场景，避免忙等。
+const periodicProbeDisabled = 365 * 24 * time.Hour
+
+func desktopScanPeriod(settings *pb.AgentSettings) time.Duration {
+	if settings == nil {
+		return time.Duration(contract.DefaultVNCScanInterval) * time.Second
+	}
+	vnc := settings.GetVnc()
+	if vnc == nil || !vnc.GetScanEnabled() {
+		return periodicProbeDisabled
+	}
+	sec := vnc.GetScanInterval()
+	if sec <= 0 {
+		return time.Duration(contract.DefaultVNCScanInterval) * time.Second
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func metricsPeriod(settings *pb.AgentSettings) time.Duration {
+	sec := int64(contract.DefaultMetricsInterval)
+	if settings != nil && settings.GetMonitor() != nil {
+		if v := settings.GetMonitor().GetMetricsInterval(); v > 0 {
+			sec = int64(v)
+		}
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func storageProbePeriod(settings *pb.AgentSettings) time.Duration {
+	sec := int64(contract.DefaultStorageProbeInterval)
+	if settings != nil {
+		if v := settings.GetProbeInterval(); v > 0 {
+			sec = int64(v)
+		}
+	}
+	return time.Duration(sec) * time.Second
+}
 
 // TelemetryConfig holds fixed configurations for the telemetry runner.
 type TelemetryConfig struct {
@@ -56,46 +95,31 @@ func startTelemetry(
 
 	// 2. Status Report Task
 	mgr.Add(task{
-		Name: "resource-report",
+		Name: "metrics",
 		DynamicInterval: func() time.Duration {
-			if settings := runner.agent.GetSettings(); settings != nil {
-				if sec := settings.GetMonitor().GetResourceReportInterval(); sec > 0 {
-					return time.Duration(sec) * time.Second
-				}
-			}
-			// Default fallback before receiving the first configuration from the server
-			return 60 * time.Second
+			return metricsPeriod(runner.agent.GetSettings())
 		},
 		JitterFraction: 0.2,
-		Run:            runner.runResourceReport,
+		Run:            runner.runMetrics,
 	})
 
 	// 3. Storage Probe Task
 	mgr.Add(task{
 		Name: "storage-probe",
 		DynamicInterval: func() time.Duration {
-			if settings := runner.agent.GetSettings(); settings != nil {
-				if sec := settings.GetProbeInterval(); sec > 0 {
-					return time.Duration(sec) * time.Second
-				}
-			}
-			return 1 * time.Hour // default
+			return storageProbePeriod(runner.agent.GetSettings())
 		},
 		Run: runner.runStorageProbe,
 	})
 
-	// 4. VNC Probe Task (periodic, replaces on-connect one-shot)
+	// 4. Connection seat probe (periodic: VNC desktops + XRDP X seats)
 	mgr.Add(task{
-		Name: "vnc-probe",
+		Name: "connection-probe",
 		DynamicInterval: func() time.Duration {
-			if settings := runner.agent.GetSettings(); settings != nil {
-				if sec := settings.GetVnc().GetScanInterval(); sec > 0 {
-					return time.Duration(sec) * time.Second
-				}
-			}
-			return 1800 * time.Second // default: 30 minutes when not configured
+			return desktopScanPeriod(runner.agent.GetSettings())
 		},
-		Run: runner.runVNCProbe,
+		JitterFraction: 0.2,
+		Run:            runner.runConnectionProbe,
 	})
 
 	mgr.Start(ctx)
@@ -104,30 +128,18 @@ func startTelemetry(
 }
 
 func (r *telemetryRunner) runHeartbeat(_ context.Context) error {
-	rdp := probe.CollectRDPReadiness()
-	if rdp.Determinate && !rdp.Available {
-		r.logger.Warn("Remote desktop not ready", "port", rdp.Port, "reason", rdp.Reason)
-	}
-
-	// Only a determinate probe is reported; otherwise the server keeps its previous state.
-	var rdpStatus *pb.RDPStatus
-	if rdp.Determinate {
-		rdpStatus = &pb.RDPStatus{Available: rdp.Available, Port: rdp.Port}
-	}
-
 	return r.agent.sendOnActiveStream(&pb.AgentMessage{
 		Payload: &pb.AgentMessage_HeartbeatRequest{
 			HeartbeatRequest: &pb.HeartbeatRequest{
 				ReportedAt: time.Now().Unix(),
-				Rdp:        rdpStatus,
 			},
 		},
 	})
 }
 
-func (r *telemetryRunner) runResourceReport(ctx context.Context) error {
+func (r *telemetryRunner) runMetrics(ctx context.Context) error {
 	settings := r.agent.GetSettings()
-	if settings != nil && !settings.GetMonitor().GetResourceReportEnabled() {
+	if settings != nil && !settings.GetMonitor().GetMetricsEnabled() {
 		return nil // Skip reporting if disabled
 	}
 
@@ -151,8 +163,8 @@ func (r *telemetryRunner) runResourceReport(ctx context.Context) error {
 	report.ReportedAt = time.Now().Unix()
 
 	return r.agent.sendOnActiveStream(&pb.AgentMessage{
-		Payload: &pb.AgentMessage_ResourceReport{
-			ResourceReport: report,
+		Payload: &pb.AgentMessage_Metrics{
+			Metrics: report,
 		},
 	})
 }
@@ -196,16 +208,16 @@ func (r *telemetryRunner) runStorageProbe(ctx context.Context) error {
 	})
 }
 
-func (r *telemetryRunner) runVNCProbe(_ context.Context) error {
+func (r *telemetryRunner) runConnectionProbe(ctx context.Context) error {
 	settings := r.agent.GetSettings()
 	if settings == nil {
 		return nil
 	}
 	vncSettings := settings.GetVnc()
 	if vncSettings == nil || !vncSettings.GetScanEnabled() {
-		return nil // VNC probe disabled on this node
+		return nil // connection probe disabled on this node
 	}
-	r.agent.collectAndReportVNC()
+	r.agent.reportConnectionRuntime(ctx)
 	return nil
 }
 
@@ -249,6 +261,7 @@ type PeriodicRunner struct {
 	kickChans map[string]chan struct{}
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
+	startOnce sync.Once
 	started   bool
 }
 
@@ -288,17 +301,20 @@ func (m *PeriodicRunner) TriggerNow(name string) bool {
 	}
 }
 
-// Start launches all registered tasks as independent goroutines.
+// Start launches all registered tasks as independent goroutines. Repeated calls
+// are ignored; a PeriodicRunner has a single start lifecycle.
 // ctx is the parent context; PeriodicRunner stops all tasks when ctx is cancelled
 // or when Stop is called.
 func (m *PeriodicRunner) Start(ctx context.Context) {
-	m.started = true
-	ctx, m.cancel = context.WithCancel(ctx)
-	for _, t := range m.tasks {
-		m.wg.Go(func() {
-			m.runTask(ctx, t)
-		})
-	}
+	m.startOnce.Do(func() {
+		m.started = true
+		ctx, m.cancel = context.WithCancel(ctx)
+		for _, t := range m.tasks {
+			m.wg.Go(func() {
+				m.runTask(ctx, t)
+			})
+		}
+	})
 }
 
 // Stop cancels all tasks and waits for them to finish.
@@ -374,13 +390,12 @@ func (m *PeriodicRunner) runTask(ctx context.Context, t task) {
 	}
 }
 
-// collectAndReportVNC collects local VNC connections and reports them to the control server.
-// Called only by the vnc-probe periodic task; out-of-cycle triggers go through TriggerNow
-// which wakes the same task goroutine, so no concurrent-run guard is needed here.
-func (a *Agent) collectAndReportVNC() {
-	connections, err := probe.CollectRemoteConnections(a.ctx)
+// reportConnectionRuntime collects local VNC/XRDP seats and reports them to the control server.
+// Called only by the connection-probe periodic task; out-of-cycle triggers go through TriggerNow.
+func (a *Agent) reportConnectionRuntime(ctx context.Context) {
+	snapshot, err := probe.CollectConnectionRuntime(ctx)
 	if err != nil {
-		a.logger.Warn("Failed to collect VNC connections",
+		a.logger.Warn("Failed to collect connection runtime",
 			"nodeID", a.nodeIdentity,
 			"error", err)
 		return
@@ -388,19 +403,48 @@ func (a *Agent) collectAndReportVNC() {
 
 	report := &pb.ConnectionReport{
 		ReportedAt:  time.Now().Unix(),
-		Connections: make([]*pb.ConnectionInfo, 0, len(connections)),
+		VncSeats:    make([]*pb.VNCSeatInfo, 0, len(snapshot.VNCSeats)),
+		XrdpSeats:   make([]*pb.XRDPSeatInfo, 0, len(snapshot.XRDPSeats)),
+		RdpSessions: make([]*pb.RDPSessionInfo, 0, len(snapshot.RDPSessions)),
 	}
-	for _, conn := range connections {
+
+	for _, conn := range snapshot.VNCSeats {
 		pid, _ := strconv.Atoi(conn.PID)
-		report.Connections = append(report.Connections, &pb.ConnectionInfo{
+		display := int32(conn.Display)
+		seat := &pb.VNCSeatInfo{
 			ConnectionId: conn.ConnectionID,
 			Name:         conn.ConnectionName,
 			Username:     conn.Username,
-			Host:         a.nodeIdentity,
 			Port:         int32(conn.Port),
-			Display:      fmt.Sprintf(":%d", conn.Display),
-			Protocol:     conn.Protocol,
+			Display:      &display,
 			Pid:          int32(pid),
+		}
+		if conn.StartedAt > 0 {
+			seat.StartedAt = &conn.StartedAt
+		}
+		report.VncSeats = append(report.VncSeats, seat)
+	}
+	for _, seat := range snapshot.XRDPSeats {
+		pid, _ := strconv.Atoi(seat.PID)
+		display := int32(seat.Display)
+		xrdpSeat := &pb.XRDPSeatInfo{
+			ConnectionId:           seat.ConnectionID,
+			Name:                   seat.ConnectionName,
+			Username:               seat.Username,
+			Display:                &display,
+			Pid:                    int32(pid),
+			SessionEndingConfirmed: seat.SessionEndingConfirmed,
+		}
+		if seat.StartedAt > 0 {
+			xrdpSeat.StartedAt = &seat.StartedAt
+		}
+		report.XrdpSeats = append(report.XrdpSeats, xrdpSeat)
+	}
+	for _, s := range snapshot.RDPSessions {
+		report.RdpSessions = append(report.RdpSessions, &pb.RDPSessionInfo{
+			Username:    s.Username,
+			SessionId:   int32(s.SessionID),
+			SessionName: s.SessionName,
 		})
 	}
 
@@ -409,16 +453,19 @@ func (a *Agent) collectAndReportVNC() {
 			ConnectionReport: report,
 		},
 	})
-
 	if err != nil {
-		a.logger.Warn("Failed to send connection report",
+		a.logger.Warn("Failed to send connection runtime report",
 			"nodeID", a.nodeIdentity,
-			"connections", len(connections),
+			"vnc_count", len(snapshot.VNCSeats),
+			"xrdp_count", len(snapshot.XRDPSeats),
+			"rdp_count", len(snapshot.RDPSessions),
 			"error", err)
 		return
 	}
 
-	a.logger.Debug("Sent VNC connection report",
+	a.logger.Debug("Sent connection runtime report",
 		"nodeID", a.nodeIdentity,
-		"connections", len(connections))
+		"vnc_count", len(snapshot.VNCSeats),
+		"xrdp_count", len(snapshot.XRDPSeats),
+		"rdp_count", len(snapshot.RDPSessions))
 }

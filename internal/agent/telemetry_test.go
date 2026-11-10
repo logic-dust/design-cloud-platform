@@ -7,6 +7,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"design-cloud-engine/internal/contract"
+	pb "design-cloud-engine/internal/contract/proto"
 )
 
 func TestOneShotTask(t *testing.T) {
@@ -199,5 +202,56 @@ func TestPeriodicRunner_RecoversPanic(t *testing.T) {
 	// Task should not crash the runner and should run multiple times across panics
 	if runCount.Load() < 2 {
 		t.Fatalf("expected panicking task to run at least 2 times, ran: %d", runCount.Load())
+	}
+}
+
+func TestConnectionScanPeriodDisabledWhenScanEnabledFalse(t *testing.T) {
+	t.Parallel()
+
+	settings := &pb.AgentSettings{
+		Vnc: &pb.VNCConfig{
+			ScanEnabled:  false,
+			ScanInterval: 120,
+		},
+	}
+	if d := desktopScanPeriod(settings); d != periodicProbeDisabled {
+		t.Fatalf("expected disabled period, got %v", d)
+	}
+}
+
+func TestConnectionScanPeriodZeroUsesContractDefault(t *testing.T) {
+	t.Parallel()
+
+	settings := &pb.AgentSettings{
+		Vnc: &pb.VNCConfig{
+			ScanEnabled:  true,
+			ScanInterval: 0,
+		},
+	}
+	if d := desktopScanPeriod(settings); d != time.Duration(contract.DefaultVNCScanInterval)*time.Second {
+		t.Fatalf("expected default period %v, got %v", time.Duration(contract.DefaultVNCScanInterval)*time.Second, d)
+	}
+}
+
+func TestConnectionScanPeriodHonorsConfiguredInterval(t *testing.T) {
+	t.Parallel()
+
+	settings := &pb.AgentSettings{
+		Vnc: &pb.VNCConfig{
+			ScanEnabled:  true,
+			ScanInterval: 120,
+		},
+	}
+	if d := desktopScanPeriod(settings); d != 120*time.Second {
+		t.Fatalf("got %v", d)
+	}
+}
+
+func TestStorageProbePeriodZeroUsesContractDefault(t *testing.T) {
+	t.Parallel()
+
+	settings := &pb.AgentSettings{ProbeInterval: 0}
+	if d := storageProbePeriod(settings); d != time.Duration(contract.DefaultStorageProbeInterval)*time.Second {
+		t.Fatalf("got %v", d)
 	}
 }

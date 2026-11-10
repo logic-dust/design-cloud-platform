@@ -16,7 +16,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +23,7 @@ import (
 	"design-cloud-engine/internal/agent/executor"
 	"design-cloud-engine/internal/contract"
 	pb "design-cloud-engine/internal/contract/proto"
+	"design-cloud-engine/internal/infra/logger"
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
@@ -46,9 +46,6 @@ type Config struct {
 	ConnectTimeout  time.Duration
 	ServerAddresses []string
 	TLS             TLSClientConfig
-
-	// DialContext allows injecting a custom dialer for testing (e.g. bufconn)
-	DialContext func(context.Context, string) (net.Conn, error)
 }
 
 type TLSClientConfig struct {
@@ -67,7 +64,6 @@ type Agent struct {
 	cfg             Config
 	settingsMgr     *SettingsManager
 
-	stopCh    chan struct{}
 	stopOnce  sync.Once
 	wg        sync.WaitGroup
 	executeWg sync.WaitGroup // tracks in-flight handleCommandRequest goroutines
@@ -108,15 +104,14 @@ type Agent struct {
 }
 
 // NewAgent creates a new Agent
-func NewAgent(executorService *executor.Service, cfg Config, logger *slog.Logger, settingsMgr *SettingsManager) *Agent {
-	ctx, cancel := context.WithCancel(context.Background())
+func NewAgent(parent context.Context, executorService *executor.Service, cfg Config, logger *slog.Logger, settingsMgr *SettingsManager) *Agent {
+	ctx, cancel := context.WithCancel(parent)
 	return &Agent{
 		executorService: executorService,
 		logger:          logger,
 		nodeIdentity:    cfg.NodeID,
 		cfg:             cfg,
 		settingsMgr:     settingsMgr,
-		stopCh:          make(chan struct{}),
 		tasks:           make(map[string]context.CancelFunc),
 		pendingResults:  make(map[string]pendingCommandResult),
 		ctx:             ctx,
@@ -159,7 +154,6 @@ func (a *Agent) Start() {
 func (a *Agent) Stop() {
 	a.stopOnce.Do(func() {
 		a.cancel()
-		close(a.stopCh)
 		a.streamMutex.Lock()
 		if a.currentConn != nil {
 			if err := a.currentConn.Close(); err != nil {
@@ -179,27 +173,40 @@ func (a *Agent) serverAddresses() []string {
 
 // SettingsManager holds the runtime configuration for the agent pushed from the server.
 type SettingsManager struct {
-	mu       sync.RWMutex
-	settings *pb.AgentSettings
+	mu           sync.RWMutex
+	settings     *pb.AgentSettings
+	appLogLevel  *slog.LevelVar
+	appLogPinned bool
 }
 
 func NewSettingsManager() *SettingsManager {
-	// Bootstrap 默认：agent 在收到服务端 settings 推送前使用本地默认兜底。
-	// 这些安装路径默认与 settings/schema/defaults.go 共享 internal/contract 常量，
-	// 避免双源漂移（agent 受架构约束不可 import internal/server）。
+	// 推送前本地默认，须与 schema 新装全局默认及 GetAgentSettingsForNode 核心字段一致（internal/contract/defaults.go）。
 	return &SettingsManager{
 		settings: &pb.AgentSettings{
-			LauncherPath: contract.DefaultLauncherPath,
+			ExecBinPath: contract.DefaultExecBinPath,
+			LogLevel:    contract.DefaultAgentLogLevel,
 			Vnc: &pb.VNCConfig{
 				BinDir:       contract.DefaultVNCBinDir,
 				ScanInterval: contract.DefaultVNCScanInterval,
 				ScanEnabled:  true,
 			},
 			Monitor: &pb.MonitorConfig{
-				NvidiaSmiPath: "",
+				MetricsEnabled:  true,
+				MetricsInterval: contract.DefaultMetricsInterval,
+				NvidiaSmiPath:   "",
 			},
+			ProbeInterval: contract.DefaultStorageProbeInterval,
 		},
 	}
+}
+
+// BindLogLevel attaches the process app-log LevelVar. When pinned is true
+// (CLI --log-level), subsequent Settings pushes do not change the level.
+func (m *SettingsManager) BindLogLevel(levelVar *slog.LevelVar, pinned bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.appLogLevel = levelVar
+	m.appLogPinned = pinned
 }
 
 func (m *SettingsManager) Update(settings *pb.AgentSettings) {
@@ -209,6 +216,18 @@ func (m *SettingsManager) Update(settings *pb.AgentSettings) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.settings = settings
+	m.applyLogLevelLocked(settings.GetLogLevel())
+}
+
+func (m *SettingsManager) applyLogLevelLocked(level string) {
+	if m.appLogLevel == nil || m.appLogPinned || level == "" {
+		return
+	}
+	parsed, err := logger.ParseLevel(level)
+	if err != nil {
+		return
+	}
+	m.appLogLevel.Set(parsed)
 }
 
 func (m *SettingsManager) Get() *pb.AgentSettings {

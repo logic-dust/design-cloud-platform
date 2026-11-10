@@ -9,8 +9,8 @@ import (
 	"design-cloud-engine/internal/execution"
 )
 
-func initLauncher(_ *slog.Logger) error {
-	// Windows does not use dc-launcher.
+func initExecBin(_ *slog.Logger) error {
+	// Windows does not use PrivilegedExec.
 	return nil
 }
 

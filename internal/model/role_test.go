@@ -58,16 +58,15 @@ func TestParseRole(t *testing.T) {
 		expected Role
 		wantErr  bool
 	}{
-		{"normal", RoleNormal, false},
-		{"Normal", RoleNormal, false},
-		{"NORMAL", RoleNormal, false},
-		{"auditadmin", RoleAuditAdmin, false},
+		{"normalUser", RoleNormal, false},
+		{"NormalUser", RoleNormal, false},
+		{"NORMALUSER", RoleNormal, false},
+		{"auditAdmin", RoleAuditAdmin, false},
 		{"AUDITADMIN", RoleAuditAdmin, false},
-		{"systemadmin", RoleSystemAdmin, false},
-		{"securityadmin", RoleSecurityAdmin, false},
-		{"superadmin", RoleSuperAdmin, false},
-		{"admin", RoleSuperAdmin, false}, // single-admin 别名
-		{"superadmin", RoleSuperAdmin, false},
+		{"systemAdmin", RoleSystemAdmin, false},
+		{"securityAdmin", RoleSecurityAdmin, false},
+		{"superAdmin", RoleSuperAdmin, false},
+		{"normal", 0, true},
 		{"", 0, true},
 		{"unknown", 0, true},
 		{"manager", 0, true},

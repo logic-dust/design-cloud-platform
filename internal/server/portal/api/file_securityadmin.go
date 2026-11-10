@@ -17,11 +17,11 @@ func (h *fileHandler) adminFilesAPI(g *echo.Group) {
 }
 
 func (h *fileHandler) adminListDownloadRequests(c *echo.Context) error {
-	var status model.DownloadStatus
+	var status model.DownloadRequestStatus
 	if s := c.QueryParam("status"); s != "" {
-		parsed, err := model.ParseDownloadStatus(s)
+		parsed, err := model.ParseDownloadRequestStatus(s)
 		if err != nil {
-			return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+			return httputil.RespondHTTPError(c, http.StatusBadRequest, err.Error())
 		}
 		status = parsed
 	}
@@ -29,7 +29,7 @@ func (h *fileHandler) adminListDownloadRequests(c *echo.Context) error {
 	if err != nil {
 		return handleFileError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: downloads})
+	return httputil.RespondOK(c, downloads)
 }
 
 func (h *fileHandler) adminGetDownloadRequest(c *echo.Context) error {
@@ -41,7 +41,7 @@ func (h *fileHandler) adminGetDownloadRequest(c *echo.Context) error {
 	if err != nil {
 		return handleFileError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: download})
+	return httputil.RespondOK(c, download)
 }
 
 func (h *fileHandler) adminReviewDownloadRequest(c *echo.Context) error {
@@ -53,11 +53,11 @@ func (h *fileHandler) adminReviewDownloadRequest(c *echo.Context) error {
 		Decision string `json:"decision"`
 		Reason   string `json:"reason"`
 	}
-	if err := c.Bind(&body); err != nil {
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: err.Error()})
+	if err := echo.BindBody(c, &body); err != nil {
+		return httputil.RespondError(c, err)
 	}
 	var (
-		download  model.Download
+		download  model.DownloadRequest
 		reviewErr error
 	)
 	switch body.Decision {
@@ -66,10 +66,10 @@ func (h *fileHandler) adminReviewDownloadRequest(c *echo.Context) error {
 	case "reject":
 		download, reviewErr = h.file.RejectDownloadRequest(c.Request().Context(), int(id), httputil.CurrentUsername(c), body.Reason)
 	default:
-		return c.JSON(http.StatusBadRequest, httputil.Response{Message: "decision must be approve or reject"})
+		return httputil.RespondHTTPError(c, http.StatusBadRequest, "decision must be approve or reject")
 	}
 	if reviewErr != nil {
 		return handleFileError(c, reviewErr)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: download})
+	return httputil.RespondOK(c, download)
 }

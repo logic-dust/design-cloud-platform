@@ -2,7 +2,7 @@ package httputil
 
 import (
 	"cmp"
-	"encoding/json"
+	json "design-cloud-engine/internal/infra/jsoncodec"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +10,17 @@ import (
 	"strings"
 
 	"github.com/labstack/echo/v5"
+)
+
+// DefaultPageLimit / MaxPageLimit 是 HTTP 分页参数的默认值与上限。
+//
+// 数值必须与 db.DefaultListLimit / db.MaxListLimit 保持一致：前者决定「未传 limit
+// 时请求多少」，后者决定「仓储最多返回多少」，两者不一致会出现请求值永远取不到的情形。
+// 此处刻意不 import db —— 传输层不应为两个常量耦合持久层；一致性由 params_test.go
+// 断言，漂移会在测试里立即失败。
+const (
+	DefaultPageLimit = 500
+	MaxPageLimit     = 2000
 )
 
 // Pagination holds limit and offset parameters for paginated requests.
@@ -36,26 +47,24 @@ func ParsePagination(c *echo.Context, defaultLimit, maxLimit int) Pagination {
 
 // ParseUintParam parses a positive integer parameter from the request path and validates it.
 func ParseUintParam(c *echo.Context, paramName string) (uint, error) {
-	valStr := c.Param(paramName)
-	if valStr == "" {
+	if c.Param(paramName) == "" {
 		return 0, echo.NewHTTPError(http.StatusBadRequest, "missing ["+paramName+"] parameter")
 	}
 
-	val, err := strconv.ParseUint(valStr, 10, 0)
+	val, err := echo.PathParam[uint](c, paramName)
 	if err != nil || val == 0 {
 		return 0, echo.NewHTTPError(http.StatusBadRequest, "param ["+paramName+"] must be a positive integer")
 	}
 
-	return uint(val), nil
+	return val, nil
 }
 
 // ParseOptionalIntQuery parses an optional positive integer parameter from the query string.
 func ParseOptionalIntQuery(c *echo.Context, paramName string) (int, error) {
-	valStr := c.QueryParam(paramName)
-	if valStr == "" {
+	if c.QueryParam(paramName) == "" {
 		return 0, nil
 	}
-	val, err := strconv.Atoi(valStr)
+	val, err := echo.QueryParam[int](c, paramName)
 	if err != nil || val <= 0 {
 		return 0, echo.NewHTTPError(http.StatusBadRequest, "query ["+paramName+"] must be a positive integer")
 	}
@@ -64,15 +73,14 @@ func ParseOptionalIntQuery(c *echo.Context, paramName string) (int, error) {
 
 // ParseOptionalUintQuery parses an optional positive integer parameter from the query string.
 func ParseOptionalUintQuery(c *echo.Context, paramName string) (uint, error) {
-	valStr := c.QueryParam(paramName)
-	if valStr == "" {
+	if c.QueryParam(paramName) == "" {
 		return 0, nil
 	}
-	val, err := strconv.ParseUint(valStr, 10, 64)
+	val, err := echo.QueryParam[uint](c, paramName)
 	if err != nil || val == 0 {
 		return 0, echo.NewHTTPError(http.StatusBadRequest, "query ["+paramName+"] must be a positive integer")
 	}
-	return uint(val), nil
+	return val, nil
 }
 
 // IDList represents a slice of positive integer IDs that can be unmarshaled

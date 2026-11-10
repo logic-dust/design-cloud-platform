@@ -2,13 +2,12 @@ package user
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
-	"design-cloud-engine/internal/common"
 	"design-cloud-engine/internal/config"
+	"design-cloud-engine/internal/infra/concurrency"
 	"design-cloud-engine/internal/model"
 	userprovider "design-cloud-engine/internal/server/service/user/provider"
 )
@@ -54,10 +53,10 @@ func (s *Service) SyncUsers(ctx context.Context, logger *slog.Logger) {
 		return
 	}
 
-	// Build lookup set of system usernames
-	systemSet := make(map[string]struct{}, len(systemUsers))
+	// Build lookup map of system users
+	systemByName := make(map[string]userprovider.SystemUser, len(systemUsers))
 	for _, su := range systemUsers {
-		systemSet[su.Username] = struct{}{}
+		systemByName[su.Username] = su
 	}
 
 	// Load all System-type (LDAP/OS) users from DB for sync check.
@@ -69,39 +68,82 @@ func (s *Service) SyncUsers(ctx context.Context, logger *slog.Logger) {
 		return
 	}
 
-	var frozen, restored int
+	now := time.Now()
+	var toFreezeFromActive, toFreezeFromExpired []string
+	var toRestoreFromLocked, toRestoreFromExpired []string
+	var toExpireFromActive, toExpireFromLocked []string
+
 	for i := range dbUsers {
 		u := &dbUsers[i]
-		_, existsInSystem := systemSet[u.Username]
-
-		switch {
-		// Case 1: DB user not found in system → freeze
-		// ✅ ChangeUserStatus now also invalidates all sessions when user is locked
-		case !existsInSystem && u.Status == model.UserActive:
-			err := s.ChangeStatus(ctx, u.Username, model.UserLocked)
-			if errors.Is(err, common.ErrNotFound) {
-				// User was deleted between ListSystemUsers and now — safe to ignore.
-				logger.Debug("user sync: user already removed from DB, skip freeze", "username", u.Username)
-			} else if err != nil {
-				logger.Error("user sync: failed to freeze user", "username", u.Username, "error", err)
-			} else {
-				frozen++
-				logger.Debug("user sync: froze user (no longer in system/LDAP)", "username", u.Username)
+		if u.Status == model.UserDisabled {
+			continue
+		}
+		su, existsInSystem := systemByName[u.Username]
+		if !existsInSystem {
+			switch u.Status {
+			case model.UserActive:
+				toFreezeFromActive = append(toFreezeFromActive, u.Username)
+			case model.UserPasswordExpired:
+				toFreezeFromExpired = append(toFreezeFromExpired, u.Username)
 			}
-		// Case 2: DB user was frozen but now exists in system → restore
-		// Note: Activation doesn't invalidate sessions (user was locked, had no active sessions)
-		case existsInSystem && u.Status == model.UserLocked:
-			err := s.ChangeStatus(ctx, u.Username, model.UserActive)
-			if errors.Is(err, common.ErrNotFound) {
-				// User was present in DB listing but now missing — data inconsistency.
-				logger.Error("user sync: user vanished from DB during restore (data inconsistency)", "username", u.Username)
-			} else if err != nil {
-				logger.Error("user sync: failed to restore user", "username", u.Username, "error", err)
-			} else {
-				restored++
-				logger.Debug("user sync: restored user (found again in system/LDAP)", "username", u.Username)
+			continue
+		}
+		if su.Status == model.UserStatusString(model.UserPasswordExpired) {
+			switch u.Status {
+			case model.UserActive:
+				toExpireFromActive = append(toExpireFromActive, u.Username)
+			case model.UserLocked:
+				toExpireFromLocked = append(toExpireFromLocked, u.Username)
+			}
+			continue
+		}
+		switch u.Status {
+		case model.UserLocked:
+			toRestoreFromLocked = append(toRestoreFromLocked, u.Username)
+		case model.UserPasswordExpired:
+			if su.PasswordExpiresAt != nil && now.Before(*su.PasswordExpiresAt) {
+				toRestoreFromExpired = append(toRestoreFromExpired, u.Username)
 			}
 		}
+	}
+
+	var frozen int64
+	if n, err := s.userRepo.ChangeStatusIf(ctx, toFreezeFromActive, model.UserActive, model.UserLocked); err != nil {
+		logger.Error("user sync: failed to freeze active users", "count", len(toFreezeFromActive), "error", err)
+	} else {
+		frozen += n
+		s.evictFrozenSessions(ctx, logger, toFreezeFromActive, n)
+	}
+	if n, err := s.userRepo.ChangeStatusIf(ctx, toFreezeFromExpired, model.UserPasswordExpired, model.UserLocked); err != nil {
+		logger.Error("user sync: failed to freeze expired users", "count", len(toFreezeFromExpired), "error", err)
+	} else {
+		frozen += n
+		s.evictFrozenSessions(ctx, logger, toFreezeFromExpired, n)
+	}
+
+	var restored int64
+	if n, err := s.userRepo.ChangeStatusIf(ctx, toRestoreFromLocked, model.UserLocked, model.UserActive); err != nil {
+		logger.Error("user sync: failed to restore locked users", "count", len(toRestoreFromLocked), "error", err)
+	} else {
+		restored += n
+	}
+	if n, err := s.userRepo.ChangeStatusIf(ctx, toRestoreFromExpired, model.UserPasswordExpired, model.UserActive); err != nil {
+		logger.Error("user sync: failed to restore password-expired users", "count", len(toRestoreFromExpired), "error", err)
+	} else {
+		restored += n
+	}
+
+	var expired int64
+	if n, err := s.userRepo.ChangeStatusIf(ctx, toExpireFromActive, model.UserActive, model.UserPasswordExpired); err != nil {
+		logger.Error("user sync: failed to mark active users passwordExpired", "count", len(toExpireFromActive), "error", err)
+	} else {
+		expired += n
+		s.evictFrozenSessions(ctx, logger, toExpireFromActive, n)
+	}
+	if n, err := s.userRepo.ChangeStatusIf(ctx, toExpireFromLocked, model.UserLocked, model.UserPasswordExpired); err != nil {
+		logger.Error("user sync: failed to mark locked users passwordExpired", "count", len(toExpireFromLocked), "error", err)
+	} else {
+		expired += n
 	}
 
 	logger.Info("user sync: completed",
@@ -109,26 +151,51 @@ func (s *Service) SyncUsers(ctx context.Context, logger *slog.Logger) {
 		"db_normal_users", len(dbUsers),
 		"frozen", frozen,
 		"restored", restored,
+		"expired", expired,
 	)
 
 	s.invalidateIDMappingsFromSystemUsers(systemUsers)
+	// 集群清空信号：他节点丢掉 idMapping 副本后按 miss 回源身份源，不是从 DB 拉齐名字。
+	// 列表失败或空列表中止的路径在上方已 return，不 Bump。
+	if err := s.bumpIDMappingCache(ctx); err != nil {
+		logger.Error("user sync: identity cache bump failed", "error", err)
+	}
 
-	if frozen > 0 || restored > 0 {
+	if frozen > 0 || restored > 0 || expired > 0 {
 		s.auditSvc.LogSystem(ctx, "USER_BATCH_SYNC", slog.LevelInfo, map[string]any{
 			"frozen":   frozen,
 			"restored": restored,
+			"expired":  expired,
 		})
+	}
+}
+
+func (s *Service) evictFrozenSessions(ctx context.Context, logger *slog.Logger, usernames []string, changed int64) {
+	if changed <= 0 || s.deleteSessionsByUsername == nil {
+		return
+	}
+	for _, username := range usernames {
+		if delErr := s.deleteSessionsByUsername(ctx, username); delErr != nil {
+			logger.Warn("user sync: failed to delete sessions after status change",
+				"username", username, "error", delErr)
+		}
 	}
 }
 
 // StartSyncScheduler starts a background goroutine that waits for the configured
 // sync interval between runs. Interval changes take effect on the next cycle.
 // If interval <= 0, the scheduler pauses but periodically checks for updates.
-func (s *Service) StartSyncScheduler(ctx context.Context, logger *slog.Logger) {
+func (s *Service) StartSyncScheduler(ctx context.Context, logger *slog.Logger) <-chan struct{} {
+	done := make(chan struct{})
+	s.syncTaskMu.Lock()
+	s.syncTaskCtx = ctx
+	s.syncTasksStopped = false
+	s.syncTaskMu.Unlock()
 	logger.Info("user sync: scheduler started (dynamic interval mode)")
 
-	common.SafeGo(logger, "user-sync-scheduler", func() {
-		const idlePollInterval = 1 * time.Minute
+	concurrency.SafeGo(logger, "user-sync-scheduler", func() {
+		defer close(done)
+		const idlePollInterval = 2 * time.Minute
 
 		for {
 			interval, enabled, err := s.syncInterval(ctx)
@@ -145,7 +212,7 @@ func (s *Service) StartSyncScheduler(ctx context.Context, logger *slog.Logger) {
 			} else {
 				// We do the sync first, then sleep
 				func() {
-					defer common.SafeRecover(logger, "user-sync-pass")()
+					defer concurrency.SafeRecover(logger, "user-sync-pass")()
 					s.trySyncUsers(ctx, logger, interval)
 				}()
 				sleepDur = interval
@@ -162,10 +229,39 @@ func (s *Service) StartSyncScheduler(ctx context.Context, logger *slog.Logger) {
 			}
 		}
 	})
+	return done
+}
+
+// TriggerSyncAsync starts an API-requested sync on the service lifecycle context.
+// The task is tracked so shutdown can cancel and wait for it before closing the DB.
+func (s *Service) TriggerSyncAsync(logger *slog.Logger) bool {
+	s.syncTaskMu.Lock()
+	if s.syncTasksStopped || s.syncTaskCtx == nil {
+		s.syncTaskMu.Unlock()
+		return false
+	}
+	ctx := s.syncTaskCtx
+	s.syncTasks.Add(1)
+	s.syncTaskMu.Unlock()
+
+	concurrency.SafeGo(logger, "user-sync-api", func() {
+		defer s.syncTasks.Done()
+		s.TriggerSync(ctx, logger)
+	})
+	return true
+}
+
+// StopAsyncSyncs prevents new API syncs and waits for accepted tasks to finish.
+// The parent lifecycle context should be canceled before calling this method.
+func (s *Service) StopAsyncSyncs() {
+	s.syncTaskMu.Lock()
+	s.syncTasksStopped = true
+	s.syncTaskMu.Unlock()
+	s.syncTasks.Wait()
 }
 
 func (s *Service) syncInterval(ctx context.Context) (time.Duration, bool, error) {
-	authSettings, err := s.settingsSvc.GetAuthSettings(ctx)
+	authSettings, err := s.authSettings.GetAuthSettings(ctx)
 	if err != nil {
 		return 0, false, err
 	}
@@ -178,8 +274,20 @@ func (s *Service) syncInterval(ctx context.Context) (time.Duration, bool, error)
 	return time.Duration(intervalSec) * time.Second, true, nil
 }
 
+// TriggerSync runs LDAP/OS user sync when this instance holds the user_sync lease
+// (same path as the background scheduler). Safe for concurrent API calls.
+func (s *Service) TriggerSync(ctx context.Context, logger *slog.Logger) {
+	interval := time.Minute
+	if d, _, err := s.syncInterval(ctx); err != nil {
+		logger.Warn("user sync: failed to read auth settings, using default lease", "error", err)
+	} else if d > 0 {
+		interval = d
+	}
+	s.trySyncUsers(ctx, logger, interval)
+}
+
 func (s *Service) trySyncUsers(ctx context.Context, logger *slog.Logger, interval time.Duration) {
-	acquired, err := s.leaseRepo.TryAcquire(ctx, "user_sync", s.cfg.SyncLeaseOwnerID, max(time.Minute, interval))
+	acquired, _, err := s.leaseRepo.TryAcquire(ctx, "user_sync", s.cfg.SyncLeaseOwnerID, max(time.Minute, interval))
 	if err != nil {
 		logger.Warn("user sync: failed to acquire lease", "error", err)
 		return

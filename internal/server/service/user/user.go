@@ -4,23 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"design-cloud-engine/internal/audit"
-	"design-cloud-engine/internal/common"
-	"design-cloud-engine/internal/common/crypto"
 	"design-cloud-engine/internal/config"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/execution"
+	"design-cloud-engine/internal/infra/crypto"
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/cache"
-	"design-cloud-engine/internal/server/service/settings"
 	userprovider "design-cloud-engine/internal/server/service/user/provider"
 
+	"design-cloud-engine/internal/contract"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/sync/singleflight"
 )
 
 // Service is the user management service.
@@ -35,11 +36,27 @@ type Service struct {
 	leaseRepo                    *db.TaskLeaseRepo
 	cacheVersion                 *db.CacheVersionRepo
 	auditSvc                     *audit.Service
-	settingsSvc                  *settings.Service
+	authSettings                 AuthSettingsReader
 	idMappingCache               *idMappingCache
 	invalidateSessionsByUsername func(string)
 	deleteSessionsByUsername     func(context.Context, string) error
+	hotAssignees                 hotAssigneeCache
+	hotAssigneesSF               singleflight.Group
+	syncTaskMu                   sync.Mutex
+	syncTaskCtx                  context.Context
+	syncTasksStopped             bool
+	syncTasks                    sync.WaitGroup
 }
+
+type hotAssigneeCache struct {
+	mu     sync.RWMutex
+	loaded time.Time
+	users  []model.User
+}
+
+const hotAssigneeCacheTTL = 2 * time.Minute
+
+const HotAssigneeDefaultLimit = 10
 
 type Config struct {
 	AuthMode         config.UserAuthMode
@@ -49,9 +66,14 @@ type Config struct {
 }
 
 // NewService creates a user service with the appropriate auth backend.
-func NewService(execSvc execution.Executor, cfg Config, settingsSvc *settings.Service, userRepo *db.UserRepo, leaseRepo *db.TaskLeaseRepo, cacheVersion *db.CacheVersionRepo, invalidator *cache.Invalidator, logger *slog.Logger, auditSvc *audit.Service) (*Service, error) {
-	if settingsSvc == nil {
-		return nil, errors.New("user: settings service is required")
+// sessionRevoker is the shared session-effect component (session.Evictor); it is
+// optional — nil means the service cannot trigger session evictions for its
+// intra-aggregate flows (password change, scopes, LDAP sync), which is acceptable
+// for unit tests. Production always injects it up front; nothing is wired after
+// construction.
+func NewService(execSvc execution.Executor, cfg Config, authSettings AuthSettingsReader, userRepo *db.UserRepo, leaseRepo *db.TaskLeaseRepo, cacheVersion *db.CacheVersionRepo, invalidator *cache.Invalidator, logger *slog.Logger, auditSvc *audit.Service, sessionRevoker SessionRevoker) (*Service, error) {
+	if authSettings == nil {
+		return nil, errors.New("user: auth settings reader is required")
 	}
 	if userRepo == nil {
 		return nil, errors.New("user: user repo is required")
@@ -85,8 +107,12 @@ func NewService(execSvc execution.Executor, cfg Config, settingsSvc *settings.Se
 		leaseRepo:      leaseRepo,
 		cacheVersion:   cacheVersion,
 		auditSvc:       auditSvc,
-		settingsSvc:    settingsSvc,
+		authSettings:   authSettings,
 		idMappingCache: ic,
+	}
+	if sessionRevoker != nil {
+		s.invalidateSessionsByUsername = sessionRevoker.InvalidateByUsername
+		s.deleteSessionsByUsername = sessionRevoker.Delete
 	}
 	if invalidator != nil {
 		invalidator.Register(idMappingCacheTopic, func() {
@@ -96,93 +122,80 @@ func NewService(execSvc execution.Executor, cfg Config, settingsSvc *settings.Se
 	return s, nil
 }
 
-type SessionInvalidator interface {
-	InvalidateByUsername(username string)
-	Delete(ctx context.Context, username string) error
+// CheckAdminDeleteTarget validates that operator may delete username, without
+// performing any cross-domain side effect. identity.DeleteUser calls it before
+// purging connections/sessions so an unauthorized target is rejected up-front.
+func (s *Service) CheckAdminDeleteTarget(ctx context.Context, operator *model.Session, username string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return contract.NewInvalidParamError("username is required")
+	}
+	dbUser, err := s.userRepo.GetByName(ctx, username)
+	if err != nil {
+		return err
+	}
+	return s.checkAdminTargetProtection(operator, &dbUser)
 }
 
-// SetSessionInvalidator wires session invalidation into user mutations.
-// Role-changing callers can rely on this to evict stale role data from session caches.
-func (s *Service) SetSessionInvalidator(invalidator SessionInvalidator) {
-	if invalidator != nil {
-		s.invalidateSessionsByUsername = invalidator.InvalidateByUsername
-		s.deleteSessionsByUsername = invalidator.Delete
+// AdminDelete removes a portal user row only, after enforcing admin target
+// protection (no self-deletion, no deleting SuperAdmin, and in single-admin mode
+// no deleting other delegated admins). Cross-domain cleanup (connection rows,
+// proxy sessions, portal sessions) is orchestrated by the identity application
+// layer (identity.DeleteUser) before this atomic delete.
+func (s *Service) AdminDelete(ctx context.Context, operator *model.Session, username string) error {
+	if err := s.CheckAdminDeleteTarget(ctx, operator, username); err != nil {
+		return err
 	}
+	username = strings.TrimSpace(username)
+	if err := s.userRepo.Delete(ctx, username); err != nil {
+		return err
+	}
+	s.auditSvc.LogUser(ctx, "USER_DELETE", "success", username, slog.LevelInfo, map[string]any{
+		"operator": operator.Username,
+	})
+	return nil
 }
 
 type AdminUserUpdateRequest struct {
-	Status         *int  `json:"status"`
-	DownloadAccess *bool `json:"downloadAccess"`
-	UploadAccess   *bool `json:"uploadAccess"`
-	TerminalAccess *bool `json:"terminalAccess"`
-	MaxConnections *uint `json:"maxConnections"` // nil=no change, 0=inherit global, >0=custom quota (1–100)
+	Status           *int  `json:"status"`
+	DownloadDisabled *bool `json:"downloadDisabled"`
+	UploadDisabled   *bool `json:"uploadDisabled"`
+	MaxConnections   *uint `json:"maxConnections"` // nil=no change, 0=inherit global, >0=custom quota (1–100)
 }
 
 // InitAdminAccounts ensures default admin accounts exist and enforces role exclusivity based on configuration.
-// enableThreeRoles=true: three-admin mode (audit/sysadmin/security). Superadmin is disabled.
-// enableThreeRoles=false: single-admin mode (superadmin). Three-admins are disabled.
-// Passwords are randomly generated per instance and printed to the startup log.
-// Initial password is only valid for the first login (status: UserPasswordExpired).
+// All four built-in names are always present as type=app rows; enableThreeRoles picks which roles may log in.
+// New accounts are created without a password; use `dc-engine user set-password` before portal login.
 func (s *Service) InitAdminAccounts(ctx context.Context, enableThreeRoles bool) error {
-	type adminAccount struct {
-		name string
-		role model.Role
+	active := make(map[string]struct{}, 3)
+	for _, a := range model.BuiltinAdminAccounts(enableThreeRoles) {
+		active[a.Username] = struct{}{}
 	}
+	rolesToDisable := model.ConflictingAdminRoles(enableThreeRoles)
 
-	var accounts []adminAccount
-	var rolesToDisable []model.Role
-
-	if enableThreeRoles {
-		accounts = []adminAccount{
-			{name: "securityadmin", role: model.RoleSecurityAdmin},
-			{name: "systemadmin", role: model.RoleSystemAdmin},
-			{name: "auditadmin", role: model.RoleAuditAdmin},
-		}
-		rolesToDisable = []model.Role{model.RoleSuperAdmin}
-	} else {
-		accounts = []adminAccount{
-			{name: "dceadmin", role: model.RoleSuperAdmin},
-		}
-		rolesToDisable = []model.Role{
-			model.RoleSecurityAdmin,
-			model.RoleSystemAdmin,
-			model.RoleAuditAdmin,
-		}
-	}
-
-	// 1. Create or re-enable missing admins
-	for _, a := range accounts {
-		existing, err := s.userRepo.GetByName(ctx, a.name)
+	// 1. Create missing built-in admins; re-enable only if active for the current mode
+	for _, a := range model.AllBuiltinAdminAccounts() {
+		existing, err := s.userRepo.GetByName(ctx, a.Username)
 		if err == nil {
 			if existing.Status == model.UserDisabled {
-				if err := s.userRepo.ChangeStatus(ctx, a.name, model.UserPasswordExpired); err != nil {
-					return fmt.Errorf("re-enable admin user %q: %w", a.name, err)
+				if _, ok := active[a.Username]; ok {
+					if err := s.userRepo.ChangeStatus(ctx, a.Username, model.UserPasswordExpired); err != nil {
+						return fmt.Errorf("re-enable admin user %q: %w", a.Username, err)
+					}
+					s.logger.Info("Re-enabled admin user", "username", a.Username, "role", a.Role)
 				}
-				s.logger.Info("Re-enabled admin user", "username", a.name, "role", a.role)
 			}
 			continue
 		}
-		if !errors.Is(err, common.ErrNotFound) {
-			return fmt.Errorf("check admin user %q: %w", a.name, err)
+		if !errors.Is(err, contract.ErrNotFound) {
+			return fmt.Errorf("check admin user %q: %w", a.Username, err)
 		}
 
-		rawPwd := crypto.GenSecret(16)
-		hashed, err := hashPassword(rawPwd)
-		if err != nil {
-			return fmt.Errorf("hash password for %q: %w", a.name, err)
-		}
-
-		user := model.User{
-			Username: a.name,
-			Password: hashed,
-			Role:     a.role,
-			Status:   model.UserPasswordExpired, // 强制首次登录改密
-			Type:     model.UserTypeApp,
-		}
+		user := model.NewBuiltinAdminUser(a)
 		if err := s.userRepo.Create(ctx, &user); err != nil {
-			return fmt.Errorf("create admin user %q: %w", a.name, err)
+			return fmt.Errorf("create admin user %q: %w", a.Username, err)
 		}
-		s.logger.Info("Created admin user", "username", a.name, "role", a.role, "password", rawPwd)
+		s.logger.Info("Created admin user", "username", a.Username, "role", a.Role)
 	}
 
 	// 2. Disable conflicting admins
@@ -193,8 +206,8 @@ func (s *Service) InitAdminAccounts(ctx context.Context, enableThreeRoles bool) 
 	return nil
 }
 
-// hashPassword hashes an app-user password with bcrypt for DB storage.
-func hashPassword(password string) (string, error) {
+// HashPassword hashes an app-user password with bcrypt for DB storage.
+func HashPassword(password string) (string, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return "", err
@@ -214,35 +227,206 @@ func (s *Service) GetMaxConnections(ctx context.Context, username string) (uint,
 
 // Get returns a single user's information.
 // App users (local-only accounts) are returned from the app DB directly;
-// system users are resolved through the provider (getent/LDAP).
+// system users are resolved through the provider (getent/LDAP) and reconciled
+// with portal DB state (preserving UserDisabled, syncing passwordExpired/active).
 func (s *Service) Get(ctx context.Context, username string) (*userprovider.SystemUser, error) {
-	if dbUser, err := s.userRepo.GetByName(ctx, username); err == nil && dbUser.Type == model.UserTypeApp {
+	dbUser, dbErr := s.userRepo.GetByName(ctx, username)
+	if dbErr == nil && dbUser.Type == model.UserTypeApp {
 		return &userprovider.SystemUser{
 			ID:       dbUser.ID,
 			Username: dbUser.Username,
 			Status:   model.UserStatusString(dbUser.Status),
 		}, nil
 	}
-	return s.provider.GetUser(ctx, username)
+	su, err := s.provider.GetUser(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	if dbErr != nil || su == nil {
+		return su, nil
+	}
+	s.reconcileSystemUserWithDB(ctx, username, &dbUser, su)
+	return su, nil
 }
 
-// List returns all users' information from the database with pagination.
-func (s *Service) List(ctx context.Context, limit, offset int) ([]model.User, int64, error) {
-	users, total, err := s.userRepo.List(ctx, limit, offset)
+func (s *Service) reconcileSystemUserWithDB(ctx context.Context, username string, dbUser *model.User, su *userprovider.SystemUser) {
+	if dbUser.Status == model.UserDisabled {
+		su.Status = model.UserStatusString(model.UserDisabled)
+		return
+	}
+	now := time.Now()
+	if su.Status == model.UserStatusString(model.UserPasswordExpired) {
+		if dbUser.Status == model.UserActive || dbUser.Status == model.UserLocked {
+			if err := s.ChangeStatus(ctx, username, model.UserPasswordExpired); err != nil {
+				s.logger.Warn("failed to sync passwordExpired status from provider", "username", username, "error", err)
+			}
+		}
+		return
+	}
+	if dbUser.Status == model.UserPasswordExpired {
+		// Only clear DB passwordExpired when provider supplies a non-expired timestamp
+		// (e.g. IPA/LDAP password changed externally). Local mode has nil PasswordExpiresAt
+		// so admin-forced password resets stay enforced.
+		if su.PasswordExpiresAt != nil && now.Before(*su.PasswordExpiresAt) {
+			if err := s.ChangeStatus(ctx, username, model.UserActive); err != nil {
+				s.logger.Warn("failed to clear passwordExpired status from provider", "username", username, "error", err)
+			}
+		} else {
+			su.Status = model.UserStatusString(model.UserPasswordExpired)
+		}
+		return
+	}
+	if dbUser.Status == model.UserLocked && su.Status == model.UserStatusString(model.UserActive) {
+		if err := s.ChangeStatus(ctx, username, model.UserActive); err != nil {
+			s.logger.Warn("failed to restore locked user status from provider", "username", username, "error", err)
+		}
+	}
+}
+
+// ListFilter constrains admin user directory listing.
+// Nil Type / Status means no filter on that column.
+type ListFilter struct {
+	Q      string
+	Type   *model.UserType
+	Status *model.UserStatusCode
+}
+
+// List returns users from the database with pagination and optional type/status/q filters.
+func (s *Service) List(ctx context.Context, limit, offset int, f ListFilter) ([]model.User, int64, error) {
+	users, total, err := s.userRepo.List(ctx, limit, offset, f.Q, f.Type, f.Status)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list users: %w", err)
 	}
 	return users, total, nil
 }
 
-// GetGroupMembers returns members of a specific group.
-func (s *Service) GetGroupMembers(ctx context.Context, groupName string) ([]string, error) {
-	return s.provider.GetGroupMembers(ctx, groupName)
+// GroupCatalogItem is a directory group without members (admin group list).
+type GroupCatalogItem struct {
+	Name string  `json:"name"`
+	Gid  *uint32 `json:"gid,omitempty"`
 }
 
-// ListUserGroups returns groups of all users.
-func (s *Service) ListUserGroups(ctx context.Context) (map[string][]string, error) {
-	return s.provider.ListUserGroups(ctx)
+// GroupDetail is a directory group including sorted members.
+type GroupDetail struct {
+	Name    string   `json:"name"`
+	Gid     *uint32  `json:"gid,omitempty"`
+	Members []string `json:"members"`
+}
+
+// ListGroups returns the identity-source group catalog (name + optional gid, no members).
+func (s *Service) ListGroups(ctx context.Context) ([]GroupCatalogItem, error) {
+	groups, err := s.provider.ListGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]GroupCatalogItem, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, GroupCatalogItem{Name: g.Name, Gid: g.Gid})
+	}
+	return out, nil
+}
+
+// GetGroup returns one directory group with members.
+func (s *Service) GetGroup(ctx context.Context, groupName string) (*GroupDetail, error) {
+	groupName = strings.TrimSpace(groupName)
+	if groupName == "" {
+		return nil, contract.NewInvalidParamError("group name is required")
+	}
+	g, err := s.provider.GetGroup(ctx, groupName)
+	if err != nil {
+		return nil, err
+	}
+	members := g.Members
+	if members == nil {
+		members = []string{}
+	}
+	return &GroupDetail{Name: g.Name, Gid: g.Gid, Members: members}, nil
+}
+
+// ListGroupsForUser returns directory group names the user belongs to.
+// App (platform) users have no OS/LDAP groups and always return an empty list.
+func (s *Service) ListGroupsForUser(ctx context.Context, username string) ([]string, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return nil, contract.NewInvalidParamError("username is required")
+	}
+	dbUser, err := s.userRepo.GetByName(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	if dbUser.Type == model.UserTypeApp {
+		return []string{}, nil
+	}
+	groups, err := s.provider.ListGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0)
+	for _, g := range groups {
+		if slices.Contains(g.Members, username) {
+			out = append(out, g.Name)
+		}
+	}
+	return out, nil
+}
+
+// SearchAssignees returns up to limit active normal users whose username
+// contains q (case-insensitive), usernames starting with q first.
+func (s *Service) SearchAssignees(ctx context.Context, q string, limit int) ([]model.User, error) {
+	users, err := s.userRepo.SearchAssignees(ctx, q, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search assignees: %w", err)
+	}
+	return users, nil
+}
+
+// HotAssignees returns recently assigned normal users from a short-lived cache.
+func (s *Service) HotAssignees(ctx context.Context, limit int) ([]model.User, error) {
+	if limit <= 0 {
+		limit = HotAssigneeDefaultLimit
+	}
+	now := time.Now()
+	s.hotAssignees.mu.RLock()
+	if !s.hotAssignees.loaded.IsZero() && now.Sub(s.hotAssignees.loaded) < hotAssigneeCacheTTL {
+		users := clipUsers(s.hotAssignees.users, limit)
+		s.hotAssignees.mu.RUnlock()
+		return users, nil
+	}
+	s.hotAssignees.mu.RUnlock()
+
+	_, err, _ := s.hotAssigneesSF.Do("load", func() (any, error) {
+		s.hotAssignees.mu.RLock()
+		if !s.hotAssignees.loaded.IsZero() && time.Since(s.hotAssignees.loaded) < hotAssigneeCacheTTL {
+			s.hotAssignees.mu.RUnlock()
+			return nil, nil
+		}
+		s.hotAssignees.mu.RUnlock()
+
+		users, err := s.userRepo.ListHotAssignees(ctx, HotAssigneeDefaultLimit)
+		if err != nil {
+			return nil, fmt.Errorf("hot assignees: %w", err)
+		}
+		s.hotAssignees.mu.Lock()
+		s.hotAssignees.users = users
+		s.hotAssignees.loaded = time.Now()
+		s.hotAssignees.mu.Unlock()
+		return users, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	s.hotAssignees.mu.RLock()
+	out := clipUsers(s.hotAssignees.users, limit)
+	s.hotAssignees.mu.RUnlock()
+	return out, nil
+}
+
+func clipUsers(users []model.User, limit int) []model.User {
+	if len(users) <= limit {
+		return users
+	}
+	return users[:limit]
 }
 
 // VerifyPassword delegates password verification to the underlying provider.
@@ -250,34 +434,53 @@ func (s *Service) VerifyPassword(ctx context.Context, username, password string)
 	return s.provider.VerifyPassword(ctx, username, password)
 }
 
-// SyncUserLogin ensures an authenticated user has a DB record
-// and updates the last successful login metadata.
-func (s *Service) SyncUserLogin(ctx context.Context, username, ip string) (*model.User, error) {
+// SyncUserLogin ensures an authenticated user has a DB record,
+// updates lastLoginAt, and returns any provider password expiration
+// timestamp for system users. Client IP stays on the session row only.
+func (s *Service) SyncUserLogin(ctx context.Context, username string) (*model.User, *time.Time, error) {
 	user, err := s.userRepo.GetByName(ctx, username)
 
-	if errors.Is(err, common.ErrNotFound) {
+	if errors.Is(err, contract.ErrNotFound) {
+		if model.IsBuiltinAdminUsername(username) {
+			return nil, nil, fmt.Errorf("%w: %q", ErrBuiltinUsernameReserved, username)
+		}
 		user = model.User{
-			Username:       username,
-			Status:         model.UserActive,
-			Type:           model.UserTypeSystem,
-			LastOnlineIP:   ip,
-			LastOnlineTime: time.Now(),
+			Username:    username,
+			Status:      model.UserActive,
+			Type:        model.UserTypeSystem,
+			LastLoginAt: time.Now(),
 		}
+		exp := s.syncSystemUserProfile(ctx, username, &user)
 		if err := s.userRepo.Create(ctx, &user); err != nil {
-			return nil, fmt.Errorf("create user %q on login sync: %w", username, err)
+			return nil, nil, fmt.Errorf("create user %q on login sync: %w", username, err)
 		}
-		return &user, nil
+		return &user, exp, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get user %q on login sync: %w", username, err)
+		return nil, nil, fmt.Errorf("get user %q on login sync: %w", username, err)
 	}
 
-	user.LastOnlineIP = ip
-	user.LastOnlineTime = time.Now()
+	user.LastLoginAt = time.Now()
+	exp := s.syncSystemUserProfile(ctx, username, &user)
 	if err := s.userRepo.Update(ctx, &user); err != nil {
-		return nil, fmt.Errorf("update user %q on login sync: %w", username, err)
+		return nil, nil, fmt.Errorf("update user %q on login sync: %w", username, err)
 	}
-	return &user, nil
+	return &user, exp, nil
+}
+
+// syncSystemUserProfile 从身份源刷新 System 用户的 POSIX uidNumber 并返回密码过期时间。
+func (s *Service) syncSystemUserProfile(ctx context.Context, username string, user *model.User) *time.Time {
+	if user == nil || user.Type != model.UserTypeSystem {
+		return nil
+	}
+	su, err := s.provider.GetUser(ctx, username)
+	if err != nil || su == nil {
+		return nil
+	}
+	if uid := strings.TrimSpace(su.Uid); uid != user.Uid {
+		user.Uid = uid
+	}
+	return su.PasswordExpiresAt
 }
 
 // GetDBUser returns the persisted user model for lower-level service integrations.
@@ -289,13 +492,28 @@ func (s *Service) GetDBUser(ctx context.Context, username string) (model.User, e
 	return user, nil
 }
 
+// GetDBUserByID returns the persisted user model by primary key.
+func (s *Service) GetDBUserByID(ctx context.Context, id uint) (model.User, error) {
+	user, err := s.userRepo.GetByID(ctx, id)
+	if err != nil {
+		return model.User{}, fmt.Errorf("get db user %d: %w", id, err)
+	}
+	return user, nil
+}
+
 // checkAdminTargetProtection validates if the operator is allowed to manage the target user.
-// - Normal sub-admins (single-admin mode) must not be able to modify SuperAdmin or other scoped users.
-// - In three-role mode, SystemAdmin can reset anyone (including other SystemAdmins), except themselves.
+//   - No one may modify their own account through admin endpoints (self password change is the
+//     only self-service path; CLI remains available for break-glass operations).
+//   - Nobody may modify SuperAdmin.
+//   - Normal sub-admins (single-admin mode) must not be able to modify other scoped users.
+//   - In three-role mode, SystemAdmin may manage other admin accounts (except SuperAdmin).
 func (s *Service) checkAdminTargetProtection(operator *model.Session, target *model.User) error {
 	// Operator cannot modify their own account using admin interfaces.
 	if operator.Username == target.Username {
 		return fmt.Errorf("cannot modify your own account: %w", ErrForbidden)
+	}
+	if target.Role == model.RoleSuperAdmin {
+		return fmt.Errorf("cannot modify superadmin: %w", ErrForbidden)
 	}
 
 	// SuperAdmin can modify anyone else
@@ -304,16 +522,13 @@ func (s *Service) checkAdminTargetProtection(operator *model.Session, target *mo
 	}
 
 	if s.cfg.EnableThreeRoles {
-		// Three-role mode: no one can modify SuperAdmin (if one existed, though in 3-role mode they don't log in, but still protect it).
-		if target.Role == model.RoleSuperAdmin {
-			return fmt.Errorf("cannot modify superadmin: %w", ErrForbidden)
-		}
-		// SystemAdmin is allowed to modify other roles
+		// Three-role mode: SystemAdmin may manage accounts of other admin roles
+		// (documented behaviour); only SuperAdmin and self-modification are blocked above.
 		return nil
 	}
 
-	// Single-admin mode: normal scoped admins
-	if target.Role == model.RoleSuperAdmin || target.AdminScopes != 0 {
+	// Single-admin mode: normal scoped admins must not manage other scoped users.
+	if target.AdminScopes != 0 {
 		return fmt.Errorf("cannot modify an admin user: %w", ErrForbidden)
 	}
 
@@ -349,7 +564,7 @@ func (s *Service) ChangeStatus(ctx context.Context, username string, newStatus m
 // AdminResetPassword forces a password reset for a user (Admin action).
 func (s *Service) AdminResetPassword(ctx context.Context, operator *model.Session, username string) (string, error) {
 	dbUser, err := s.userRepo.GetByName(ctx, username)
-	if err != nil && !errors.Is(err, common.ErrNotFound) {
+	if err != nil && !errors.Is(err, contract.ErrNotFound) {
 		return "", fmt.Errorf("get user %q for password reset: %w", username, err)
 	}
 
@@ -369,7 +584,7 @@ func (s *Service) AdminResetPassword(ctx context.Context, operator *model.Sessio
 	newPassword := crypto.GenSecret(16)
 
 	if dbUser.Type == model.UserTypeApp {
-		hashedPwd, err := hashPassword(newPassword)
+		hashedPwd, err := HashPassword(newPassword)
 		if err != nil {
 			return "", err
 		}
@@ -465,11 +680,11 @@ func (s *Service) changeAppUserPassword(ctx context.Context, dbUser *model.User,
 	if err := bcrypt.CompareHashAndPassword([]byte(dbUser.Password), []byte(newPassword)); err == nil {
 		return userprovider.ErrUserPasswordSameAsOld
 	}
-	if err := validatePasswordPolicy(newPassword); err != nil {
+	if err := ValidatePasswordPolicy(newPassword); err != nil {
 		return err
 	}
 
-	hashedPassword, err := hashPassword(newPassword)
+	hashedPassword, err := HashPassword(newPassword)
 	if err != nil {
 		return err
 	}
@@ -494,7 +709,9 @@ func (s *Service) changeAppUserPassword(ctx context.Context, dbUser *model.User,
 	return nil
 }
 
-// AdminUpdate updates admin-managed mutable fields for a user.
+// AdminUpdate updates admin-managed mutable fields for a user (atomic write only).
+// Session eviction on status change is orchestrated by the identity application layer
+// (identity.UpdateUserStatus), not by this method.
 func (s *Service) AdminUpdate(ctx context.Context, operator *model.Session, username string, req AdminUserUpdateRequest) (*model.User, error) {
 	dbUser, err := s.userRepo.GetByName(ctx, username)
 	if err != nil {
@@ -507,17 +724,13 @@ func (s *Service) AdminUpdate(ctx context.Context, operator *model.Session, user
 
 	updates := make(map[string]any)
 
-	if req.DownloadAccess != nil {
-		updates["download_access"] = *req.DownloadAccess
-		dbUser.DownloadAccess = *req.DownloadAccess
+	if req.DownloadDisabled != nil {
+		updates["download_disabled"] = *req.DownloadDisabled
+		dbUser.DownloadDisabled = *req.DownloadDisabled
 	}
-	if req.UploadAccess != nil {
-		updates["upload_access"] = *req.UploadAccess
-		dbUser.UploadAccess = *req.UploadAccess
-	}
-	if req.TerminalAccess != nil {
-		updates["terminal_access"] = *req.TerminalAccess
-		dbUser.TerminalAccess = *req.TerminalAccess
+	if req.UploadDisabled != nil {
+		updates["upload_disabled"] = *req.UploadDisabled
+		dbUser.UploadDisabled = *req.UploadDisabled
 	}
 	if req.Status != nil {
 		status := model.UserStatusCode(*req.Status)
@@ -527,9 +740,6 @@ func (s *Service) AdminUpdate(ctx context.Context, operator *model.Session, user
 		if dbUser.Status != status {
 			updates["status"] = status
 			dbUser.Status = status
-			if status != model.UserActive && s.deleteSessionsByUsername != nil {
-				_ = s.deleteSessionsByUsername(ctx, dbUser.Username)
-			}
 			s.auditSvc.LogUser(ctx, "USER_STATUS_UPDATE", "success", dbUser.Username, slog.LevelInfo, map[string]any{
 				"status": status,
 			})
@@ -538,7 +748,7 @@ func (s *Service) AdminUpdate(ctx context.Context, operator *model.Session, user
 	if req.MaxConnections != nil {
 		v := *req.MaxConnections
 		if v > 100 {
-			return nil, fmt.Errorf("maxConnections must be 0 (inherit global) or 1–100: %w", fs.ErrInvalid)
+			return nil, contract.NewValidationError("maxConnections must be 0 (inherit global) or 1–100")
 		}
 
 		// 0 = inherit global, >0 = custom quota
@@ -548,10 +758,6 @@ func (s *Service) AdminUpdate(ctx context.Context, operator *model.Session, user
 
 	if err := s.userRepo.UpdateFields(ctx, username, updates); err != nil {
 		return nil, fmt.Errorf("update fields for user %q: %w", username, err)
-	}
-
-	if s.invalidateSessionsByUsername != nil {
-		s.invalidateSessionsByUsername(dbUser.Username)
 	}
 
 	return &dbUser, nil
@@ -648,10 +854,10 @@ func (s *Service) ListScopes(ctx context.Context) ([]ScopedUser, error) {
 
 // Helper methods (used only internally)
 
-// validatePasswordPolicy checks basic password strength.
+// ValidatePasswordPolicy checks basic password strength.
 // More sophisticated rules (complexity, history, rotation) should be handled
 // by the upstream auth provider.
-func validatePasswordPolicy(password string) error {
+func ValidatePasswordPolicy(password string) error {
 	const minLen = 6
 	const maxLen = 128
 

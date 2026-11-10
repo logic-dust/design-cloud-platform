@@ -2,6 +2,7 @@ package probe
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -10,8 +11,62 @@ import (
 	pb "design-cloud-engine/internal/contract/proto"
 )
 
+type diskProbeCall struct {
+	done  chan struct{}
+	usage *pb.DiskUsage
+	err   error
+}
+
+var diskProbeGroup = struct {
+	sync.Mutex
+	calls map[string]*diskProbeCall
+}{calls: make(map[string]*diskProbeCall)}
+
+// runDiskProbe coalesces syscalls by path without registering a waiter for each
+// caller. A canceled waiter's state is released immediately even if an
+// uninterruptible filesystem syscall remains blocked.
+func runDiskProbe(ctx context.Context, path string, probe func() (*pb.DiskUsage, error)) (*pb.DiskUsage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	diskProbeGroup.Lock()
+	call, exists := diskProbeGroup.calls[path]
+	if !exists {
+		call = &diskProbeCall{done: make(chan struct{})}
+		diskProbeGroup.calls[path] = call
+	}
+	diskProbeGroup.Unlock()
+
+	if !exists {
+		go func() {
+			var usage *pb.DiskUsage
+			var err error
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					err = fmt.Errorf("disk probe panic: %v", recovered)
+				}
+				diskProbeGroup.Lock()
+				call.usage = usage
+				call.err = err
+				delete(diskProbeGroup.calls, path)
+				close(call.done)
+				diskProbeGroup.Unlock()
+			}()
+			usage, err = probe()
+		}()
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-call.done:
+		return call.usage, call.err
+	}
+}
+
 // CollectDiskUsage 并发采集所有已启用的挂载点磁盘使用情况。
-// 每个路径独立 10s timeout；底层通过 singleflight 防重入，防止挂死（如 NFS hard mount 离线）导致 goroutine 持续堆积。
+// 每个路径独立 10s timeout；底层共享每路径一个探测，避免挂死的文件系统导致等待 goroutine 持续堆积。
 func CollectDiskUsage(ctx context.Context, mounts []*pb.MountTarget) ([]*pb.DiskUsage, error) {
 	if len(mounts) == 0 {
 		return nil, nil

@@ -5,13 +5,13 @@ description: 审查 internal/contract/proto/ 中的 Protobuf 定义，识别并�
 
 # 清理 Proto 历史包袱
 
-> 本 SKILL 是一个**独立可直接触发**的专项技能，也可由 `/refactor-cleanup` 在扫描时自动调用。
+> 本 SKILL 是一个**独立可直接触发**的专项技能，也可由跨域审计 Skill 发现 Proto 问题后交接调用。
 > 它分为两个强制阶段：**先分析上报**，经用户选择确认后，**再执行破坏性重构**。
 
 ## 触发方式
 
 - **直接触发**：用户主动要求审查 `.proto` 文件的历史包袱
-- **工作流调用**：`/refactor-cleanup` 在扫描 `internal/contract/proto/` 时检测到问题，自动触发本 SKILL
+- **交接调用**：`codebase-evolution-audit` 等审计流程发现 Proto 结构问题时转交本 SKILL
 
 ## 阶段一：全面扫描与分析（自动化脚本辅助，只读）
 
@@ -47,8 +47,8 @@ grep -n "connection_id\|job\|username\|host\|port\|display\|protocol\|pid" inter
 3. **修复所有 Go 编译错误**：`go build ./...`
 4. **格式化**：`gofmt -w internal/contract/proto/`
 
-修改 `.proto` 后，项目增量门禁会自动运行 Proto 健康扫描；分析阶段可手动扫描预览。最终按门禁结果及编译/测试结果收尾。
+修改 `.proto` 后按 `.agents/README.md` 三层门禁执行（会自动运行 Proto 健康扫描）；分析阶段可手动扫描预览。
 
 ## 协议契约规范
 
-Proto 是内部集群通信协议，无外部消费者。字段号可直接复用、无需 reserved 保留——详见 [rules/proto-refactoring-rules.md](../rules/proto-refactoring-rules.md)。
+字段号复用、reserved 与命名约束以 [rules/proto-refactoring-rules.md](../../rules/proto-refactoring-rules.md) 为唯一准则，本 SKILL 不重复其条款。

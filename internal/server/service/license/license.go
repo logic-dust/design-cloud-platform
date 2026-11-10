@@ -4,22 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
-	"design-cloud-engine/internal/common"
+	"design-cloud-engine/internal/contract"
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/db"
 	"design-cloud-engine/internal/execution"
 	"design-cloud-engine/internal/model"
 	"design-cloud-engine/internal/server/cache"
-	"design-cloud-engine/internal/server/service/settings/schema"
 )
-
-type settingsService interface {
-	GetLicenseSettings(ctx context.Context) (schema.LicenseSettings, error)
-}
 
 type nodeChecker interface {
 	GetByNodeID(ctx context.Context, nodeID string) (model.Node, error)
@@ -40,7 +36,7 @@ func WithNodeRepo(repo *db.NodeRepo) Option {
 type Service struct {
 	execSvc       execution.Executor
 	licenseRepo   *db.LicenseRepo
-	settingsSvc   settingsService
+	settingsSvc   SettingsReader
 	nodeChecker   nodeChecker
 	logger        *slog.Logger
 	statusCache   *cache.TTLCache[uint, model.LicenseServiceStatus]
@@ -48,7 +44,7 @@ type Service struct {
 }
 
 // NewService 创建 license 服务实例
-func NewService(execSvc execution.Executor, licenseRepo *db.LicenseRepo, settingsSvc settingsService, logger *slog.Logger, opts ...Option) *Service {
+func NewService(execSvc execution.Executor, licenseRepo *db.LicenseRepo, settingsSvc SettingsReader, logger *slog.Logger, opts ...Option) *Service {
 	s := &Service{
 		execSvc:       execSvc,
 		licenseRepo:   licenseRepo,
@@ -94,22 +90,42 @@ func (s *Service) overlayStatus(lic *model.LicenseService) {
 }
 
 func (s *Service) validateForm(ctx context.Context, form *model.LicenseServiceBase) error {
-	if strings.TrimSpace(form.Name) == "" {
-		return fmt.Errorf("%w: license service name cannot be empty", fs.ErrInvalid)
+	form.Name = strings.TrimSpace(form.Name)
+	if form.Name == "" {
+		return contract.NewInvalidParamError("license service name cannot be empty")
 	}
 	if len(form.Name) > 64 {
-		return fmt.Errorf("%w: license service name cannot exceed 64 characters", fs.ErrInvalid)
+		return contract.NewValidationError("license service name cannot exceed 64 characters")
 	}
 	if form.Type != model.LicenseTypeFlexlm {
-		return fmt.Errorf("%w: license service type must be %q", fs.ErrInvalid, model.LicenseTypeFlexlm)
+		return contract.NewValidationError(fmt.Sprintf("license service type must be %q", model.LicenseTypeFlexlm))
 	}
-	if strings.TrimSpace(form.Address) == "" {
-		return fmt.Errorf("%w: license service address cannot be empty", fs.ErrInvalid)
+	form.Address = strings.TrimSpace(form.Address)
+	if form.Address == "" {
+		return contract.NewInvalidParamError("license service address cannot be empty")
+	}
+	if len(form.Address) > 64 {
+		return contract.NewValidationError("license service address cannot exceed 64 characters")
+	}
+	if strings.ContainsAny(form.Address, "\x00\r\n") {
+		return contract.NewValidationError("license service address contains invalid characters")
+	}
+	form.LmutilPath = strings.TrimSpace(form.LmutilPath)
+	if form.LmutilPath != "" {
+		if !filepath.IsAbs(form.LmutilPath) {
+			return contract.NewValidationError("lmutilPath must be an absolute path")
+		}
+		if strings.ContainsAny(form.LmutilPath, "\x00\r\n\t") {
+			return contract.NewValidationError("lmutilPath contains invalid characters")
+		}
+		if len(form.LmutilPath) > 256 {
+			return contract.NewValidationError("lmutilPath cannot exceed 256 characters")
+		}
 	}
 	if form.Server != "" && s.nodeChecker != nil {
 		if _, err := s.nodeChecker.GetByNodeID(ctx, form.Server); err != nil {
-			if errors.Is(err, common.ErrNotFound) {
-				return fmt.Errorf("%w: server node %q not found", fs.ErrInvalid, form.Server)
+			if errors.Is(err, contract.ErrNotFound) {
+				return contract.NewValidationError(fmt.Sprintf("server node %q not found", form.Server))
 			}
 			return fmt.Errorf("check server node %q: %w", form.Server, err)
 		}
@@ -121,13 +137,13 @@ func (s *Service) validateForm(ctx context.Context, form *model.LicenseServiceBa
 func (s *Service) GetStatus(ctx context.Context, licServiceID uint) (string, error) {
 	licInfo, err := s.licenseRepo.Get(ctx, licServiceID)
 	if err != nil {
-		if errors.Is(err, common.ErrNotFound) {
-			return "", fmt.Errorf("%w: license service %d not found", common.ErrNotFound, licServiceID)
+		if errors.Is(err, contract.ErrNotFound) {
+			return "", fmt.Errorf("%w: license service %d not found", contract.ErrNotFound, licServiceID)
 		}
 		return "", fmt.Errorf("get license service %d: %w", licServiceID, err)
 	}
 	if !licInfo.Enabled {
-		return "", fmt.Errorf("%w: license service %d not found", common.ErrNotFound, licServiceID)
+		return "", fmt.Errorf("%w: license service %d not found", contract.ErrNotFound, licServiceID)
 	}
 
 	status, err := s.statusCache.GetWithTTL(ctx, licServiceID, s.statusCacheTTL(ctx), func(ctx context.Context, id uint) (model.LicenseServiceStatus, error) {
@@ -145,7 +161,7 @@ func (s *Service) Status(ctx context.Context, licInfo *model.LicenseService) (mo
 	case model.LicenseTypeFlexlm:
 		return s.flexLMStatus(ctx, licInfo)
 	default:
-		return "", fmt.Errorf("%w: unsupported license type %q", fs.ErrInvalid, licInfo.Type)
+		return "", contract.NewValidationError(fmt.Sprintf("unsupported license type %q", licInfo.Type))
 	}
 }
 
@@ -157,13 +173,13 @@ func (s *Service) Status(ctx context.Context, licInfo *model.LicenseService) (mo
 func (s *Service) ListFeatures(ctx context.Context, licServiceID uint) ([]featureInfo, error) {
 	licService, err := s.licenseRepo.Get(ctx, licServiceID)
 	if err != nil {
-		if errors.Is(err, common.ErrNotFound) {
-			return nil, fmt.Errorf("%w: license service %d not found", common.ErrNotFound, licServiceID)
+		if errors.Is(err, contract.ErrNotFound) {
+			return nil, fmt.Errorf("%w: license service %d not found", contract.ErrNotFound, licServiceID)
 		}
 		return nil, fmt.Errorf("get license service %d: %w", licServiceID, err)
 	}
 	if !licService.Enabled {
-		return nil, fmt.Errorf("%w: license service %d not found", common.ErrNotFound, licServiceID)
+		return nil, fmt.Errorf("%w: license service %d not found", contract.ErrNotFound, licServiceID)
 	}
 
 	switch licService.Type {
@@ -172,7 +188,7 @@ func (s *Service) ListFeatures(ctx context.Context, licServiceID uint) ([]featur
 			return s.flexLMListFeatures(ctx, &licService)
 		})
 	default:
-		return nil, fmt.Errorf("%w: unsupported license type %q", fs.ErrInvalid, licService.Type)
+		return nil, contract.NewValidationError(fmt.Sprintf("unsupported license type %q", licService.Type))
 	}
 }
 
@@ -197,6 +213,17 @@ func (s *Service) List(ctx context.Context) ([]model.LicenseService, error) {
 	return out, nil
 }
 
+func (s *Service) ListPage(ctx context.Context, limit, offset int) ([]model.LicenseService, int64, error) {
+	services, total, err := s.licenseRepo.ListPage(ctx, limit, offset, true)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list license services: %w", err)
+	}
+	for i := range services {
+		s.overlayStatus(&services[i])
+	}
+	return services, total, nil
+}
+
 // Get returns an enabled license service by ID with status overlay
 func (s *Service) Get(ctx context.Context, id uint) (model.LicenseService, error) {
 	licService, err := s.licenseRepo.Get(ctx, id)
@@ -204,7 +231,7 @@ func (s *Service) Get(ctx context.Context, id uint) (model.LicenseService, error
 		return model.LicenseService{}, fmt.Errorf("get license service %d: %w", id, err)
 	}
 	if !licService.Enabled {
-		return model.LicenseService{}, fmt.Errorf("license service %d: %w", id, common.ErrNotFound)
+		return model.LicenseService{}, fmt.Errorf("license service %d: %w", id, contract.ErrNotFound)
 	}
 	s.overlayStatus(&licService)
 	return licService, nil
@@ -220,6 +247,17 @@ func (s *Service) AdminList(ctx context.Context) ([]model.LicenseService, error)
 		s.overlayStatus(&services[i])
 	}
 	return services, nil
+}
+
+func (s *Service) AdminListPage(ctx context.Context, limit, offset int) ([]model.LicenseService, int64, error) {
+	services, total, err := s.licenseRepo.ListPage(ctx, limit, offset, false)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list license services: %w", err)
+	}
+	for i := range services {
+		s.overlayStatus(&services[i])
+	}
+	return services, total, nil
 }
 
 // AdminGet returns a license service by ID (including disabled) with status overlay for admins

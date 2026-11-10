@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"design-cloud-engine/internal/contract/schema"
 	"design-cloud-engine/internal/model"
-	"design-cloud-engine/internal/server/service/settings/schema"
 
 	"github.com/stretchr/testify/require"
 )
@@ -32,7 +32,7 @@ func TestGetAuthSettings_StoredValueValidation(t *testing.T) {
 	}
 
 	t.Run("合法值被保留", func(t *testing.T) {
-		setStored(`{"sessionTTL":7200,"maxLoginSessionsPerUser":3,"maxUserLoginAttempts":7,` +
+		setStored(`{"sessionTTL":7200,"maxSessionsPerUser":3,"maxUserLoginAttempts":7,` +
 			`"maxIPLoginAttempts":30,"userBanDuration":600,"ipBanDuration":7200,` +
 			`"idMappingFoundCacheTTL":3600,"idMappingNotFoundCacheTTL":1200}`)
 
@@ -44,7 +44,7 @@ func TestGetAuthSettings_StoredValueValidation(t *testing.T) {
 	})
 
 	t.Run("越过 min 约束", func(t *testing.T) {
-		setStored(`{"sessionTTL":7200,"maxLoginSessionsPerUser":3,"maxUserLoginAttempts":7,` +
+		setStored(`{"sessionTTL":7200,"maxSessionsPerUser":3,"maxUserLoginAttempts":7,` +
 			`"maxIPLoginAttempts":30,"userBanDuration":600,"ipBanDuration":7200,` +
 			`"idMappingFoundCacheTTL":0,"idMappingNotFoundCacheTTL":600}`)
 
@@ -54,7 +54,7 @@ func TestGetAuthSettings_StoredValueValidation(t *testing.T) {
 	})
 
 	t.Run("越过 max 约束", func(t *testing.T) {
-		setStored(`{"sessionTTL":7200,"maxLoginSessionsPerUser":3,"maxUserLoginAttempts":7,` +
+		setStored(`{"sessionTTL":7200,"maxSessionsPerUser":3,"maxUserLoginAttempts":7,` +
 			`"maxIPLoginAttempts":30,"userBanDuration":600,"ipBanDuration":7200,` +
 			`"idMappingFoundCacheTTL":99999999,"idMappingNotFoundCacheTTL":600}`)
 
@@ -64,7 +64,7 @@ func TestGetAuthSettings_StoredValueValidation(t *testing.T) {
 	})
 
 	t.Run("跨字段不变量被破坏", func(t *testing.T) {
-		setStored(`{"sessionTTL":7200,"maxLoginSessionsPerUser":3,"maxUserLoginAttempts":7,` +
+		setStored(`{"sessionTTL":7200,"maxSessionsPerUser":3,"maxUserLoginAttempts":7,` +
 			`"maxIPLoginAttempts":30,"userBanDuration":600,"ipBanDuration":7200,` +
 			`"idMappingFoundCacheTTL":700,"idMappingNotFoundCacheTTL":900}`)
 

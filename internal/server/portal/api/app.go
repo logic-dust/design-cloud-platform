@@ -1,8 +1,6 @@
 package api
 
 import (
-	"net/http"
-
 	"github.com/labstack/echo/v5"
 
 	"design-cloud-engine/internal/server/portal/httputil"
@@ -29,11 +27,12 @@ func (h *appHandler) appsAPI(g *echo.Group) {
 // --- 获取当前用户的应用列表
 func (h *appHandler) listApps(c *echo.Context) error {
 	requestUser := httputil.CurrentUsername(c)
-	list, err := h.app.ListAccessible(c.Request().Context(), requestUser)
+	p := httputil.ParsePage(c)
+	list, total, err := h.app.ListAccessiblePage(c.Request().Context(), requestUser, p.Limit, p.Offset)
 	if err != nil {
 		return httputil.RespondError(c, err)
 	}
-	return c.JSON(http.StatusOK, httputil.Response{Data: list})
+	return httputil.RespondPage(c, list, total)
 }
 
 // --- 根据应用 ID 获取应用详情
@@ -47,7 +46,7 @@ func (h *appHandler) getApp(c *echo.Context) error {
 		return httputil.RespondError(c, err)
 	}
 
-	return c.JSON(http.StatusOK, httputil.Response{Data: app})
+	return httputil.RespondOK(c, app)
 }
 
 // --- 启动应用
@@ -67,5 +66,5 @@ func (h *appHandler) launchApp(c *echo.Context) error {
 	statusURL := schedulerJobsBasePath + result["id"]
 	c.Response().Header().Set(echo.HeaderLocation, statusURL)
 
-	return c.JSON(http.StatusAccepted, httputil.Response{Data: result})
+	return httputil.RespondAccepted(c, result)
 }
